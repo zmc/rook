@@ -34,6 +34,8 @@ spec:
   cephVersion:
     image: ceph/ceph:v14.2.4-20190917
     allowUnsupported: false
+  skipUpgradeChecks: false
+  continueUpgradeAfterChecksEvenIfNotHealthy: false
   dashboard:
     enabled: true
     ssl: true
