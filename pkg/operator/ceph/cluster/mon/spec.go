@@ -359,6 +359,9 @@ func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Dep
 
 		logger.Infof("checking if we can %s the deployment %s", action, deployment.Name)
 
+		// force the upgrade to continue even if not healthy and ignore the setting from the CR in OCS 4.2
+		continueUpgradeAfterChecksEvenIfNotHealthy = true
+
 		if action == "stop" {
 			err := client.OkToStop(context, namespace, deployment.Name, daemonType, daemonName, cephVersion)
 			if err != nil {
