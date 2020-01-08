@@ -159,7 +159,7 @@ func (c *clusterConfig) startRGWPods() error {
 				logger.Debugf("current cluster version for rgws before upgrading is: %+v", currentCephVersion)
 				cephVersionToUse = currentCephVersion
 			}
-			if err := updateDeploymentAndWait(c.context, deployment, c.store.Namespace, daemon, daemonLetterID, cephVersionToUse, c.isUpgrade, c.skipUpgradeChecks); err != nil {
+			if err := updateDeploymentAndWait(c.context, deployment, c.store.Namespace, daemon, daemonLetterID, cephVersionToUse, c.isUpgrade, c.skipUpgradeChecks, false); err != nil {
 				return fmt.Errorf("failed to update object store %s deployment %s. %+v", c.store.Name, deployment.Name, err)
 			}
 		}

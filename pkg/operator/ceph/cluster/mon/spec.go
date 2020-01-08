@@ -344,7 +344,7 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 }
 
 // UpdateCephDeploymentAndWait verifies a deployment can be stopped or continued
-func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Deployment, namespace, daemonType, daemonName string, cephVersion cephver.CephVersion, isUpgrade, skipUpgradeChecks bool) error {
+func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Deployment, namespace, daemonType, daemonName string, cephVersion cephver.CephVersion, isUpgrade, skipUpgradeChecks, continueUpgradeAfterChecksEvenIfNotHealthy bool) error {
 
 	callback := func(action string) error {
 		if !isUpgrade {
@@ -359,17 +359,30 @@ func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Dep
 
 		logger.Infof("checking if we can %s the deployment %s", action, deployment.Name)
 
+		// force the upgrade to continue even if not healthy and ignore the setting from the CR in OCS 4.2
+		continueUpgradeAfterChecksEvenIfNotHealthy = true
+
 		if action == "stop" {
 			err := client.OkToStop(context, namespace, deployment.Name, daemonType, daemonName, cephVersion)
 			if err != nil {
-				return fmt.Errorf("failed to check if we can %s the deployment %s: %+v", action, deployment.Name, err)
+				if continueUpgradeAfterChecksEvenIfNotHealthy {
+					logger.Infof("The %s daemon %s is not ok-to-stop but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so proceeding to stop...", daemonType, daemonName)
+					return nil
+				} else {
+					return fmt.Errorf("failed to check if we can %s the deployment %s: %+v", action, deployment.Name, err)
+				}
 			}
 		}
 
 		if action == "continue" {
 			err := client.OkToContinue(context, namespace, deployment.Name, daemonType, daemonName)
 			if err != nil {
-				return fmt.Errorf("failed to check if we can %s the deployment %s: %+v", action, deployment.Name, err)
+				if continueUpgradeAfterChecksEvenIfNotHealthy {
+					logger.Infof("The %s daemon %s is not ok-to-stop but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so continuing...", daemonType, daemonName)
+					return nil
+				} else {
+					return fmt.Errorf("failed to check if we can %s the deployment %s: %+v", action, deployment.Name, err)
+				}
 			}
 		}
 
