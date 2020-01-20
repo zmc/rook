@@ -1173,6 +1173,8 @@ func (m *CephManifestsV1_0) GetRookCluster(settings *ClusterSettings) string {
 		store = `storeType: "` + settings.StoreType + `"`
 	}
 
+	// disable dashboard of the upgrade test, because upgrading Ceph from Mimic to Nautilus with Rook
+	// v1.0 can stall for a LONG time on updating the mgr module
 	return `apiVersion: ceph.rook.io/v1
 kind: CephCluster
 metadata:
@@ -1189,7 +1191,7 @@ spec:
     count: ` + strconv.Itoa(settings.Mons) + `
     allowMultiplePerNode: true
   dashboard:
-    enabled: true
+    enabled: false
   rbdMirroring:
     workers: ` + strconv.Itoa(settings.RBDMirrorWorkers) + `
   metadataDevice:
@@ -1414,10 +1416,6 @@ func (m *CephManifestsV1_0) GetObc(claimName string, storageClassName string, ob
 	panic("upgrade test not supported for object bucket claim")
 }
 
-func (m *CephManifestsV1_0) GetClient(claimName string, namespace string) string {
-	panic("upgrade test not supported for client")
-}
-
-func (m *CephManifestsV1_0) UpdateClient(claimName string, namespace string) string {
+func (m *CephManifestsV1_0) GetClient(claimName string, namespace string, caps map[string]string) string {
 	panic("upgrade test not supported for client")
 }

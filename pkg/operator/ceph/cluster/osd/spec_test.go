@@ -87,7 +87,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "rook/rook:myversion", cephVersion,
-		storageSpec, dataDir, rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, dataDir, rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false, false)
 
 	devMountNeeded := deviceName != "" || allDevices
 
@@ -184,7 +184,7 @@ func TestStorageSpecDevicesAndDirectories(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "rook/rook:myversion", cephv1.CephVersionSpec{},
-		storageSpec, "/var/lib/rook", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, "/var/lib/rook", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false, false)
 
 	n := c.DesiredStorage.ResolveNode(storageSpec.Nodes[0].Name)
 	osd := OSDInfo{
@@ -260,7 +260,7 @@ func TestStorageSpecConfig(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "rook/rook:myversion", cephv1.CephVersionSpec{},
-		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false, false)
 
 	n := c.DesiredStorage.ResolveNode(storageSpec.Nodes[0].Name)
 	storeConfig := config.ToStoreConfig(storageSpec.Nodes[0].Config)
@@ -318,7 +318,7 @@ func TestHostNetwork(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "myversion", cephv1.CephVersionSpec{},
-		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{HostNetwork: true}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{HostNetwork: true}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false, false)
 
 	n := c.DesiredStorage.ResolveNode(storageSpec.Nodes[0].Name)
 	osd := OSDInfo{
@@ -366,7 +366,7 @@ func TestOsdPrepareResources(t *testing.T) {
 
 	clientset := fake.NewSimpleClientset()
 	c := New(&cephconfig.ClusterInfo{}, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "myversion", cephv1.CephVersionSpec{},
-		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false, false)
 
 	// TEST 2: NOT running on PVC and some prepareResources are specificied
 	rr := v1.ResourceRequirements{
@@ -394,4 +394,18 @@ func TestCephVolumeEnvVar(t *testing.T) {
 	assert.Equal(t, "1", cvEnv[1].Value)
 	assert.Equal(t, "DM_DISABLE_UDEV", cvEnv[2].Name)
 	assert.Equal(t, "1", cvEnv[1].Value)
+}
+
+func TestOsdActivateEnvVar(t *testing.T) {
+	osdActivateEnv := osdActivateEnvVar()
+	assert.Equal(t, 5, len(osdActivateEnv))
+	assert.Equal(t, "CEPH_VOLUME_DEBUG", osdActivateEnv[0].Name)
+	assert.Equal(t, "1", osdActivateEnv[0].Value)
+	assert.Equal(t, "CEPH_VOLUME_SKIP_RESTORECON", osdActivateEnv[1].Name)
+	assert.Equal(t, "1", osdActivateEnv[1].Value)
+	assert.Equal(t, "DM_DISABLE_UDEV", osdActivateEnv[2].Name)
+	assert.Equal(t, "1", osdActivateEnv[1].Value)
+	assert.Equal(t, "ROOK_CEPH_MON_HOST", osdActivateEnv[3].Name)
+	assert.Equal(t, "CEPH_ARGS", osdActivateEnv[4].Name)
+	assert.Equal(t, "-m $(ROOK_CEPH_MON_HOST)", osdActivateEnv[4].Value)
 }

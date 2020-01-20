@@ -32,6 +32,7 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	"github.com/rook/rook/pkg/operator/ceph/cluster/crash"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
@@ -39,6 +40,7 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
 	cephspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/version"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -122,21 +124,21 @@ func (c *cluster) detectCephVersion(rookImage, cephImage string, timeout time.Du
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to extract ceph version")
 	}
-	logger.Infof("Detected ceph image version: %s", version)
+	logger.Infof("Detected ceph image version: %q", version)
 	return version, nil
 }
 
 func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	if !c.Spec.External.Enable {
 		if !version.IsAtLeast(cephver.Minimum) {
-			return errors.Errorf("the version does not meet the minimum version: %s", cephver.Minimum.String())
+			return errors.Errorf("the version does not meet the minimum version: %q", cephver.Minimum.String())
 		}
 
 		if !version.Supported() {
-			logger.Warningf("unsupported ceph version detected: %s.", version)
 			if !c.Spec.CephVersion.AllowUnsupported {
 				return errors.Errorf("allowUnsupported must be set to true to run with this version: %+v", version)
 			}
+			logger.Warningf("unsupported ceph version detected: %q, pursuing", version)
 		}
 	}
 
@@ -151,7 +153,7 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 		// Write connection info (ceph config file and keyring) for ceph commands
 		err = mon.WriteConnectionConfig(c.context, clusterInfo)
 		if err != nil {
-			logger.Errorf("failed to write config. Attempting to continue. %+v", err)
+			logger.Errorf("failed to write config. attempting to continue. %v", err)
 		}
 	}
 
@@ -178,14 +180,14 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	// Get cluster running versions
 	versions, err := client.GetAllCephDaemonVersions(c.context, c.Namespace)
 	if err != nil {
-		logger.Errorf("failed to get ceph daemons versions. %+v", err)
+		logger.Errorf("failed to get ceph daemons versions. %v", err)
 		return nil
 	}
 
 	runningVersions := *versions
 	differentImages, err := diffImageSpecAndClusterRunningVersion(*version, runningVersions)
 	if err != nil {
-		logger.Errorf("failed to determine if we should upgrade or not. %+v", err)
+		logger.Errorf("failed to determine if we should upgrade or not. %v", err)
 		// we shouldn't block the orchestration if we can't determine the version of the image spec, we proceed anyway in best effort
 		// we won't be able to check if there is an update or not and what to do, so we don't check the cluster status either
 		// This will happen if someone uses ceph/daemon:latest-master for instance
@@ -223,7 +225,7 @@ func (c *cluster) createInstance(rookImage string, cephVersion cephver.CephVersi
 	// while no other goroutine is already running a cluster update
 	for c.checkSetOrchestrationStatus() == true {
 		if err != nil {
-			logger.Errorf("There was an orchestration error, but there is another orchestration pending; proceeding with next orchestration run (which may succeed). %+v", err)
+			logger.Errorf("There was an orchestration error, but there is another orchestration pending; proceeding with next orchestration run (which may succeed). %v", err)
 		}
 		// Use a DeepCopy of the spec to avoid using an inconsistent data-set
 		spec := c.Spec.DeepCopy()
@@ -289,7 +291,8 @@ func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVers
 		// Start the OSDs
 		osds := osd.New(c.Info, c.context, c.Namespace, rookImage, spec.CephVersion, spec.Storage, spec.DataDirHostPath,
 			cephv1.GetOSDPlacement(spec.Placement), cephv1.GetOSDAnnotations(spec.Annotations), spec.Network,
-			cephv1.GetOSDResources(spec.Resources), cephv1.GetPrepareOSDResources(spec.Resources), cephv1.GetOSDPriorityClassName(spec.PriorityClassNames), c.ownerRef, c.isUpgrade, c.Spec.SkipUpgradeChecks)
+			cephv1.GetOSDResources(spec.Resources), cephv1.GetPrepareOSDResources(spec.Resources),
+			cephv1.GetOSDPriorityClassName(spec.PriorityClassNames), c.ownerRef, c.isUpgrade, c.Spec.SkipUpgradeChecks, c.Spec.ContinueUpgradeAfterChecksEvenIfNotHealthy)
 		err = osds.Start()
 		if err != nil {
 			return errors.Wrapf(err, "failed to start the osds")
@@ -377,7 +380,7 @@ func (c *cluster) checkSetOrchestrationStatus() bool {
 }
 
 // This function compare the Ceph spec image and the cluster running version
-// It returns false if the image is different and true if identical
+// It returns true if the image is different and false if identical
 func diffImageSpecAndClusterRunningVersion(imageSpecVersion cephver.CephVersion, runningVersions client.CephDaemonsVersions) (bool, error) {
 	numberOfCephVersions := len(runningVersions.Overall)
 	if numberOfCephVersions == 0 {
@@ -395,16 +398,15 @@ func diffImageSpecAndClusterRunningVersion(imageSpecVersion cephver.CephVersion,
 		for v := range runningVersions.Overall {
 			version, err := cephver.ExtractCephVersion(v)
 			if err != nil {
-				logger.Errorf("failed to extract ceph version. %+v", err)
+				logger.Errorf("failed to extract ceph version. %v", err)
 				return false, err
 			}
 			clusterRunningVersion := *version
 
 			// If this is the same version
-			// We return 'true' so that we restart using the Ceph checks
 			if cephver.IsIdentical(clusterRunningVersion, imageSpecVersion) {
 				logger.Debugf("both cluster and image spec versions are identical, doing nothing %s", imageSpecVersion.String())
-				return true, nil
+				return false, nil
 			}
 
 			if cephver.IsSuperior(imageSpecVersion, clusterRunningVersion) {
@@ -429,6 +431,15 @@ func (c *cluster) postMonStartupActions() error {
 	err := csi.CreateCSISecrets(c.context, c.Namespace, &c.ownerRef)
 	if err != nil {
 		return errors.Wrapf(err, "failed to create csi kubernetes secrets")
+	}
+
+	// Create Crash Collector Secret
+	// In 14.2.5 the crash daemon will read the client.crash key instead of the admin key
+	if c.Info.CephVersion.IsAtLeast(version.CephVersion{Major: 14, Minor: 2, Extra: 5}) {
+		err = crash.CreateCrashCollectorSecret(c.context, c.Namespace, &c.ownerRef)
+		if err != nil {
+			return errors.Wrapf(err, "failed to create crash collector kubernetes secret")
+		}
 	}
 
 	// Enable Ceph messenger 2 protocol on Nautilus

@@ -36,8 +36,8 @@ const (
 )
 
 var validTopologyLabelKeys = []string{
-	"failure-domain.beta.kubernetes.io",
-	"failure-domain.kubernetes.io",
+	"failure-domain.beta.kubernetes.io", // deprecated in 1.17
+	"topology.kubernetes.io",
 	TopologyLabelPrefix,
 }
 
@@ -119,6 +119,10 @@ func GetNodeHostName(clientset kubernetes.Interface, nodeName string) (string, e
 	if err != nil {
 		return "", err
 	}
+	return GetNodeHostNameLabel(node)
+}
+
+func GetNodeHostNameLabel(node *v1.Node) (string, error) {
 	hostname, ok := node.Labels[v1.LabelHostname]
 	if !ok {
 		return "", fmt.Errorf("hostname not found on the node")

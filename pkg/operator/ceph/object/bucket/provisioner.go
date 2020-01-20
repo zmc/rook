@@ -78,7 +78,8 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 		return nil, errors.Wrapf(err, "Provision: can't create ceph user")
 	}
 
-	s3svc, err := NewS3Agent(p.accessKeyID, p.secretAccessKey, p.storeDomainName)
+	s3svc, err := NewS3Agent(p.accessKeyID, p.secretAccessKey, p.getObjectStoreEndpoint())
+
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +139,7 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 		return nil, errors.Wrapf(err, "could not get user (user: %s)", stats.Owner)
 	}
 
-	s3svc, err := NewS3Agent(*objectUser.AccessKey, *objectUser.SecretKey, p.storeDomainName)
+	s3svc, err := NewS3Agent(*objectUser.AccessKey, *objectUser.SecretKey, p.getObjectStoreEndpoint())
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +230,7 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 		return errors.Errorf("querying user %q returned nil", p.cephUserName)
 	}
 
-	s3svc, err := NewS3Agent(*user.AccessKey, *user.SecretKey, p.storeDomainName)
+	s3svc, err := NewS3Agent(*user.AccessKey, *user.SecretKey, p.getObjectStoreEndpoint())
 	if err != nil {
 		return err
 	}
@@ -243,7 +244,7 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 			logger.Errorf("no bucket policy for bucket %q, so no need to drop policy", p.bucketName)
 
 		} else {
-			logger.Errorf("error getting policy for bucket %q: %v", p.bucketName, err)
+			logger.Errorf("error getting policy for bucket %q. %v", p.bucketName, err)
 			return err
 		}
 	}
@@ -277,7 +278,7 @@ func (p *Provisioner) initializeCreateOrGrant(options *apibkt.BucketOptions) err
 	scName := options.ObjectBucketClaim.Spec.StorageClassName
 	sc, err := p.getStorageClassWithBackoff(scName)
 	if err != nil {
-		logger.Errorf("failed to get storage class for OBC \"%s/%s\": %v", obc.Namespace, obc.Name, err)
+		logger.Errorf("failed to get storage class for OBC %q in namespace %q. %v", obc.Name, obc.Namespace, err)
 		return err
 	}
 
@@ -413,4 +414,8 @@ func (p *Provisioner) setBucketName(name string) {
 func (p *Provisioner) setRegion(sc *storagev1.StorageClass) {
 	const key = "region"
 	p.region = sc.Parameters[key]
+}
+
+func (p Provisioner) getObjectStoreEndpoint() string {
+	return fmt.Sprintf("%s:%d", p.storeDomainName, p.storePort)
 }

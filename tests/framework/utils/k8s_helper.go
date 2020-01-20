@@ -55,7 +55,7 @@ type K8sHelper struct {
 
 const (
 	// RetryLoop params for tests.
-	RetryLoop = 80
+	RetryLoop = 60
 	// RetryInterval param for test - wait time while in RetryLoop
 	RetryInterval = 5
 	// TestMountPath is the path inside a test pod where storage is mounted
@@ -101,10 +101,11 @@ func (k8sh *K8sHelper) VersionAtLeast(minVersion string) bool {
 	return v.AtLeast(version.MustParseSemantic(minVersion))
 }
 
-func (k8sh *K8sHelper) VersionMinorMatches(minVersion string) bool {
-	v := version.MustParseSemantic(k8sh.GetK8sServerVersion())
+func (k8sh *K8sHelper) VersionMinorMatches(minVersion string) (string, bool) {
+	kubeVersion := k8sh.GetK8sServerVersion()
+	v := version.MustParseSemantic(kubeVersion)
 	requestedVersion := version.MustParseSemantic(minVersion)
-	return v.Major() == requestedVersion.Major() && v.Minor() == requestedVersion.Minor()
+	return kubeVersion, v.Major() == requestedVersion.Major() && v.Minor() == requestedVersion.Minor()
 }
 
 func (k8sh *K8sHelper) MakeContext() *clusterd.Context {
@@ -1602,8 +1603,15 @@ func IsKubectlErrorNotFound(output string, err error) bool {
 // WaitForDeploymentCount waits until the desired number of deployments with the label exist. The
 // deployments are not guaranteed to be running, only existing.
 func (k8sh *K8sHelper) WaitForDeploymentCount(label, namespace string, count int) error {
+	return k8sh.WaitForDeploymentCountWithRetries(label, namespace, count, RetryLoop)
+}
+
+// WaitForDeploymentCountWithRetries waits until the desired number of deployments with the label
+// exist, retrying the specified number of times. The deployments are not guaranteed to be running,
+// only existing.
+func (k8sh *K8sHelper) WaitForDeploymentCountWithRetries(label, namespace string, count, retries int) error {
 	options := metav1.ListOptions{LabelSelector: label}
-	for i := 0; i < RetryLoop; i++ {
+	for i := 0; i < retries; i++ {
 		deps, err := k8sh.Clientset.AppsV1().Deployments(namespace).List(options)
 		numDeps := 0
 		if err == nil {

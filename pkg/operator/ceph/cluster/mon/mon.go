@@ -233,7 +233,7 @@ func (c *Cluster) startMons(targetCount int) error {
 			// fixed by updating the mon deployments. Instead of returning error here, log a
 			// warning, and retry setting this later.
 			setConfigsNeedsRetry = true
-			logger.Warningf("failed to set Rook and/or user-defined Ceph config options before starting mons; will retry after starting mons. %+v", err)
+			logger.Warningf("failed to set Rook and/or user-defined Ceph config options before starting mons; will retry after starting mons. %v", err)
 		}
 	}
 
@@ -564,7 +564,7 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 			logger.Infof("assignmon: cleaning up canary deployment %s and canary pvc %s", result.CanaryDeployment, result.CanaryPVC)
 			if result.CanaryDeployment != "" {
 				if err := k8sutil.DeleteDeployment(c.context.Clientset, c.Namespace, result.CanaryDeployment); err != nil {
-					logger.Infof("assignmon: error deleting canary deployment %s. %+v", result.CanaryDeployment, err)
+					logger.Infof("assignmon: error deleting canary deployment %s. %v", result.CanaryDeployment, err)
 				}
 			}
 			if result.CanaryPVC != "" {
@@ -573,7 +573,7 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 				options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
 				err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(result.CanaryPVC, options)
 				if err != nil {
-					logger.Infof("assignmon: error removing canary monitor %s pvc %s. %+v", result.CanaryDeployment, result.CanaryPVC, err)
+					logger.Infof("assignmon: error removing canary monitor %s pvc %s. %v", result.CanaryDeployment, result.CanaryPVC, err)
 				}
 			}
 		}
@@ -645,10 +645,22 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 			logger.Infof("0 of %d expected mon deployments exist. creating new deployment(s).", len(mons))
 			onlyCheckQuorumOnce = true
 		} else {
-			logger.Warningf("failed to list mon deployments. attempting to continue. %+v", err)
+			logger.Warningf("failed to list mon deployments. attempting to continue. %v", err)
 		}
-	} else if len(deployments.Items) < len(mons) {
+	}
+
+	readyReplicas := 0
+	// Ensuring the mon deployments should be ready
+	for _, deploy := range deployments.Items {
+		if deploy.Status.AvailableReplicas > 0 {
+			readyReplicas++
+		}
+	}
+	if len(deployments.Items) < len(mons) {
 		logger.Infof("%d of %d expected mon deployments exist. creating new deployment(s).", len(deployments.Items), len(mons))
+		onlyCheckQuorumOnce = true
+	} else if readyReplicas == 0 {
+		logger.Infof("%d of %d expected mons are ready. creating or updating deployments without checking quorum in attempt to achieve a healthy mon cluster", readyReplicas, len(mons))
 		onlyCheckQuorumOnce = true
 	}
 
@@ -666,7 +678,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 			// we need to do everything possible to verify the basic health of a cluster, complete the first orchestration,
 			// and start watching for all the CRs. If mons still have quorum we can continue with the orchestration even
 			// if they aren't all up.
-			logger.Errorf("attempting to continue after failing to start mon %q. %+v", mons[i].DaemonName, err)
+			logger.Errorf("attempting to continue after failing to start mon %q. %v", mons[i].DaemonName, err)
 		}
 
 		// For the initial deployment (first creation) it's expected to not have all the monitors in quorum
@@ -687,7 +699,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	// Only do this when monitors versions are different so we don't block the orchestration if a mon is down.
 	versions, err := client.GetAllCephDaemonVersions(c.context, c.ClusterInfo.Name)
 	if err != nil {
-		logger.Warningf("failed to get ceph daemons versions; this likely means there is no cluster yet. %+v", err)
+		logger.Warningf("failed to get ceph daemons versions; this likely means there is no cluster yet. %v", err)
 	} else {
 		if len(versions.Mon) != 1 {
 			requireAllInQuorum = true
@@ -785,7 +797,7 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 	if c.isUpgrade {
 		currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.ClusterInfo.Name, daemonType)
 		if err != nil {
-			logger.Warningf("failed to retrieve current ceph %s version. %+v", daemonType, err)
+			logger.Warningf("failed to retrieve current ceph %q version. %v", daemonType, err)
 			logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with %+v", c.ClusterInfo.CephVersion)
 			cephVersionToUse = c.ClusterInfo.CephVersion
 		} else {
@@ -794,7 +806,7 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 		}
 	}
 
-	err := updateDeploymentAndWait(c.context, d, c.Namespace, daemonType, m.DaemonName, cephVersionToUse, c.isUpgrade, c.spec.SkipUpgradeChecks)
+	err := updateDeploymentAndWait(c.context, d, c.Namespace, daemonType, m.DaemonName, cephVersionToUse, c.isUpgrade, c.spec.SkipUpgradeChecks, false)
 	if err != nil {
 		return errors.Wrapf(err, "failed to update mon deployment %s", m.ResourceName)
 	}
@@ -937,7 +949,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterName string, mons [
 		for _, m := range mons {
 			running, err := k8sutil.PodsRunningWithLabel(context.Clientset, clusterName, fmt.Sprintf("app=%s,mon=%s", AppName, m))
 			if err != nil {
-				logger.Infof("failed to query mon pod status, trying again. %+v", err)
+				logger.Infof("failed to query mon pod status, trying again. %v", err)
 				continue
 			}
 			if running > 0 {
@@ -957,7 +969,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterName string, mons [
 		// their quorum status
 		monQuorumStatusResp, err := client.GetMonQuorumStatus(context, clusterName, false)
 		if err != nil {
-			logger.Debugf("failed to get quorum_status. %+v", err)
+			logger.Debugf("failed to get quorum_status. %v", err)
 			continue
 		}
 

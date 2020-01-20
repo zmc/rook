@@ -114,7 +114,7 @@ func (a *OsdAgent) configureDirs(context *clusterd.Context, dirs map[string]int)
 
 		osd, err := a.prepareOSD(context, cfg)
 		if err != nil {
-			logger.Errorf("failed to config osd in path %s. %+v", dirPath, err)
+			logger.Errorf("failed to config osd in path %q. %v", dirPath, err)
 			lastErr = err
 		} else {
 			succeeded++
@@ -126,30 +126,6 @@ func (a *OsdAgent) configureDirs(context *clusterd.Context, dirs map[string]int)
 	return osds, lastErr
 }
 
-func (a *OsdAgent) removeDirs(context *clusterd.Context, removedDirs map[string]int) error {
-	if len(removedDirs) == 0 {
-		return nil
-	}
-
-	// walk through each of the OSD directories and remove them
-	var failedDirs []string
-	for dir, osdID := range removedDirs {
-		if err := a.removeOSDConfigDir(dir, osdID); err != nil {
-			errMsg := fmt.Sprintf("failed to remove osd.%d. %+v", osdID, err)
-			logger.Error(errMsg)
-			failedDirs = append(failedDirs, dir)
-			continue
-		}
-	}
-
-	if len(failedDirs) > 0 {
-		// at least one OSD failed, return an overall error
-		return errors.Errorf("failed to cleanup directories: %+v", failedDirs)
-	}
-
-	return nil
-}
-
 func (a *OsdAgent) configureDevices(context *clusterd.Context, devices *DeviceOsdMapping) ([]oposd.OSDInfo, error) {
 
 	var cvSupported bool
@@ -159,7 +135,7 @@ func (a *OsdAgent) configureDevices(context *clusterd.Context, devices *DeviceOs
 	} else {
 		cvSupported, err = getCephVolumeSupported(context)
 		if err != nil {
-			logger.Errorf("failed to detect if ceph-volume is available. %+v", err)
+			logger.Errorf("failed to detect if ceph-volume is available. %v", err)
 		}
 	}
 
@@ -191,7 +167,7 @@ func (a *OsdAgent) configureDevices(context *clusterd.Context, devices *DeviceOs
 
 	// compute an OSD layout scheme that will optimize performance
 	scheme, cvDevices, err := a.getPartitionPerfScheme(context, devices, cvSupported)
-	logger.Debugf("partition scheme: %+v, err: %+v", scheme, err)
+	logger.Debugf("partition scheme: %+v. %v", scheme, err)
 	if err != nil {
 		return osds, errors.Wrapf(err, "failed to get OSD partition scheme")
 	}
@@ -246,40 +222,6 @@ func getDeviceLVPath(context *clusterd.Context, deviceName string) (string, erro
 		return "", errors.Errorf("no logical volume path found for device %q", deviceName)
 	}
 	return output, nil
-}
-
-func (a *OsdAgent) removeDevices(context *clusterd.Context, removedDevicesScheme *config.PerfScheme) error {
-	if removedDevicesScheme == nil || len(removedDevicesScheme.Entries) == 0 {
-		return nil
-	}
-
-	var errorMessages []string
-
-	// now start removing each OSD since they should now be running
-	for _, entry := range removedDevicesScheme.Entries {
-
-		if err := a.removeOSDConfigDir(context.ConfigDir, entry.ID); err != nil {
-			errMsg := fmt.Sprintf("failed to remove osd.%d. %+v", entry.ID, err)
-			logger.Error(errMsg)
-			errorMessages = append(errorMessages, errMsg)
-			continue
-		}
-
-		// remove OSD from partition scheme map
-		if err := config.RemoveFromScheme(entry, a.kv, config.GetConfigStoreName(a.nodeName)); err != nil {
-			errMsg := fmt.Sprintf("failed to remove osd.%d from scheme. %+v", entry.ID, err)
-			logger.Error(errMsg)
-			errorMessages = append(errorMessages, errMsg)
-			continue
-		}
-	}
-
-	if len(errorMessages) > 0 {
-		// at least one OSD failed, return an overall error
-		return errors.Errorf("%s", strings.Join(errorMessages, "\n"))
-	}
-
-	return nil
 }
 
 // computes a partitioning scheme for all the given desired devices.  This could be devices already in use,
@@ -505,7 +447,7 @@ func (a *OsdAgent) prepareOSD(context *clusterd.Context, cfg *osdConfig) (*oposd
 		// update the osd config file
 		err := writeConfigFile(cfg, context, a.cluster)
 		if err != nil {
-			logger.Warningf("failed to update config file. %+v", err)
+			logger.Warningf("failed to update config file. %v", err)
 		}
 
 		// osd_data_dir/ready already exists, meaning the OSD is already set up.
@@ -536,7 +478,7 @@ func prepareOSDRoot(cfg *osdConfig) (newOSD bool, err error) {
 	// osd is new (it's not ready), make sure there is no stale state in the OSD dir by deleting the entire thing
 	logger.Infof("osd.%d appears to be new, cleaning the root dir at %s", cfg.id, cfg.rootPath)
 	if err := os.RemoveAll(cfg.rootPath); err != nil {
-		logger.Warningf("failed to clean osd.%d root dir at %s, will proceed with starting osd: %+v", cfg.id, cfg.rootPath, err)
+		logger.Warningf("failed to clean osd.%d root dir at %q, will proceed with starting osd. %v", cfg.id, cfg.rootPath, err)
 	}
 
 	// prepare the osd dir by creating it now
@@ -575,7 +517,7 @@ func (a *OsdAgent) removeOSDConfigDir(configRoot string, id int) error {
 	osdRootDir := getOSDRootDir(configRoot, id)
 	logger.Infof("deleting osd dir: %s", osdRootDir)
 	if err := os.RemoveAll(osdRootDir); err != nil {
-		logger.Warningf("failed to delete osd.%d root dir from %s, it may need to be cleaned up manually: %+v",
+		logger.Warningf("failed to delete osd.%d root dir from %q, it may need to be cleaned up manually. %v",
 			id, osdRootDir, err)
 	}
 

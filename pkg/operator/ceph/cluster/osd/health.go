@@ -23,6 +23,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -42,11 +43,12 @@ type Monitor struct {
 	context                        *clusterd.Context
 	clusterName                    string
 	removeOSDsIfOUTAndSafeToRemove bool
+	cephVersion                    cephver.CephVersion
 }
 
 // NewMonitor instantiates OSD monitoring
-func NewMonitor(context *clusterd.Context, clusterName string, removeOSDsIfOUTAndSafeToRemove bool) *Monitor {
-	return &Monitor{context, clusterName, removeOSDsIfOUTAndSafeToRemove}
+func NewMonitor(context *clusterd.Context, clusterName string, removeOSDsIfOUTAndSafeToRemove bool, cephVersion cephver.CephVersion) *Monitor {
+	return &Monitor{context, clusterName, removeOSDsIfOUTAndSafeToRemove, cephVersion}
 }
 
 // Start runs monitoring logic for osds status at set intervals
@@ -58,7 +60,7 @@ func (m *Monitor) Start(stopCh chan struct{}) {
 			logger.Debug("Checking osd processes status.")
 			err := m.osdStatus()
 			if err != nil {
-				logger.Warningf("Failed OSD status check: %+v", err)
+				logger.Warningf("failed OSD status check. %v", err)
 			}
 
 		case <-stopCh:
@@ -106,7 +108,7 @@ func (m *Monitor) osdStatus() error {
 			logger.Debugf("osd.%d is marked 'OUT'", id)
 			if m.removeOSDsIfOUTAndSafeToRemove {
 				if err := m.handleOSDMarkedOut(id); err != nil {
-					logger.Errorf("Error handling marked out osd osd.%d: %v", id, err)
+					logger.Errorf("error handling marked out osd osd.%d. %v", id, err)
 				}
 			}
 		}
@@ -125,7 +127,7 @@ func (m *Monitor) handleOSDMarkedOut(outOSDid int) error {
 		return errors.Wrapf(err, "failed to get osd deployment of osd id %d", outOSDid)
 	}
 	if len(dp.Items) != 0 {
-		safeToDestroyOSD, err := client.OsdSafeToDestroy(m.context, m.clusterName, outOSDid)
+		safeToDestroyOSD, err := client.OsdSafeToDestroy(m.context, m.clusterName, outOSDid, m.cephVersion)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get osd deployment of osd id %d", outOSDid)
 		}

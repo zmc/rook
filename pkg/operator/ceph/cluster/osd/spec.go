@@ -59,10 +59,14 @@ const (
 	activateOSDMountPath                = "/var/lib/ceph/osd/ceph-"
 	blockPVCMapperInitContainer         = "blkdevmapper"
 	osdMemoryTargetSafetyFactor float32 = 0.8
-	CephDeviceSetLabelKey               = "ceph.rook.io/DeviceSet"
-	CephSetIndexLabelKey                = "ceph.rook.io/setIndex"
-	CephDeviceSetPVCIDLabelKey          = "ceph.rook.io/DeviceSetPVCId"
-	OSDOverPVCLabelKey                  = "ceph.rook.io/pvc"
+	// CephDeviceSetLabelKey is the Rook device set label key
+	CephDeviceSetLabelKey = "ceph.rook.io/DeviceSet"
+	// CephSetIndexLabelKey is the Rook label key index
+	CephSetIndexLabelKey = "ceph.rook.io/setIndex"
+	// CephDeviceSetPVCIDLabelKey is the Rook PVC ID label key
+	CephDeviceSetPVCIDLabelKey = "ceph.rook.io/DeviceSetPVCId"
+	// OSDOverPVCLabelKey is the Rook PVC label key
+	OSDOverPVCLabelKey = "ceph.rook.io/pvc"
 )
 
 const (
@@ -95,6 +99,13 @@ chown --verbose --recursive ceph:ceph "$OSD_DATA_DIR"
 # remove the temporary directory
 rm --recursive --force "$TMP_DIR"
 `
+)
+
+// OSDs on PVC using a certain storage class need to do some tuning
+const (
+	osdRecoverySleep = "0.1"
+	osdSnapTrimSleep = "2"
+	osdDeleteSleep   = "2"
 )
 
 func (c *Cluster) makeJob(osdProps osdProperties, provisionConfig *provisionConfig) (*batch.Job, error) {
@@ -180,6 +191,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		volumeMounts = append(volumeMounts, devMount)
 	}
 
+	// If the OSD runs on PVC
 	if osdProps.pvc.ClaimName != "" {
 		// Create volume config for PVCs
 		volumes = append(volumes, getPVCOSDVolumes(&osdProps)...)
@@ -196,7 +208,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 
 	osdID := strconv.Itoa(osd.ID)
 	tiniEnvVar := v1.EnvVar{Name: "TINI_SUBREAPER", Value: ""}
-	envVars := append(c.getConfigEnvVars(osdProps.storeConfig, dataDir, osdProps.crushHostname, osdProps.location), []v1.EnvVar{
+	envVars := append(c.getConfigEnvVars(osdProps, dataDir), []v1.EnvVar{
 		tiniEnvVar,
 	}...)
 	envVars = append(envVars, k8sutil.ClusterDaemonEnvVars(c.cephVersion.Image)...)
@@ -211,7 +223,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 					Key: "mon_host"}}},
 		{Name: "CEPH_ARGS", Value: "-m $(ROOK_CEPH_MON_HOST)"},
 	}...)
-	configEnvVars := append(c.getConfigEnvVars(osdProps.storeConfig, dataDir, osdProps.crushHostname, osdProps.location), []v1.EnvVar{
+	configEnvVars := append(c.getConfigEnvVars(osdProps, dataDir), []v1.EnvVar{
 		tiniEnvVar,
 		{Name: "ROOK_OSD_ID", Value: osdID},
 		{Name: "ROOK_CEPH_VERSION", Value: c.clusterInfo.CephVersion.CephVersionFormatted()},
@@ -222,7 +234,6 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 
 	// default args when the ceph cluster isn't initialized
-
 	defaultArgs := []string{
 		"--foreground",
 		"--id", osdID,
@@ -233,6 +244,15 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 
 	var commonArgs []string
+
+	// If the OSD runs on PVC
+	if osdProps.pvc.ClaimName != "" && osdProps.tuneSlowDeviceClass {
+		// Append tuning flag if necessary
+		err := c.osdRunFlagTuningOnPVC(osd.ID)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to apply tuning on osd %q", strconv.Itoa(osd.ID))
+		}
+	}
 
 	// Set osd memory target to the best appropriate value
 	if !osd.IsFileStore {
@@ -504,6 +524,10 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	if !osdProps.portable {
 		deployment.Spec.Template.Spec.NodeSelector = map[string]string{v1.LabelHostname: osdProps.crushHostname}
 	}
+	// Replace default unreachable node toleration if the osd pod is portable and based in PVC
+	if osdProps.pvc.ClaimName != "" && osdProps.portable {
+		k8sutil.AddUnreachableNodeToleration(&deployment.Spec.Template.Spec)
+	}
 
 	k8sutil.AddRookVersionLabelToDeployment(deployment)
 	c.annotations.ApplyToObjectMeta(&deployment.ObjectMeta)
@@ -540,7 +564,7 @@ func (c *Cluster) getCopyBinariesContainer() (v1.Volume, *v1.Container) {
 // This container runs all the actions needed to activate an OSD before we can run the OSD process
 func (c *Cluster) getActivateOSDInitContainer(osdID, osdUUID string, isFilestore bool, osdProps osdProperties) (v1.Volume, *v1.Container) {
 	volume := v1.Volume{Name: activateOSDVolumeName, VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}}
-	envVars := cephVolumeEnvVar()
+	envVars := osdActivateEnvVar()
 	osdStore := "--bluestore"
 	if isFilestore {
 		osdStore = "--filestore"
@@ -552,6 +576,7 @@ func (c *Cluster) getActivateOSDInitContainer(osdID, osdUUID string, isFilestore
 	volMounts := []v1.VolumeMount{
 		{Name: activateOSDVolumeName, MountPath: activateOSDMountPathID},
 		{Name: "devices", MountPath: "/dev"},
+		{Name: k8sutil.ConfigOverrideName, ReadOnly: true, MountPath: opconfig.EtcCephDir},
 	}
 
 	privileged := true
@@ -657,8 +682,8 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 	}, nil
 }
 
-// Currently we can't mount a block mode pv directly to a priviliged container
-// So we mount it to a non priviliged init container and then copy it to a common directory mounted inside init container
+// Currently we can't mount a block mode pv directly to a privileged container
+// So we mount it to a non privileged init container and then copy it to a common directory mounted inside init container
 // and the privileged provision container.
 func (c *Cluster) getPVCInitContainer(pvc v1.PersistentVolumeClaimVolumeSource) v1.Container {
 	return v1.Container{
@@ -684,9 +709,9 @@ func (c *Cluster) getPVCInitContainer(pvc v1.PersistentVolumeClaimVolumeSource) 
 	}
 }
 
-func (c *Cluster) getConfigEnvVars(storeConfig config.StoreConfig, dataDir, nodeName, location string) []v1.EnvVar {
+func (c *Cluster) getConfigEnvVars(osdProps osdProperties, dataDir string) []v1.EnvVar {
 	envVars := []v1.EnvVar{
-		nodeNameEnvVar(nodeName),
+		nodeNameEnvVar(osdProps.crushHostname),
 		{Name: "ROOK_CLUSTER_ID", Value: string(c.ownerRef.UID)},
 		k8sutil.PodIPEnvVar(k8sutil.PrivateIPEnvVar),
 		k8sutil.PodIPEnvVar(k8sutil.PublicIPEnvVar),
@@ -705,29 +730,37 @@ func (c *Cluster) getConfigEnvVars(storeConfig config.StoreConfig, dataDir, node
 		k8sutil.NodeEnvVar(),
 	}
 
+	// Give a hint to the prepare pod for what the host in the CRUSH map should be
+	crushmapHostname := osdProps.crushHostname
+	if !osdProps.portable && osdProps.pvc.ClaimName != "" {
+		// If it's a pvc that's not portable we only know what the host name should be when inside the osd prepare pod
+		crushmapHostname = ""
+	}
+	envVars = append(envVars, v1.EnvVar{Name: "ROOK_CRUSHMAP_HOSTNAME", Value: crushmapHostname})
+
 	// Append ceph-volume environment variables
 	envVars = append(envVars, cephVolumeEnvVar()...)
 
 	// deliberately skip setting osdStoreEnvVarName (ROOK_OSD_STORE) as a quick means to deprecate
 	// creating new disk-based Filestore OSDs
 
-	if storeConfig.DatabaseSizeMB != 0 {
-		envVars = append(envVars, v1.EnvVar{Name: osdDatabaseSizeEnvVarName, Value: strconv.Itoa(storeConfig.DatabaseSizeMB)})
+	if osdProps.storeConfig.DatabaseSizeMB != 0 {
+		envVars = append(envVars, v1.EnvVar{Name: osdDatabaseSizeEnvVarName, Value: strconv.Itoa(osdProps.storeConfig.DatabaseSizeMB)})
 	}
 
-	if storeConfig.WalSizeMB != 0 {
-		envVars = append(envVars, v1.EnvVar{Name: osdWalSizeEnvVarName, Value: strconv.Itoa(storeConfig.WalSizeMB)})
+	if osdProps.storeConfig.WalSizeMB != 0 {
+		envVars = append(envVars, v1.EnvVar{Name: osdWalSizeEnvVarName, Value: strconv.Itoa(osdProps.storeConfig.WalSizeMB)})
 	}
 
-	if storeConfig.JournalSizeMB != 0 {
-		envVars = append(envVars, v1.EnvVar{Name: osdJournalSizeEnvVarName, Value: strconv.Itoa(storeConfig.JournalSizeMB)})
+	if osdProps.storeConfig.JournalSizeMB != 0 {
+		envVars = append(envVars, v1.EnvVar{Name: osdJournalSizeEnvVarName, Value: strconv.Itoa(osdProps.storeConfig.JournalSizeMB)})
 	}
 
-	if storeConfig.OSDsPerDevice != 0 {
-		envVars = append(envVars, v1.EnvVar{Name: osdsPerDeviceEnvVarName, Value: strconv.Itoa(storeConfig.OSDsPerDevice)})
+	if osdProps.storeConfig.OSDsPerDevice != 0 {
+		envVars = append(envVars, v1.EnvVar{Name: osdsPerDeviceEnvVarName, Value: strconv.Itoa(osdProps.storeConfig.OSDsPerDevice)})
 	}
 
-	if storeConfig.EncryptedDevice {
+	if osdProps.storeConfig.EncryptedDevice {
 		envVars = append(envVars, v1.EnvVar{Name: encryptedDeviceEnvVarName, Value: "true"})
 	}
 
@@ -736,7 +769,7 @@ func (c *Cluster) getConfigEnvVars(storeConfig config.StoreConfig, dataDir, node
 
 func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMount v1.VolumeMount, provisionConfig *provisionConfig) v1.Container {
 
-	envVars := c.getConfigEnvVars(osdProps.storeConfig, k8sutil.DataDir, osdProps.crushHostname, osdProps.location)
+	envVars := c.getConfigEnvVars(osdProps, k8sutil.DataDir)
 
 	devMountNeeded := false
 	if osdProps.pvc.ClaimName != "" {
@@ -822,10 +855,7 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 			}
 			volumeMounts = append(volumeMounts, v1.VolumeMount{Name: k8sutil.PathToVolumeName(dpath), MountPath: dpath})
 		}
-
-		if !IsRemovingNode(osdProps.selection.DeviceFilter) {
-			envVars = append(envVars, dataDirectoriesEnvVar(strings.Join(dirPaths, ",")))
-		}
+		envVars = append(envVars, dataDirectoriesEnvVar(strings.Join(dirPaths, ",")))
 	}
 
 	// elevate to be privileged if it is going to mount devices or if running in a restricted environment such as openshift
@@ -874,7 +904,7 @@ func getPVCOSDVolumes(osdProps *osdProperties) []v1.Volume {
 			},
 		},
 		{
-			// We need a bridge mount which is basically a common volume mount between the non priviliged init container
+			// We need a bridge mount which is basically a common volume mount between the non privileged init container
 			// and the privileged provision container or osd daemon container
 			// The reason for this is mentioned in the comment for getPVCInitContainer() method
 			Name: fmt.Sprintf("%s-bridge", osdProps.pvc.ClaimName),
@@ -978,7 +1008,7 @@ func osdOnSDNFlag(network cephv1.NetworkSpec, v cephver.CephVersion) []string {
 	return args
 }
 
-func makeStorageClassDeviceSetPVCID(storageClassDeviceSetName string, setIndex, pvcIndex int) (pvcId, pvcLabelSelector string) {
+func makeStorageClassDeviceSetPVCID(storageClassDeviceSetName string, setIndex, pvcIndex int) (pvcID, pvcLabelSelector string) {
 	pvcStorageClassDeviceSetPVCId := fmt.Sprintf("%s-%v", storageClassDeviceSetName, setIndex)
 	return pvcStorageClassDeviceSetPVCId, fmt.Sprintf("%s=%s", CephDeviceSetPVCIDLabelKey, pvcStorageClassDeviceSetPVCId)
 }
@@ -1029,4 +1059,40 @@ func cephVolumeEnvVar() []v1.EnvVar {
 		// LVM will manage the relevant nodes in /dev directly.
 		{Name: "DM_DISABLE_UDEV", Value: "1"},
 	}
+}
+
+func osdActivateEnvVar() []v1.EnvVar {
+	monEnvVars := []v1.EnvVar{
+		{Name: "ROOK_CEPH_MON_HOST",
+			ValueFrom: &v1.EnvVarSource{
+				SecretKeyRef: &v1.SecretKeySelector{LocalObjectReference: v1.LocalObjectReference{
+					Name: "rook-ceph-config"},
+					Key: "mon_host"}}},
+		{Name: "CEPH_ARGS", Value: "-m $(ROOK_CEPH_MON_HOST)"},
+	}
+
+	return append(cephVolumeEnvVar(), monEnvVars...)
+}
+
+func (c *Cluster) osdRunFlagTuningOnPVC(osdID int) error {
+	who := fmt.Sprintf("osd.%d", osdID)
+	do := make(map[string]string)
+
+	// Time in seconds to sleep before next recovery or backfill op
+	do["osd_recovery_sleep"] = osdRecoverySleep
+	// Time in seconds to sleep before next snap trim
+	do["osd_snap_trim_sleep"] = osdSnapTrimSleep
+	// Time in seconds to sleep before next removal transaction
+	do["osd_delete_sleep"] = osdDeleteSleep
+
+	monStore := opconfig.GetMonStore(c.context, c.Namespace)
+
+	for flag, val := range do {
+		err := monStore.Set(who, flag, val)
+		if err != nil {
+			return errors.Wrapf(err, "failed to set %q to %q on %q", flag, val, who)
+		}
+	}
+
+	return nil
 }

@@ -70,10 +70,11 @@ rules:
   - policy
   - apps
   resources:
-  #this is for the clusterdisruption controller
+  # This is for the clusterdisruption controller
   - poddisruptionbudgets
-  #this is for both clusterdisruption and nodedrain controllers
+  # This is for both clusterdisruption and nodedrain controllers
   - deployments
+  - replicasets
   verbs:
   - "*"
 - apiGroups:
@@ -98,40 +99,30 @@ rules:
   - create
   - update
   - delete
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - csidrivers
+  verbs:
+  - create
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
-kind: Role
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
 metadata:
-  name: rook-ceph-system
-  namespace: ROOK_SYSTEM_NAMESPACE
-  labels:
-    operator: rook
-    storage-backend: ceph
-rules:
-  - apiGroups:
-      - ""
-    resources:
-      - pods
-      - configmaps
-      - services
-    verbs:
-      - get
-      - list
-      - watch
-      - patch
-      - create
-      - update
-      - delete
-  - apiGroups:
-      - apps
-    resources:
-      - daemonsets
-      - statefulsets
-      - deployments
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - delete
+  name: cephclients.ceph.rook.io
+spec:
+  group: ceph.rook.io
+  names:
+    kind: CephClient
+    listKind: CephClientList
+    plural: cephclients
+    singular: cephclient
+  scope: Namespaced
+  version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            caps:
+              type: object

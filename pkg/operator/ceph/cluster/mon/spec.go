@@ -198,6 +198,10 @@ func (c *Cluster) makeMonPod(monConfig *monConfig) *v1.Pod {
 	if c.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
+	// Replace default unreachable node toleration
+	if c.spec.Mon.VolumeClaimTemplate != nil {
+		k8sutil.AddUnreachableNodeToleration(&podSpec)
+	}
 
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -327,7 +331,7 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 }
 
 // UpdateCephDeploymentAndWait verifies a deployment can be stopped or continued
-func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Deployment, namespace, daemonType, daemonName string, cephVersion cephver.CephVersion, isUpgrade, skipUpgradeChecks bool) error {
+func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Deployment, namespace, daemonType, daemonName string, cephVersion cephver.CephVersion, isUpgrade, skipUpgradeChecks, continueUpgradeAfterChecksEvenIfNotHealthy bool) error {
 
 	callback := func(action string) error {
 		if !isUpgrade {
@@ -345,14 +349,24 @@ func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Dep
 		if action == "stop" {
 			err := client.OkToStop(context, namespace, deployment.Name, daemonType, daemonName, cephVersion)
 			if err != nil {
-				return errors.Wrapf(err, "failed to check if we can %s the deployment %s", action, deployment.Name)
+				if continueUpgradeAfterChecksEvenIfNotHealthy {
+					logger.Infof("The %s daemon %s is not ok-to-stop but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so proceeding to stop...", daemonType, daemonName)
+					return nil
+				} else {
+					return errors.Wrapf(err, "failed to check if we can %s the deployment %s", action, deployment.Name)
+				}
 			}
 		}
 
 		if action == "continue" {
 			err := client.OkToContinue(context, namespace, deployment.Name, daemonType, daemonName)
 			if err != nil {
-				return errors.Wrapf(err, "failed to check if we can %s the deployment %s", action, deployment.Name)
+				if continueUpgradeAfterChecksEvenIfNotHealthy {
+					logger.Infof("The %s daemon %s is not ok-to-stop but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so continuing...", daemonType, daemonName)
+					return nil
+				} else {
+					return errors.Wrapf(err, "failed to check if we can %s the deployment %s", action, deployment.Name)
+				}
 			}
 		}
 
