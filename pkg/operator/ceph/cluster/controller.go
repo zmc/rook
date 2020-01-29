@@ -47,6 +47,7 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/object/bucket"
 	objectuser "github.com/rook/rook/pkg/operator/ceph/object/user"
 	"github.com/rook/rook/pkg/operator/ceph/pool"
+	"github.com/rook/rook/pkg/operator/ceph/spec"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 
@@ -298,13 +299,14 @@ func (c *ClusterController) configureExternalCephCluster(namespace, name string,
 			return errors.Wrapf(err, "failed to detect and validate ceph version")
 		}
 
-		// Write the rook-ceph-config configmap (used by various daemons to apply config overrides)
+		// Write the rook-config-override configmap (used by various daemons to apply config overrides)
 		// If we don't do this, daemons will never start, waiting forever for this configmap to be present
 		//
 		// Only do this when doing a bit of management...
-		err = config.GetStore(cluster.context, namespace, &cluster.ownerRef).CreateOrUpdate(cluster.Info)
+		logger.Info("creating 'rook-ceph-config' configmap.")
+		err = populateConfigOverrideConfigMap(cluster.context, namespace, cluster.ownerRef)
 		if err != nil {
-			return errors.Wrapf(err, "failed to set config store")
+			return errors.Wrapf(err, "failed to populate config override config map")
 		}
 	}
 
@@ -686,7 +688,7 @@ func (c *ClusterController) detectAndValidateCephVersion(cluster *cluster, image
 	if err := cluster.validateCephVersion(version); err != nil {
 		return nil, false, err
 	}
-	cephver.RegisterImageVersion(image, *version)
+	c.updateClusterCephVersion(cluster.Namespace, cluster.crdName, image, *version)
 	return version, false, nil
 }
 
@@ -1048,6 +1050,26 @@ func (c *ClusterController) updateClusterStatus(namespace, name string, state ce
 	cluster.Status.Message = message
 	if _, err := c.context.RookClientset.CephV1().CephClusters(namespace).Update(cluster); err != nil {
 		logger.Errorf("failed to update cluster %q status: %v", namespace, err)
+	}
+}
+
+func (c *ClusterController) updateClusterCephVersion(namespace string, name string, image string, cephVersion cephver.CephVersion) {
+	logger.Infof("cluster %q: version %q detected for image %q", namespace, cephVersion.String(), image)
+
+	// get the most recent cluster CRD object
+	cluster, err := c.context.RookClientset.CephV1().CephClusters(namespace).Get(name, metav1.GetOptions{})
+	if err != nil {
+		logger.Errorf("failed to get cluster from namespace %q prior to updating its Ceph version to %q. %v", namespace, cephVersion.String(), err)
+	}
+	clusterVersion := &cephv1.ClusterVersion{
+		Image:   image,
+		Version: spec.GetCephVersionLabel(cephVersion),
+	}
+	// update the Ceph version on the retrieved cluster object
+	// do not overwrite the ceph status that is updated in a separate goroutine
+	cluster.Status.CephVersion = clusterVersion
+	if _, err := c.context.RookClientset.CephV1().CephClusters(namespace).Update(cluster); err != nil {
+		logger.Errorf("failed to update version for cluster %q. %v", namespace, err)
 	}
 }
 
