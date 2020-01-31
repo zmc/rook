@@ -22,9 +22,6 @@ spec:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
             - "--leader-election=true"
-            {{ if .SetAttacherLeaderElectionType }}
-            - "--leader-election-type=leases"
-            {{ end }}
             - "--timeout=150s"
             - "--leader-election-namespace={{ .Namespace }}"
           env:
