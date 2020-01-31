@@ -34,7 +34,6 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-        {{ if .EnableResizer }}
         - name: csi-resizer
           image: {{ .ResizerImage }}
           args:
@@ -50,7 +49,6 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-        {{ end }}
         - name: csi-provisioner
           image: {{ .ProvisionerImage }}
           args:

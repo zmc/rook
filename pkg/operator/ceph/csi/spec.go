@@ -48,7 +48,6 @@ type Param struct {
 	ForceCephFSKernelClient       string
 	CephFSPluginUpdateStrategy    string
 	RBDPluginUpdateStrategy       string
-	EnableResizer                 bool
 	SetAttacherLeaderElectionType bool
 	CephFSGRPCMetricsPort         uint16
 	CephFSLivenessMetricsPort     uint16
@@ -93,7 +92,7 @@ var (
 // manually challenging.
 var (
 	// image names
-	DefaultCSIPluginImage   = "quay.io/cephcsi/cephcsi:v1.2.2"
+	DefaultCSIPluginImage   = "quay.io/cephcsi/cephcsi:v2.0.0"
 	DefaultRegistrarImage   = "quay.io/k8scsi/csi-node-driver-registrar:v1.2.0"
 	DefaultProvisionerImage = "quay.io/k8scsi/csi-provisioner:v1.4.0"
 	DefaultAttacherImage    = "quay.io/k8scsi/csi-attacher:v1.2.0"
@@ -227,14 +226,6 @@ func StartCSIDrivers(namespace string, clientset kubernetes.Interface, ver *vers
 	if len(attacher) > 1 {
 		if strings.HasPrefix(attacher[1], "v1.2.") {
 			tp.SetAttacherLeaderElectionType = true
-		}
-	}
-
-	csiPluginImage := strings.Split(CSIParam.CSIPluginImage, ":")
-	// as ceph-csi v2.x.x support resizer, enable it
-	if len(csiPluginImage) > 1 {
-		if strings.HasPrefix(csiPluginImage[1], "v2.") {
-			tp.EnableResizer = true
 		}
 	}
 
