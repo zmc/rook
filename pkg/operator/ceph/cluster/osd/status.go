@@ -25,9 +25,8 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/util"
-	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 )
@@ -62,11 +61,11 @@ func (c *provisionConfig) addError(message string, args ...interface{}) {
 	c.errorMessages = append(c.errorMessages, fmt.Sprintf(message, args...))
 }
 
-func (c *Cluster) updateOSDStatus(node string, status OrchestrationStatus) error {
-	return UpdateNodeStatus(c.kv, node, status)
+func (c *Cluster) updateOSDStatus(node string, status OrchestrationStatus) {
+	UpdateNodeStatus(c.kv, node, status)
 }
 
-func UpdateNodeStatus(kv *k8sutil.ConfigMapKVStore, node string, status OrchestrationStatus) error {
+func UpdateNodeStatus(kv *k8sutil.ConfigMapKVStore, node string, status OrchestrationStatus) {
 	labels := map[string]string{
 		k8sutil.AppAttr:        AppName,
 		orchestrationStatusKey: provisioningLabelKey,
@@ -81,17 +80,15 @@ func UpdateNodeStatus(kv *k8sutil.ConfigMapKVStore, node string, status Orchestr
 		string(s),
 		labels,
 	); err != nil {
-		return fmt.Errorf("failed to set node %s status. %+v", node, err)
+		// log the error, but allow the orchestration to continue even if the status update failed
+		logger.Errorf("failed to set node %q status to %q for osd orchestration. %s", node, status.Status, status.Message)
 	}
-	return nil
 }
 
 func (c *Cluster) handleOrchestrationFailure(config *provisionConfig, nodeName, message string) {
 	config.addError(message)
 	status := OrchestrationStatus{Status: OrchestrationStatusFailed, Message: message}
-	if err := c.updateOSDStatus(nodeName, status); err != nil {
-		config.addError("failed to update status for node %s. %+v", nodeName, err)
-	}
+	UpdateNodeStatus(c.kv, nodeName, status)
 }
 
 func isStatusCompleted(status OrchestrationStatus) bool {
@@ -111,7 +108,7 @@ func parseOrchestrationStatus(data map[string]string) *OrchestrationStatus {
 	// we have status for this node, unmarshal it
 	var status OrchestrationStatus
 	if err := json.Unmarshal([]byte(statusRaw), &status); err != nil {
-		logger.Warningf("failed to unmarshal orchestration status. status: %s. %+v", statusRaw, err)
+		logger.Warningf("failed to unmarshal orchestration status. status: %s. %v", statusRaw, err)
 		return nil
 	}
 
@@ -135,8 +132,8 @@ func (c *Cluster) checkNodesCompleted(selector string, config *provisionConfig, 
 	// check the status map to see if the node is already completed before we start watching
 	statuses, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).List(opts)
 	if err != nil {
-		if !errors.IsNotFound(err) {
-			config.addError("failed to get config status. %+v", err)
+		if !kerrors.IsNotFound(err) {
+			config.addError("failed to get config status. %v", err)
 			return 0, remainingNodes, false, statuses, err
 		}
 		// the status map doesn't exist yet, watching below is still an OK thing to do
@@ -185,7 +182,7 @@ func (c *Cluster) completeOSDsForAllNodes(config *provisionConfig, configOSDs bo
 
 		w, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Watch(opts)
 		if err != nil {
-			logger.Warningf("failed to start watch on osd status, trying again. %+v", err)
+			logger.Warningf("failed to start watch on osd status, trying again. %v", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -199,9 +196,7 @@ func (c *Cluster) completeOSDsForAllNodes(config *provisionConfig, configOSDs bo
 					logger.Infof("orchestration status config map result channel closed, will restart watch.")
 					w.Stop()
 					<-time.After(5 * time.Second)
-					leftNodes := 0
-					leftRemainingNodes := util.NewSet()
-					leftNodes, leftRemainingNodes, completed, statuses, err = c.checkNodesCompleted(selector, config, configOSDs)
+					leftNodes, leftRemainingNodes, completed, _, err := c.checkNodesCompleted(selector, config, configOSDs)
 					if err == nil {
 						if completed {
 							logger.Infof("additional %d/%d node(s) completed osd provisioning", leftNodes, originalNodes)
@@ -243,7 +238,7 @@ func (c *Cluster) completeOSDsForAllNodes(config *provisionConfig, configOSDs bo
 					for remainingNode := range remainingNodes.Iter() {
 						clearNodeName := k8sutil.TruncateNodeName(orchestrationStatusMapName, remainingNode)
 						if err := c.kv.ClearStore(clearNodeName); err != nil {
-							config.addError("failed to clear node %s status with name %s. %+v", remainingNode, clearNodeName, err)
+							config.addError("failed to clear node %q status with name %q. %v", remainingNode, clearNodeName, err)
 						}
 					}
 					return false
@@ -270,7 +265,9 @@ func (c *Cluster) handleStatusConfigMapStatus(nodeName string, config *provision
 				c.startOSDDaemonsOnNode(nodeName, config, configMap, status)
 			}
 			// remove the status configmap that indicated the progress
-			c.kv.ClearStore(fmt.Sprintf(orchestrationStatusMapName, nodeName))
+			if err := c.kv.ClearStore(fmt.Sprintf(orchestrationStatusMapName, nodeName)); err != nil {
+				logger.Errorf("failed to remove the status configmap. %v", err)
+			}
 		}
 
 		return true
@@ -279,85 +276,6 @@ func (c *Cluster) handleStatusConfigMapStatus(nodeName string, config *provision
 	if status.Status == OrchestrationStatusFailed {
 		config.addError("orchestration for node %s failed: %+v", nodeName, status)
 		return true
-	}
-	return false
-}
-
-func IsRemovingNode(devices string) bool {
-	return devices == "none"
-}
-
-func (c *Cluster) findRemovedNodes() (map[string][]*apps.Deployment, error) {
-	removedNodes := map[string][]*apps.Deployment{}
-
-	// first discover the storage nodes that are still running
-	discoveredNodes, err := c.discoverStorageNodes()
-	if err != nil {
-		return nil, fmt.Errorf("aborting search for removed nodes. failed to discover storage nodes. %+v", err)
-	}
-
-	// c.ValidStorage.Nodes currently in the cluster `c` is only the subset of the user-defined
-	// nodes which are currently valid, and we want a list which can include nodes that are cordoned
-	// for maintenance or have automatic Kubernetes well-known taints added.
-	k8sNodes, err := k8sutil.GetKubernetesNodesMatchingRookNodes(c.DesiredStorage.Nodes, c.context.Clientset)
-	if err != nil {
-		return nil, fmt.Errorf("aborting search for removed nodes. failed to list nodes from Kubernetes. %+v", err)
-	}
-	nodeMap := map[string]v1.Node{}
-	for _, n := range k8sNodes {
-		hostname := n.Labels[v1.LabelHostname]
-		nodeMap[hostname] = n
-	}
-
-	for existingNode, osdDeployments := range discoveredNodes {
-		var nodeRef *v1.Node
-		if n, ok := nodeMap[existingNode]; !ok {
-			nodeRef = nil
-		} else {
-			nodeRef = &n
-		}
-		reason := ""
-		if c.nodeRemovedByUser(existingNode, nodeRef) {
-			logger.Infof("adding node %s to the removed nodes list. %s", existingNode, reason)
-			removedNodes[existingNode] = osdDeployments
-		}
-	}
-
-	return removedNodes, nil
-}
-
-// sample of conditions where we cannot determine if the user wants to remove a node as an osd host:
-//  - if the node is not schedulable, it may be cordoned for maintenance
-//  - if the node is not ready, it could be down temporarily
-func (c *Cluster) nodeRemovedByUser(nodeName string, k8sNode *v1.Node) bool {
-	if c.DesiredStorage.UseAllNodes == false {
-		// for maximum Ceph data safety, when useAllNodes == false, the *only* way to get Rook to
-		// remove a node is by explicit removal from the cluster resource
-		if !c.DesiredStorage.NodeWithNameExists(nodeName) {
-			logger.Debugf("node removed by user. node %s was removed from the cluster definition", nodeName)
-			return true
-		}
-	}
-	if c.DesiredStorage.UseAllNodes == true {
-		// node nil means that the node does not exist in or has been deleted from kubernetes
-		if k8sNode == nil {
-			logger.Debugf("node removed by user. node %s does not exist in Kubernetes", nodeName)
-			return true
-		}
-
-		// without deleting a node from Kubernetes, taints and affinities are the provided
-		// method for users to remove nodes from the cluster when useAllNodes == true
-		ignoreWellKnownTaints := true
-		placeable, err := k8sutil.NodeMeetsPlacementTerms(*k8sNode, c.placement, ignoreWellKnownTaints)
-		if err != nil {
-			logger.Errorf("assuming node is not removed to err on the side of caution."+
-				" failed to determine if node %s meets Rook's placement terms. %+v", nodeName, err)
-			return false
-		}
-		if !placeable {
-			logger.Debugf("node removed by user. node %s has had taints or affinities modified.", nodeName)
-			return true
-		}
 	}
 	return false
 }

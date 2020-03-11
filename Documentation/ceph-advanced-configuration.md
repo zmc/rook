@@ -9,6 +9,19 @@ indent: true
 These examples show how to perform advanced configuration tasks on your Rook
 storage cluster.
 
+* [Prerequisites](#prerequisites)
+* [Use custom Ceph user and secret for mounting](#use-custom-ceph-user-and-secret-for-mounting)
+* [Log Collection](#log-collection)
+* [OSD Information](#osd-information)
+* [Separate Storage Groups](#separate-storage-groups)
+* [Configuring Pools](#configuring-pools)
+* [Custom ceph.conf Settings](#custom-cephconf-settings)
+* [OSD CRUSH Settings](#osd-crush-settings)
+* [OSD Dedicated Network](#osd-dedicated-network)
+* [Phantom OSD Removal](#phantom-osd-removal)
+* [Change Failure Domain](#change-failure-domain)
+* [Monitor placement](#monitor-placement)
+
 ## Prerequisites
 
 Most of the examples make use of the `ceph` client command.  A quick way to use
@@ -37,6 +50,7 @@ kubectl create secret generic ceph-user1-secret --from-literal=key=YOUR_CEPH_KEY
 ```
 
 > **NOTE**: This secret with the same name must be created in each namespace where the StorageClass will be used.
+
 In addition to this Secret you must create a RoleBinding to allow the Rook Ceph agent to get the secret from each namespace.
 The RoleBinding is optional if you are using a ClusterRoleBinding for the Rook Ceph agent secret access.
 A ClusterRole which contains the permissions which are needed and used for the Bindings are shown as an example after the next step.
@@ -154,8 +168,8 @@ for easy sharing.  Note that instead of `gzip`, you could instead pipe to `less`
 
 ## OSD Information
 
-Keeping track of OSDs and their underlying storage devices/directories can be
-difficult.  The following scripts will clear things up quickly.
+Keeping track of OSDs and their underlying storage devices can be
+difficult. The following scripts will clear things up quickly.
 
 ### Kubernetes
 
@@ -692,12 +706,14 @@ default. When available, Rook will also consider failure domain information in
 the form of Kubernetes node labels when scheduling Ceph monitors.
 
 Currently Rook supports the node label
-`failure-domain.beta.kubernetes.io/zone=<zone>` which can be applied to a node
+`topology.kubernetes.io/zone=<zone>` which can be applied to a node
 to specify its failure domain using the command:
 
 ```console
-kubectl label node <node> failure-domain.beta.kubernetes.io/zone=<zone>
+kubectl label node <node> topology.kubernetes.io/zone=<zone>
 ```
+
+> For versions previous to K8s 1.17, use the topology key: failure-domain.beta.kubernetes.io/zone
 
 Rook uses failure domain labels by trying to schedule monitor pods on different
 failure domains. And all nodes without failure domain labels are treated as a single

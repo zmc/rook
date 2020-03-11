@@ -69,7 +69,7 @@ func (hs *HelmSuite) SetupSuite() {
 	hs.namespace = "helm-ns"
 	mons := 1
 	rbdMirrorWorkers := 1
-	hs.op, hs.kh = StartTestCluster(hs.T, helmMinimalTestVersion, hs.namespace, "bluestore", true, true, mons, rbdMirrorWorkers, installer.VersionMaster, installer.NautilusVersion)
+	hs.op, hs.kh = StartTestCluster(hs.T, helmMinimalTestVersion, hs.namespace, "bluestore", true, false, "", mons, rbdMirrorWorkers, installer.VersionMaster, installer.NautilusVersion)
 	hs.helper = clients.CreateTestClient(hs.kh, hs.op.installer.Manifests)
 }
 
@@ -82,19 +82,17 @@ func (hs *HelmSuite) AfterTest(suiteName, testName string) {
 }
 
 // Test to make sure all rook components are installed and Running
-func (hs *HelmSuite) TestRookInstallViaHelm() {
+func (hs *HelmSuite) TestARookInstallViaHelm() {
 	checkIfRookClusterIsInstalled(hs.Suite, hs.kh, hs.namespace, hs.namespace, 1)
 }
 
 // Test BlockCreation on Rook that was installed via Helm
 func (hs *HelmSuite) TestBlockStoreOnRookInstalledViaHelm() {
-	runBlockE2ETestLite(hs.helper, hs.kh, hs.Suite, hs.namespace, hs.op.installer.CephVersion)
+	runBlockCSITestLite(hs.helper, hs.kh, hs.Suite, hs.namespace, hs.namespace, hs.op.installer.CephVersion)
 }
 
 // Test File System Creation on Rook that was installed via helm
-// The test func name has `Z` in its name to run as the last test, this needs to
-// be done as there were some issues that the operator "disappeared".
-func (hs *HelmSuite) TestZFileStoreOnRookInstalledViaHelm() {
+func (hs *HelmSuite) TestFileStoreOnRookInstalledViaHelm() {
 	runFileE2ETestLite(hs.helper, hs.kh, hs.Suite, hs.namespace, "testfs")
 }
 

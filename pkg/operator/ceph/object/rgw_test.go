@@ -32,7 +32,7 @@ import (
 )
 
 func TestStartRGW(t *testing.T) {
-	clientset := testop.New(3)
+	clientset := testop.New(t, 3)
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
 			return `{"key":"mysecurekey"}`, nil
@@ -52,7 +52,7 @@ func TestStartRGW(t *testing.T) {
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "my-fs", "rook-ceph", "/var/lib/rook/")
 
 	// start a basic cluster
-	c := &clusterConfig{info, context, store, version, &cephv1.ClusterSpec{}, metav1.OwnerReference{}, data, false, false}
+	c := &clusterConfig{info, context, store, version, &cephv1.ClusterSpec{}, metav1.OwnerReference{}, data, false}
 	err := c.startRGWPods()
 	assert.Nil(t, err)
 
@@ -88,13 +88,13 @@ func TestCreateObjectStore(t *testing.T) {
 	}
 
 	store := simpleStore()
-	clientset := testop.New(3)
+	clientset := testop.New(t, 3)
 	context := &clusterd.Context{Executor: executor, Clientset: clientset}
 	info := testop.CreateConfigDir(1)
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "my-fs", "rook-ceph", "/var/lib/rook/")
 
 	// create the pools
-	c := &clusterConfig{info, context, store, "1.2.3.4", &cephv1.ClusterSpec{}, metav1.OwnerReference{}, data, false, false}
+	c := &clusterConfig{info, context, store, "1.2.3.4", &cephv1.ClusterSpec{}, metav1.OwnerReference{}, data, false}
 	err := c.createOrUpdate()
 	assert.Nil(t, err)
 }
@@ -103,7 +103,7 @@ func simpleStore() cephv1.CephObjectStore {
 	return cephv1.CephObjectStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "mycluster"},
 		Spec: cephv1.ObjectStoreSpec{
-			MetadataPool: cephv1.PoolSpec{Replicated: cephv1.ReplicatedSpec{Size: 1}},
+			MetadataPool: cephv1.PoolSpec{Replicated: cephv1.ReplicatedSpec{Size: 1, RequireSafeReplicaSize: false}},
 			DataPool:     cephv1.PoolSpec{ErasureCoded: cephv1.ErasureCodedSpec{CodingChunks: 1, DataChunks: 2}},
 			Gateway:      cephv1.GatewaySpec{Port: 123},
 		},

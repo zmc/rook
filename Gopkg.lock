@@ -69,6 +69,14 @@
   version = "v1.16.22"
 
 [[projects]]
+  digest = "1:ce8e1e0bd3eb4b6d38240414955fb492cb3499a253525eb31babc4c43dda1bed"
+  name = "github.com/banzaicloud/k8s-objectmatcher"
+  packages = ["patch"]
+  pruneopts = "UT"
+  revision = "cf8ca3ded3b2b3a27a54c086e935bf228be9b416"
+  version = "v1.1.0"
+
+[[projects]]
   branch = "master"
   digest = "1:d6afaeed1502aa28e80a4ed0981d570ad91b2579193404256ce672ed0a609e0d"
   name = "github.com/beorn7/perks"
@@ -319,6 +327,14 @@
   version = "v0.2.0"
 
 [[projects]]
+  digest = "1:d8b04ac65ed598214a3fa5069577aedb5ff6a92cbc3d6650bd14e42e13e685ba"
+  name = "github.com/goph/emperror"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "9727b49dc9d66225368645198434124e02b7e355"
+  version = "v0.17.2"
+
+[[projects]]
   digest = "1:9b7a07ac7577787a8ecc1334cb9f34df1c76ed82a917d556c5713d3ab84fbc43"
   name = "github.com/grpc-ecosystem/go-grpc-prometheus"
   packages = ["."]
@@ -563,14 +579,6 @@
   ]
   pruneopts = "UT"
   revision = "bf6a532e95b1f7a62adf0ab5050a5bb2237ad2f4"
-
-[[projects]]
-  branch = "master"
-  digest = "1:1ae8472d770851e687463105821ccddad62766c66202f95693dc6970cd1269ab"
-  name = "github.com/rook/operator-kit"
-  packages = ["."]
-  pruneopts = "UT"
-  revision = "5ae9623aed20e249092e0ba99e0dd126c3173a29"
 
 [[projects]]
   digest = "1:d707dbc1330c0ed177d4642d6ae102d5e2c847ebd0eb84562d0dc4f024531cfc"
@@ -907,7 +915,7 @@
   version = "kubernetes-1.14.1"
 
 [[projects]]
-  digest = "1:12e1193fca56eef2efa8e94239f96011a2ac8f60cba50f04da1babad5029de99"
+  digest = "1:bea5cdc22cf065a1b485bb725697cd39c3f940190691a39a8325234035bfe42f"
   name = "k8s.io/apimachinery"
   packages = [
     "pkg/api/equality",
@@ -942,6 +950,7 @@
     "pkg/util/framer",
     "pkg/util/intstr",
     "pkg/util/json",
+    "pkg/util/jsonmergepatch",
     "pkg/util/mergepatch",
     "pkg/util/naming",
     "pkg/util/net",
@@ -1414,13 +1423,15 @@
 
 [[projects]]
   branch = "release-0.2"
-  digest = "1:9f0ef29c01f23bbd2913084e7d9c692115c6c480ef6d1d5807773f077a1c57d3"
+  digest = "1:76731d8c90dc619c96c01cbdabf0e2fe76e3f6cc11f162a1ebba770d998dc64d"
   name = "sigs.k8s.io/controller-runtime"
   packages = [
     "pkg/cache",
     "pkg/cache/internal",
     "pkg/client",
     "pkg/client/apiutil",
+    "pkg/client/config",
+    "pkg/client/fake",
     "pkg/controller",
     "pkg/controller/controllerutil",
     "pkg/event",
@@ -1491,6 +1502,7 @@
     "github.com/aws/aws-sdk-go/aws/credentials",
     "github.com/aws/aws-sdk-go/aws/session",
     "github.com/aws/aws-sdk-go/service/s3",
+    "github.com/banzaicloud/k8s-objectmatcher/patch",
     "github.com/coreos/pkg/capnslog",
     "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1",
     "github.com/coreos/prometheus-operator/pkg/client/versioned",
@@ -1510,7 +1522,6 @@
     "github.com/openshift/cluster-api/pkg/apis/machine/v1beta1",
     "github.com/openshift/machine-api-operator/pkg/apis/healthchecking/v1alpha1",
     "github.com/pkg/errors",
-    "github.com/rook/operator-kit",
     "github.com/spf13/cobra",
     "github.com/spf13/pflag",
     "github.com/stretchr/testify/assert",
@@ -1523,9 +1534,9 @@
     "k8s.io/api/policy/v1beta1",
     "k8s.io/api/storage/v1",
     "k8s.io/api/storage/v1beta1",
-    "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1",
     "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset",
     "k8s.io/apimachinery/pkg/api/errors",
+    "k8s.io/apimachinery/pkg/api/meta",
     "k8s.io/apimachinery/pkg/api/resource",
     "k8s.io/apimachinery/pkg/apis/meta/v1",
     "k8s.io/apimachinery/pkg/fields",
@@ -1575,6 +1586,8 @@
     "k8s.io/kubernetes/pkg/util/mount",
     "k8s.io/kubernetes/pkg/volume/flexvolume",
     "sigs.k8s.io/controller-runtime/pkg/client",
+    "sigs.k8s.io/controller-runtime/pkg/client/config",
+    "sigs.k8s.io/controller-runtime/pkg/client/fake",
     "sigs.k8s.io/controller-runtime/pkg/controller",
     "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil",
     "sigs.k8s.io/controller-runtime/pkg/event",

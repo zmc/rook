@@ -27,12 +27,14 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/ceph/agent"
 	"github.com/rook/rook/pkg/operator/k8sutil"
@@ -76,7 +78,7 @@ func (s *FlexvolumeServer) Start(driverVendor, driverName string) error {
 
 	err := configureFlexVolume(driverFile, flexVolumeDriverDir, driverName)
 	if err != nil {
-		return fmt.Errorf("unable to configure flexvolume %s: %v", flexVolumeDriverDir, err)
+		return errors.Wrapf(err, "unable to configure flexvolume %s", flexVolumeDriverDir)
 	}
 
 	unixSocketFile := path.Join(flexVolumeDriverDir, UnixSocketName) // /flextmnt/rook.io~rook-system/.rook.sock
@@ -88,22 +90,24 @@ func (s *FlexvolumeServer) Start(driverVendor, driverName string) error {
 	// remove unix socket if it existed previously
 	if _, err := os.Stat(unixSocketFile); !os.IsNotExist(err) {
 		logger.Info("Deleting unix domain socket file.")
-		os.Remove(unixSocketFile)
+		if err := os.Remove(unixSocketFile); err != nil {
+			logger.Errorf("failed to remove unix socket file. %v", err)
+		}
 	}
 
 	listener, err := net.Listen("unix", unixSocketFile)
 	if err != nil {
-		return fmt.Errorf("unable to listen at %s: %v", unixSocketFile, err)
+		return errors.Wrapf(err, "unable to listen at %q", unixSocketFile)
 	}
 	s.listeners[unixSocketFile] = listener
 
 	if err := os.Chmod(unixSocketFile, 0770); err != nil {
-		return fmt.Errorf("unable to set file permission to unix socket %s: %v", unixSocketFile, err)
+		return errors.Wrapf(err, "unable to set file permission to unix socket %q", unixSocketFile)
 	}
 
 	go rpc.Accept(listener)
 
-	logger.Infof("Listening on unix socket for Kubernetes volume attach commands: %s", unixSocketFile)
+	logger.Infof("listening on unix socket for Kubernetes volume attach commands %q", unixSocketFile)
 	return nil
 }
 
@@ -112,13 +116,15 @@ func (s *FlexvolumeServer) StopAll() {
 	logger.Infof("Stopping %d unix socket rpc server(s).", len(s.listeners))
 	for unixSocketFile, listener := range s.listeners {
 		if err := listener.Close(); err != nil {
-			logger.Errorf("Failed to stop unix socket rpc server: %+v", err)
+			logger.Errorf("failed to stop unix socket rpc server. %v", err)
 		}
 
 		// closing the listener should remove the unix socket file. But lets try it remove it just in case.
 		if _, err := os.Stat(unixSocketFile); !os.IsNotExist(err) {
-			logger.Infof("Deleting unix domain socket file %s.", unixSocketFile)
-			os.Remove(unixSocketFile)
+			logger.Infof("deleting unix domain socket file %q.", unixSocketFile)
+			if err := os.Remove(unixSocketFile); err != nil {
+				logger.Errorf("failed to delete unix domain socker file. %v", err)
+			}
 		}
 	}
 	s.listeners = make(map[string]net.Listener)
@@ -134,7 +140,7 @@ func RookDriverName(context *clusterd.Context) (string, error) {
 // TouchFlexDrivers causes k8s to reload the flex volumes. Needed periodically due to a k8s race condition with flex driver loading.
 func TouchFlexDrivers(vendor, driverName string) {
 	filename := path.Join(fmt.Sprintf(flexMountPath, vendor, driverName), driverName)
-	logger.Debugf("reloading flex drivers. touching %s", filename)
+	logger.Debugf("reloading flex drivers. touching %q", filename)
 
 	currenttime := time.Now().Local()
 	err := os.Chtimes(filename, currenttime, currenttime)
@@ -159,7 +165,7 @@ func generateFlexSettings(enableSELinuxRelabeling, enableFSGroup bool) ([]byte, 
 	}
 	result, err := json.Marshal(status)
 	if err != nil {
-		return nil, fmt.Errorf("Invalid flex settings. %+v", err)
+		return nil, errors.Wrapf(err, "Invalid flex settings")
 	}
 	return result, nil
 }
@@ -172,7 +178,7 @@ func LoadFlexSettings(directory string) []byte {
 	// Load the settings from the expected config file, ensure they are valid settings, then return them in
 	// a json string to the caller
 	var status flexvolume.DriverStatus
-	if output, err := ioutil.ReadFile(path.Join(directory, settingsFilename)); err == nil {
+	if output, err := ioutil.ReadFile(filepath.Clean(path.Join(directory, settingsFilename))); err == nil {
 		if err := json.Unmarshal(output, &status); err == nil {
 			if output, err = json.Marshal(status); err == nil {
 				return output
@@ -194,7 +200,7 @@ func configureFlexVolume(driverFile, driverDir, driverName string) error {
 	if _, err := os.Stat(driverDir); os.IsNotExist(err) {
 		err := os.Mkdir(driverDir, 0755)
 		if err != nil {
-			logger.Errorf("failed to create dir %s. %+v", driverDir, err)
+			logger.Errorf("failed to create dir %q. %v", driverDir, err)
 		}
 	}
 
@@ -202,7 +208,7 @@ func configureFlexVolume(driverFile, driverDir, driverName string) error {
 	finalDestFile := path.Join(driverDir, driverName) // /flextmnt/rook.io~rook-system/rook-system
 	err := copyFile(driverFile, destFile)
 	if err != nil {
-		return fmt.Errorf("unable to copy flexvolume from %s to %s: %+v", driverFile, destFile, err)
+		return errors.Wrapf(err, "unable to copy flexvolume from %q to %q", driverFile, destFile)
 	}
 
 	// renaming flex volume. Rename is an atomic execution while copying is not.
@@ -210,34 +216,34 @@ func configureFlexVolume(driverFile, driverDir, driverName string) error {
 		// Delete old plugin if it exists
 		err = os.Remove(finalDestFile)
 		if err != nil {
-			logger.Warningf("Could not delete old Rook Flexvolume driver at %s: %v", finalDestFile, err)
+			logger.Warningf("Could not delete old Rook Flexvolume driver at %q. %v", finalDestFile, err)
 		}
 
 	}
 
 	if err := os.Rename(destFile, finalDestFile); err != nil {
-		return fmt.Errorf("failed to rename %s to %s: %+v", destFile, finalDestFile, err)
+		return errors.Wrapf(err, "failed to rename %q to %q", destFile, finalDestFile)
 	}
 
 	// Write the flex configuration
 	enableSELinuxRelabeling, err := strconv.ParseBool(os.Getenv(agent.RookEnableSelinuxRelabelingEnv))
 	if err != nil {
-		logger.Errorf("invalid value for disabling SELinux relabeling. %+v", err)
+		logger.Errorf("invalid value for disabling SELinux relabeling. %v", err)
 		enableSELinuxRelabeling = true
 	}
 	enableFSGroup, err := strconv.ParseBool(os.Getenv(agent.RookEnableFSGroupEnv))
 	if err != nil {
-		logger.Errorf("invalid value for disabling fs group. %+v", err)
+		logger.Errorf("invalid value for disabling fs group. %v", err)
 		enableFSGroup = true
 	}
 	settings, err := generateFlexSettings(enableSELinuxRelabeling, enableFSGroup)
 	if err != nil {
-		logger.Errorf("invalid flex settings. %+v", err)
+		logger.Errorf("invalid flex settings. %v", err)
 	} else {
 		if err := ioutil.WriteFile(path.Join(driverDir, settingsFilename), settings, 0644); err != nil {
-			logger.Errorf("failed to write settings file %s. %+v", settingsFilename, err)
+			logger.Errorf("failed to write settings file %q. %v", settingsFilename, err)
 		} else {
-			logger.Debugf("flex settings: %s", string(settings))
+			logger.Debugf("flex settings: %q", string(settings))
 		}
 	}
 
@@ -245,21 +251,21 @@ func configureFlexVolume(driverFile, driverDir, driverName string) error {
 }
 
 func copyFile(src, dest string) error {
-	srcFile, err := os.Open(src)
+	srcFile, err := os.Open(filepath.Clean(src))
 	if err != nil {
-		return fmt.Errorf("error opening source file %s: %v", src, err)
+		return errors.Wrapf(err, "error opening source file %s", src)
 	}
 	defer srcFile.Close()
 
 	destFile, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755) // creates if file doesn't exist
 	if err != nil {
-		return fmt.Errorf("error creating destination file %s: %v", dest, err)
+		return errors.Wrapf(err, "error creating destination file %s", dest)
 	}
 	defer destFile.Close()
 
 	_, err = io.Copy(destFile, srcFile)
 	if err != nil {
-		return fmt.Errorf("error copying file from %s to %s: %v", src, dest, err)
+		return errors.Wrapf(err, "error copying file from %s to %s", src, dest)
 	}
 	return destFile.Sync()
 }
@@ -276,14 +282,14 @@ func getFlexDriverInfo(flexDriverPath string) (vendor, driver string, err error)
 			// found a match for the flex driver directory name pattern
 			flexInfo := strings.Split(p, "~")
 			if len(flexInfo) > 2 {
-				return "", "", fmt.Errorf("unexpected number of items in flex driver info %+v from path %s", flexInfo, flexDriverPath)
+				return "", "", errors.Errorf("unexpected number of items in flex driver info %+v from path %s", flexInfo, flexDriverPath)
 			}
 
 			return flexInfo[0], flexInfo[1], nil
 		}
 	}
 
-	return "", "", fmt.Errorf("failed to find flex driver info from path %s", flexDriverPath)
+	return "", "", errors.Errorf("failed to find flex driver info from path %s", flexDriverPath)
 }
 
 // getRookFlexBinaryPath returns the path of rook flex volume driver

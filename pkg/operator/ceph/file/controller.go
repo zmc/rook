@@ -23,12 +23,12 @@ import (
 	"sync"
 
 	"github.com/coreos/pkg/capnslog"
-	opkit "github.com/rook/operator-kit"
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
-	cephspec "github.com/rook/rook/pkg/operator/ceph/spec"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -36,12 +36,11 @@ import (
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-file")
 
 // FilesystemResource represents the filesystem custom resource
-var FilesystemResource = opkit.CustomResource{
+var FilesystemResource = k8sutil.CustomResource{
 	Name:    "cephfilesystem",
 	Plural:  "cephfilesystems",
 	Group:   cephv1.CustomResourceGroup,
 	Version: cephv1.Version,
-	Scope:   apiextensionsv1beta1.NamespaceScoped,
 	Kind:    reflect.TypeOf(cephv1.CephFilesystem{}).Name(),
 }
 
@@ -55,7 +54,6 @@ type FilesystemController struct {
 	ownerRef           metav1.OwnerReference
 	dataDirHostPath    string
 	orchestrationMutex sync.Mutex
-	isUpgrade          bool
 }
 
 // NewFilesystemController create controller for watching filesystem custom resources created
@@ -67,7 +65,6 @@ func NewFilesystemController(
 	clusterSpec *cephv1.ClusterSpec,
 	ownerRef metav1.OwnerReference,
 	dataDirHostPath string,
-	isUpgrade bool,
 ) *FilesystemController {
 	return &FilesystemController{
 		clusterInfo:     clusterInfo,
@@ -77,12 +74,11 @@ func NewFilesystemController(
 		clusterSpec:     clusterSpec,
 		ownerRef:        ownerRef,
 		dataDirHostPath: dataDirHostPath,
-		isUpgrade:       isUpgrade,
 	}
 }
 
 // StartWatch watches for instances of Filesystem custom resources and acts on them
-func (c *FilesystemController) StartWatch(namespace string, stopCh chan struct{}) error {
+func (c *FilesystemController) StartWatch(namespace string, stopCh chan struct{}) {
 
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAdd,
@@ -91,9 +87,7 @@ func (c *FilesystemController) StartWatch(namespace string, stopCh chan struct{}
 	}
 
 	logger.Infof("start watching filesystem resource in namespace %s", c.namespace)
-	watcher := opkit.NewWatcher(FilesystemResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient())
-	go watcher.Watch(&cephv1.CephFilesystem{}, stopCh)
-	return nil
+	go k8sutil.WatchCR(FilesystemResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient(), &cephv1.CephFilesystem{}, stopCh)
 }
 
 func (c *FilesystemController) onAdd(obj interface{}) {
@@ -105,7 +99,7 @@ func (c *FilesystemController) onAdd(obj interface{}) {
 
 	filesystem, err := getFilesystemObject(obj)
 	if err != nil {
-		logger.Errorf("failed to get filesystem object: %+v", err)
+		logger.Errorf("failed to get filesystem object. %v", err)
 		return
 	}
 
@@ -113,19 +107,22 @@ func (c *FilesystemController) onAdd(obj interface{}) {
 	defer c.releaseOrchestrationLock()
 
 	if c.clusterSpec.External.Enable {
-		_, err := cephspec.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.namespace, c.clusterInfo.CephVersion)
+		_, err := controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.namespace, c.clusterInfo.CephVersion)
 		if err != nil {
 			// This handles the case where the operator is running, the external cluster has been upgraded and a CR creation is called
 			// If that's a major version upgrade we fail, if it's a minor version, we continue, it's not ideal but not critical
-			logger.Errorf("refusing to run new crd. %+v", err)
+			logger.Errorf("refusing to run new crd. %v", err)
 			return
 		}
 	}
+	updateCephFilesystemStatus(filesystem.GetName(), filesystem.GetNamespace(), k8sutil.ProcessingStatus, c.context)
 
-	err = createFilesystem(c.clusterInfo, c.context, *filesystem, c.rookVersion, c.clusterSpec, c.filesystemOwner(filesystem), c.clusterSpec.DataDirHostPath, c.isUpgrade)
+	err = createFilesystem(c.clusterInfo, c.context, *filesystem, c.rookVersion, c.clusterSpec, c.filesystemOwner(filesystem), c.clusterSpec.DataDirHostPath)
 	if err != nil {
-		logger.Errorf("failed to create filesystem %s: %+v", filesystem.Name, err)
+		logger.Errorf("failed to create filesystem %q. %v", filesystem.Name, err)
+		updateCephFilesystemStatus(filesystem.GetName(), filesystem.GetNamespace(), k8sutil.FailedStatus, c.context)
 	}
+	updateCephFilesystemStatus(filesystem.GetName(), filesystem.GetNamespace(), k8sutil.ReadyStatus, c.context)
 }
 
 func (c *FilesystemController) onUpdate(oldObj, newObj interface{}) {
@@ -136,12 +133,12 @@ func (c *FilesystemController) onUpdate(oldObj, newObj interface{}) {
 
 	oldFS, err := getFilesystemObject(oldObj)
 	if err != nil {
-		logger.Errorf("failed to get old filesystem object: %+v", err)
+		logger.Errorf("failed to get old filesystem object. %v", err)
 		return
 	}
 	newFS, err := getFilesystemObject(newObj)
 	if err != nil {
-		logger.Errorf("failed to get new filesystem object: %+v", err)
+		logger.Errorf("failed to get new filesystem object. %v", err)
 		return
 	}
 
@@ -155,39 +152,40 @@ func (c *FilesystemController) onUpdate(oldObj, newObj interface{}) {
 
 	// if the filesystem is modified, allow the filesystem to be created if it wasn't already
 	logger.Infof("updating filesystem %s", newFS.Name)
-	err = createFilesystem(c.clusterInfo, c.context, *newFS, c.rookVersion, c.clusterSpec, c.filesystemOwner(newFS), c.clusterSpec.DataDirHostPath, c.isUpgrade)
+	updateCephFilesystemStatus(newFS.GetName(), newFS.GetNamespace(), k8sutil.ProcessingStatus, c.context)
+	err = createFilesystem(c.clusterInfo, c.context, *newFS, c.rookVersion, c.clusterSpec, c.filesystemOwner(newFS), c.clusterSpec.DataDirHostPath)
 	if err != nil {
-		logger.Errorf("failed to create (modify) filesystem %s: %+v", newFS.Name, err)
+		logger.Errorf("failed to create (modify) filesystem %q. %v", newFS.Name, err)
+		updateCephFilesystemStatus(newFS.GetName(), newFS.GetNamespace(), k8sutil.FailedStatus, c.context)
 	}
+	updateCephFilesystemStatus(newFS.GetName(), newFS.GetNamespace(), k8sutil.ReadyStatus, c.context)
 }
 
 // ParentClusterChanged determines wether or not a CR update has been sent
 func (c *FilesystemController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephconfig.ClusterInfo, isUpgrade bool) {
 	c.clusterInfo = clusterInfo
-	if cluster.CephVersion.Image == c.clusterSpec.CephVersion.Image {
+	if !isUpgrade {
 		logger.Debugf("No need to update the file system after the parent cluster changed")
 		return
 	}
 
-	// This is an upgrade so let's activate the flag
-	c.isUpgrade = isUpgrade
-
+	logger.Infof("waiting for the orchestration lock to update the filesystem")
 	c.acquireOrchestrationLock()
 	defer c.releaseOrchestrationLock()
 
 	c.clusterSpec.CephVersion = cluster.CephVersion
 	filesystems, err := c.context.RookClientset.CephV1().CephFilesystems(c.namespace).List(metav1.ListOptions{})
 	if err != nil {
-		logger.Errorf("failed to retrieve filesystems to update the ceph version. %+v", err)
+		logger.Errorf("failed to retrieve filesystems to update the ceph version. %v", err)
 		return
 	}
 	for _, fs := range filesystems.Items {
 		logger.Infof("updating the ceph version for filesystem %s to %s", fs.Name, c.clusterSpec.CephVersion.Image)
-		err = createFilesystem(c.clusterInfo, c.context, fs, c.rookVersion, c.clusterSpec, c.filesystemOwner(&fs), c.clusterSpec.DataDirHostPath, c.isUpgrade)
+		err = createFilesystem(c.clusterInfo, c.context, fs, c.rookVersion, c.clusterSpec, c.filesystemOwner(&fs), c.clusterSpec.DataDirHostPath)
 		if err != nil {
-			logger.Errorf("failed to update filesystem %s. %+v", fs.Name, err)
+			logger.Errorf("failed to update filesystem %q. %v", fs.Name, err)
 		} else {
-			logger.Infof("updated filesystem %s to ceph version %s", fs.Name, c.clusterSpec.CephVersion.Image)
+			logger.Infof("updated filesystem %q to ceph version %q", fs.Name, c.clusterSpec.CephVersion.Image)
 		}
 	}
 }
@@ -200,7 +198,7 @@ func (c *FilesystemController) onDelete(obj interface{}) {
 
 	filesystem, err := getFilesystemObject(obj)
 	if err != nil {
-		logger.Errorf("failed to get filesystem object: %+v", err)
+		logger.Errorf("failed to get filesystem object. %v", err)
 		return
 	}
 
@@ -209,7 +207,7 @@ func (c *FilesystemController) onDelete(obj interface{}) {
 
 	err = deleteFilesystem(c.context, c.clusterInfo.CephVersion, *filesystem)
 	if err != nil {
-		logger.Errorf("failed to delete filesystem %s: %+v", filesystem.Name, err)
+		logger.Errorf("failed to delete filesystem %q. %v", filesystem.Name, err)
 	}
 }
 
@@ -256,7 +254,7 @@ func getFilesystemObject(obj interface{}) (filesystem *cephv1.CephFilesystem, er
 		return filesystem.DeepCopy(), nil
 	}
 
-	return nil, fmt.Errorf("not a known filesystem object: %+v", obj)
+	return nil, errors.Errorf("not a known filesystem object: %+v", obj)
 }
 
 func (c *FilesystemController) acquireOrchestrationLock() {
@@ -268,4 +266,23 @@ func (c *FilesystemController) acquireOrchestrationLock() {
 func (c *FilesystemController) releaseOrchestrationLock() {
 	c.orchestrationMutex.Unlock()
 	logger.Debugf("Released lock for filesystem orchestration")
+}
+
+func updateCephFilesystemStatus(name, namespace, status string, context *clusterd.Context) {
+	updatedCephFilesystem, err := context.RookClientset.CephV1().CephFilesystems(namespace).Get(name, metav1.GetOptions{})
+	if err != nil {
+		logger.Errorf("Unable to update the cephObjectStore %s status %v", updatedCephFilesystem.GetName(), err)
+		return
+	}
+	if updatedCephFilesystem.Status == nil {
+		updatedCephFilesystem.Status = &cephv1.Status{}
+	} else if updatedCephFilesystem.Status.Phase == status {
+		return
+	}
+	updatedCephFilesystem.Status.Phase = status
+	_, err = context.RookClientset.CephV1().CephFilesystems(updatedCephFilesystem.Namespace).Update(updatedCephFilesystem)
+	if err != nil {
+		logger.Errorf("Unable to update the cephObjectStore %s status %v", updatedCephFilesystem.GetName(), err)
+		return
+	}
 }

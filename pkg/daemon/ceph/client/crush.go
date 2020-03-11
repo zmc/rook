@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package client
 
 import (
@@ -22,9 +23,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 )
 
+// CrushMap is the go representation of a CRUSH map
 type CrushMap struct {
 	Devices []struct {
 		ID    int    `json:"id"`
@@ -69,6 +72,7 @@ type CrushMap struct {
 	} `json:"tunables"`
 }
 
+// CrushFindResult is go representation of the Ceph osd find command output
 type CrushFindResult struct {
 	ID       int               `json:"osd"`
 	IP       string            `json:"ip"`
@@ -76,54 +80,40 @@ type CrushFindResult struct {
 	Location map[string]string `json:"crush_location"`
 }
 
+// GetCrushMap fetches the Ceph CRUSH map
 func GetCrushMap(context *clusterd.Context, clusterName string) (CrushMap, error) {
 	var c CrushMap
 	args := []string{"osd", "crush", "dump"}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return c, fmt.Errorf("failed to get crush map. %v", err)
+		return c, errors.Wrapf(err, "failed to get crush map. %s", string(buf))
 	}
 
 	err = json.Unmarshal(buf, &c)
 	if err != nil {
-		return c, fmt.Errorf("failed to unmarshal crush map. %+v", err)
+		return c, errors.Wrapf(err, "failed to unmarshal crush map")
 	}
 
 	return c, nil
 }
 
-func CrushReweight(context *clusterd.Context, clusterName string, id int, weight float64) (string, error) {
-	args := []string{"osd", "crush", "reweight", fmt.Sprintf("osd.%d", id), fmt.Sprintf("%.1f", weight)}
-	buf, err := NewCephCommand(context, clusterName, args).Run()
-
-	return string(buf), err
-}
-
-func CrushRemove(context *clusterd.Context, clusterName, name string) (string, error) {
-	args := []string{"osd", "crush", "rm", name}
-	buf, err := NewCephCommand(context, clusterName, args).Run()
-	if err != nil {
-		return "", fmt.Errorf("failed to crush rm: %+v, %s", err, string(buf))
-	}
-
-	return string(buf), nil
-}
-
+// FindOSDInCrushMap finds an OSD in the CRUSH map
 func FindOSDInCrushMap(context *clusterd.Context, clusterName string, osdID int) (*CrushFindResult, error) {
 	args := []string{"osd", "find", strconv.Itoa(osdID)}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return nil, fmt.Errorf("failed to find osd.%d in crush map: %+v, %s", osdID, err, string(buf))
+		return nil, errors.Wrapf(err, "failed to find osd.%d in crush map: %s", osdID, string(buf))
 	}
 
 	var result CrushFindResult
 	if err := json.Unmarshal(buf, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal crush find result: %+v. raw: %s", err, string(buf))
+		return nil, errors.Wrapf(err, "failed to unmarshal crush find result: %s", string(buf))
 	}
 
 	return &result, nil
 }
 
+// GetCrushHostName gets the hostname where an OSD is running on
 func GetCrushHostName(context *clusterd.Context, clusterName string, osdID int) (string, error) {
 	result, err := FindOSDInCrushMap(context, clusterName, osdID)
 	if err != nil {

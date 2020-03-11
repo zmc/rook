@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-
 	appsv1 "k8s.io/api/apps/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,7 +41,9 @@ func Add(mgr manager.Manager, context *controllerconfig.Context) error {
 
 	// Add the cephv1 scheme to the manager scheme
 	mgrScheme := mgr.GetScheme()
-	cephv1.AddToScheme(mgr.GetScheme())
+	if err := cephv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return errors.Wrapf(err, "failed to add ceph scheme to manager scheme.")
+	}
 
 	// this will be used to associate namespaces and cephclusters.
 	sharedClusterMap := &ClusterMap{}
@@ -67,7 +69,7 @@ func Add(mgr manager.Manager, context *controllerconfig.Context) error {
 			// The name will be populated in the reconcile
 			namespace := obj.Meta.GetNamespace()
 			if len(namespace) == 0 {
-				logger.Errorf("enqueByNamespace recieved an obj without a namespace: %+v", obj)
+				logger.Errorf("enqueByNamespace received an obj without a namespace. %+v", obj)
 				return []reconcile.Request{}
 			}
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace}}
@@ -89,7 +91,7 @@ func Add(mgr manager.Manager, context *controllerconfig.Context) error {
 				_, ok := obj.Object.(*policyv1beta1.PodDisruptionBudget)
 				if !ok {
 					// not a pdb, returning empty
-					logger.Errorf("PDB handler recieved non-PDB")
+					logger.Errorf("PDB handler received non-PDB")
 					return []reconcile.Request{}
 				}
 				labels := obj.Meta.GetLabels()
@@ -119,7 +121,7 @@ func Add(mgr manager.Manager, context *controllerconfig.Context) error {
 				_, ok := obj.Object.(*appsv1.Deployment)
 				if !ok {
 					// not a Deployment, returning empty
-					logger.Errorf("Deployment handler recieved non-Deployment")
+					logger.Errorf("deployment handler received non-Deployment")
 					return []reconcile.Request{}
 				}
 

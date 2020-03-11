@@ -43,10 +43,6 @@ func (p *PoolOperation) Create(name, namespace string, replicas int) error {
 	return p.createOrUpdatePool(name, namespace, "apply", replicas)
 }
 
-func (p *PoolOperation) Delete(name string, namespace string) error {
-	return p.k8sh.ResourceOperation("delete", p.manifests.GetBlockPoolDef(name, namespace, "1"))
-}
-
 func (p *PoolOperation) Update(name, namespace string, replicas int) error {
 	return p.createOrUpdatePool(name, namespace, "apply", replicas)
 }
@@ -109,30 +105,19 @@ func (p *PoolOperation) CephPoolExists(namespace, name string) (bool, error) {
 	return false, nil
 }
 
-func (p *PoolOperation) CreateStorageClassAndPvc(namespace, poolName, storageClassName, reclaimPolicy, blockName, mode string) error {
-	return p.k8sh.ResourceOperation("apply", p.manifests.GetBlockPoolStorageClassAndPvcDef(namespace, poolName, storageClassName, reclaimPolicy, blockName, mode))
-}
-
-func (p *PoolOperation) DeleteStorageClass(storageClassName string) error {
-	return p.k8sh.Clientset.StorageV1().StorageClasses().Delete(storageClassName, &metav1.DeleteOptions{})
-}
-
 func (p *PoolOperation) DeletePool(blockClient *BlockOperation, namespace, poolName string) error {
 	// Delete all the images in a pool
 	blockImagesList, _ := blockClient.List(namespace)
 	for _, blockImage := range blockImagesList {
 		if poolName == blockImage.PoolName {
-			blockClient.DeleteBlockImage(blockImage, namespace)
+			logger.Infof("force deleting block image %q in pool %q", blockImage, poolName)
+			err := blockClient.DeleteBlockImage(blockImage, namespace)
+			if err != nil {
+				logger.Infof("failed deleting image %q from %q. %v", blockImage, poolName, err)
+			}
 		}
 	}
 
+	logger.Infof("deleting pool %q", poolName)
 	return p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Delete(poolName, &metav1.DeleteOptions{})
-}
-
-func (p *PoolOperation) DeletePvc(namespace, pvcName string) error {
-	return p.k8sh.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(pvcName, &metav1.DeleteOptions{})
-}
-
-func (p *PoolOperation) CreateStorageClass(namespace, poolName, storageClassName, reclaimPolicy string) error {
-	return p.k8sh.ResourceOperation("apply", p.manifests.GetBlockPoolStorageClass(namespace, poolName, storageClassName, reclaimPolicy))
 }

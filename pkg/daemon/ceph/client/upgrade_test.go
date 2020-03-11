@@ -18,11 +18,10 @@ package client
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 )
@@ -64,16 +63,17 @@ func TestEnableMessenger2(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestEnableNautilusOSD(t *testing.T) {
+func TestEnableReleaseOSDFunctionality(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	executor.MockExecuteCommandWithOutput = func(debug bool, name string, command string, args ...string) (string, error) {
 		assert.Equal(t, "osd", args[0])
 		assert.Equal(t, "require-osd-release", args[1])
+		assert.Equal(t, 3, len(args))
 		return "", nil
 	}
 	context := &clusterd.Context{Executor: executor}
 
-	err := EnableNautilusOSD(context, "rook-ceph")
+	err := EnableReleaseOSDFunctionality(context, "rook-ceph", "nautilus")
 	assert.NoError(t, err)
 }
 
@@ -85,7 +85,7 @@ func TestOkToStopDaemon(t *testing.T) {
 		case args[0] == "mon" && args[1] == "ok-to-stop" && args[2] == "a":
 			return "", nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 	context := &clusterd.Context{Executor: executor}
 
@@ -125,18 +125,6 @@ func TestOkToContinue(t *testing.T) {
 	context := &clusterd.Context{Executor: executor}
 
 	err := OkToContinue(context, "rook-ceph", "rook-ceph-mon-a", "mon", "a") // mon is not checked on ok-to-continue so nil is expected
-	assert.NoError(t, err)
-}
-
-func TestOkToStop(t *testing.T) {
-	executor := &exectest.MockExecutor{}
-	context := &clusterd.Context{Executor: executor}
-	v := cephver.Nautilus
-
-	err := OkToStop(context, "rook-ceph", "rook-ceph-mon-a", "mon", "a", v)
-	assert.NoError(t, err)
-
-	err = OkToStop(context, "rook-ceph", "rook-ceph-mds-a", "mds", "a", v)
 	assert.NoError(t, err)
 }
 

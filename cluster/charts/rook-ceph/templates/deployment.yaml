@@ -106,6 +106,16 @@ spec:
           value: {{ .Values.csi.enableRbdDriver | quote }}
         - name: ROOK_CSI_ENABLE_CEPHFS
           value: {{ .Values.csi.enableCephfsDriver | quote }}
+        - name: CSI_ENABLE_SNAPSHOTTER
+          value: {{ .Values.csi.enableSnapshotter | quote }}
+{{- if .Values.csi.cephFSPluginUpdateStrategy }}
+        - name: CSI_CEPHFS_PLUGIN_UPDATE_STRATEGY
+          value: {{ .Values.csi.cephFSPluginUpdateStrategy | quote }}
+{{- end }}
+{{- if .Values.csi.rbdPluginUpdateStrategy }}
+        - name: CSI_RBD_PLUGIN_UPDATE_STRATEGY
+          value: {{ .Values.csi.rbdPluginUpdateStrategy | quote }}
+{{- end }}
 {{- if .Values.csi.kubeletDirPath }}
         - name: ROOK_CSI_KUBELET_DIR_PATH
           value: {{ .Values.csi.kubeletDirPath | quote }}
@@ -142,6 +152,12 @@ spec:
           value: {{ .Values.csi.attacher.image | quote }}
 {{- end }}
 {{- end }}
+{{- if .Values.csi.resizer }}
+{{- if .Values.csi.resizer.image }}
+        - name: ROOK_CSI_RESIZER_IMAGE
+          value: {{ .Values.csi.resizer.image | quote }}
+{{- end }}
+{{- end }}
 {{- if .Values.csi.provisionerTolerations }}
         - name: CSI_PROVISIONER_TOLERATIONS
           value: {{ toYaml .Values.csi.provisionerTolerations | quote }}
@@ -150,6 +166,10 @@ spec:
         - name: CSI_PROVISIONER_NODE_AFFINITY
           value: {{ .Values.csi.provisionerNodeAffinity }}
 {{- end }}
+{{- if .Values.csi.allowUnsupportedVersion }}
+        - name: ROOK_CSI_ALLOW_UNSUPPORTED_VERSION
+          value: {{ .Values.csi.allowUnsupportedVersion | quote }}
+{{- end }}     
 {{- if .Values.csi.pluginTolerations }}
         - name: CSI_PLUGIN_TOLERATIONS
           value: {{ toYaml .Values.csi.pluginTolerations | quote }}
@@ -173,6 +193,14 @@ spec:
 {{- if .Values.csi.rbdLivenessMetricsPort }}
         - name: CSI_RBD_LIVENESS_METRICS_PORT
           value: {{ .Values.csi.rbdLivenessMetricsPort | quote }}
+{{- end }}
+{{- if .Values.csi.forceCephFSKernelClient }}
+        - name: CSI_FORCE_CEPHFS_KERNEL_CLIENT
+          value: {{ .Values.csi.forceCephFSKernelClient | quote }}
+{{- end }}
+{{- if .Values.csi.logLevel }}
+        - name: CSI_LOG_LEVEL
+          value: {{ .Values.csi.logLevel | quote }}
 {{- end }}
 {{- end }}
         - name: ROOK_ENABLE_FLEX_DRIVER
@@ -206,8 +234,15 @@ spec:
           value: {{ .Values.mon.monOutTimeout }}
 {{- end }}
 {{- end }}
+{{- if .Values.unreachableNodeTolerationSeconds }}
+        - name: ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS
+          value: {{ .Values.unreachableNodeTolerationSeconds | quote }}
+{{- end }}
         resources:
 {{ toYaml .Values.resources | indent 10 }}
+{{- if .Values.useOperatorHostNetwork }}
+      hostNetwork: true
+{{- end }}
 {{- if .Values.nodeSelector }}
       nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 8 }}

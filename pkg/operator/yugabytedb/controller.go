@@ -19,14 +19,13 @@ package yugabytedb
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
-	opkit "github.com/rook/operator-kit"
-	rookv1alpha2 "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	yugabytedbv1alpha1 "github.com/rook/rook/pkg/apis/yugabytedb.rook.io/v1alpha1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -72,15 +71,14 @@ const (
 	envPodIPVal                 = "status.podIP"
 	envPodName                  = "POD_NAME"
 	envPodNameVal               = "metadata.name"
-	yugabyteDBImageName         = "yugabytedb/yugabyte:1.3.1.0-b16"
+	yugabyteDBImageName         = "yugabytedb/yugabyte:2.0.10.0-b4"
 )
 
-var ClusterResource = opkit.CustomResource{
+var ClusterResource = k8sutil.CustomResource{
 	Name:    customResourceName,
 	Plural:  customResourceNamePlural,
 	Group:   yugabytedbv1alpha1.CustomResourceGroup,
 	Version: yugabytedbv1alpha1.Version,
-	Scope:   apiextensionsv1beta1.NamespaceScoped,
 	Kind:    reflect.TypeOf(yugabytedbv1alpha1.YBCluster{}).Name(),
 }
 
@@ -101,7 +99,7 @@ type cluster struct {
 	name        string
 	namespace   string
 	spec        yugabytedbv1alpha1.YBClusterSpec
-	annotations rookv1alpha2.Annotations
+	annotations rookv1.Annotations
 	ownerRef    metav1.OwnerReference
 }
 
@@ -135,7 +133,7 @@ func clusterOwnerRef(name, clusterID string) metav1.OwnerReference {
 	}
 }
 
-func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) error {
+func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) {
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.OnAdd,
 		UpdateFunc: c.OnUpdate,
@@ -143,10 +141,7 @@ func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) e
 	}
 
 	logger.Infof("start watching yugabytedb clusters in all namespaces")
-	watcher := opkit.NewWatcher(ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.YugabytedbV1alpha1().RESTClient())
-	go watcher.Watch(&yugabytedbv1alpha1.YBCluster{}, stopCh)
-
-	return nil
+	go k8sutil.WatchCR(ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.YugabytedbV1alpha1().RESTClient(), &yugabytedbv1alpha1.YBCluster{}, stopCh)
 }
 
 func (c *ClusterController) onDelete(obj interface{}) {
@@ -333,35 +328,42 @@ func getPortsFromSpec(networkSpec yugabytedbv1alpha1.NetworkSpec) (clusterPort *
 	return &ports, nil
 }
 
-func createMasterContainerCommand(namespace, serviceName string, grpcPort, replicas int32) []string {
+func createMasterContainerCommand(namespace, serviceName string, masterCompleteName string, grpcPort, replicas int32) []string {
 	command := []string{
 		"/home/yugabyte/bin/yb-master",
 		fmt.Sprintf("--fs_data_dirs=%s", volumeMountPath),
 		fmt.Sprintf("--rpc_bind_addresses=$(POD_IP):%d", grpcPort),
 		fmt.Sprintf("--server_broadcast_addresses=$(POD_NAME).%s:%d", serviceName, grpcPort),
 		"--use_private_ip=never",
-		fmt.Sprintf("--master_addresses=%s.%s.svc.cluster.local:%d", serviceName, namespace, grpcPort),
-		"--use_initial_sys_catalog_snapshot=true",
-		fmt.Sprintf("--master_replication_factor=%d", replicas),
+		fmt.Sprintf("--master_addresses=%s", getMasterAddresses(masterCompleteName, serviceName, namespace, replicas, grpcPort)),
+		"--enable_ysql=true",
+		fmt.Sprintf("--replication_factor=%d", replicas),
 		"--logtostderr",
 	}
 	return command
 }
 
-func createTServerContainerCommand(namespace, serviceName, masterServiceName string, masterGRPCPort, tserverGRPCPort, pgsqlPort, replicas int32) []string {
+func createTServerContainerCommand(namespace, serviceName, masterServiceName string, masterCompleteName string, masterGRPCPort, tserverGRPCPort, pgsqlPort, replicas int32) []string {
 	command := []string{
 		"/home/yugabyte/bin/yb-tserver",
 		fmt.Sprintf("--fs_data_dirs=%s", volumeMountPath),
 		fmt.Sprintf("--rpc_bind_addresses=$(POD_IP):%d", tserverGRPCPort),
 		fmt.Sprintf("--server_broadcast_addresses=$(POD_NAME).%s:%d", serviceName, tserverGRPCPort),
-		"--start_pgsql_proxy",
 		fmt.Sprintf("--pgsql_proxy_bind_address=$(POD_IP):%d", pgsqlPort),
 		"--use_private_ip=never",
-		fmt.Sprintf("--tserver_master_addrs=%s.%s.svc.cluster.local:%d", masterServiceName, namespace, masterGRPCPort),
-		fmt.Sprintf("--tserver_master_replication_factor=%d", replicas),
+		fmt.Sprintf("--tserver_master_addrs=%s", getMasterAddresses(masterCompleteName, masterServiceName, namespace, replicas, masterGRPCPort)),
+		"--enable_ysql=true",
 		"--logtostderr",
 	}
 	return command
+}
+
+func getMasterAddresses(masterCompleteName string, serviceName string, namespace string, replicas int32, masterGRPCPort int32) string {
+	masterAddrs := []string{}
+	for i := int32(0); i < replicas; i++ {
+		masterAddrs = append(masterAddrs, fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local:%d", masterCompleteName, i, serviceName, namespace, masterGRPCPort))
+	}
+	return strings.Join(masterAddrs, ",")
 }
 
 func createMasterContainerPortsList(clusterPortsSpec *clusterPorts) []v1.ContainerPort {

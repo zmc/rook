@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 )
 
 // CephVersion represents the Ceph version format
@@ -37,20 +38,18 @@ const (
 )
 
 var (
-	// Minimum supported version is 13.2.4 where ceph-volume is supported
-	Minimum = CephVersion{13, 2, 4, 0}
-	// Luminous Ceph version
-	Luminous = CephVersion{12, 0, 0, 0}
-	// Mimic Ceph version
-	Mimic = CephVersion{13, 0, 0, 0}
+	// Minimum supported version is 14.2.5
+	Minimum = CephVersion{14, 2, 5, 0}
 	// Nautilus Ceph version
 	Nautilus = CephVersion{14, 0, 0, 0}
 	// Octopus Ceph version
 	Octopus = CephVersion{15, 0, 0, 0}
+	// Pacific Ceph version
+	Pacific = CephVersion{16, 0, 0, 0}
 
 	// supportedVersions are production-ready versions that rook supports
-	supportedVersions   = []CephVersion{Mimic, Nautilus}
-	unsupportedVersions = []CephVersion{Octopus}
+	supportedVersions   = []CephVersion{Nautilus, Octopus}
+	unsupportedVersions = []CephVersion{Pacific}
 	// allVersions includes all supportedVersions as well as unreleased versions that are being tested with rook
 	allVersions = append(supportedVersions, unsupportedVersions...)
 
@@ -65,14 +64,14 @@ var (
 )
 
 func (v *CephVersion) String() string {
-	return fmt.Sprintf("%d.%d.%d %s",
-		v.Major, v.Minor, v.Extra, v.ReleaseName())
+	return fmt.Sprintf("%d.%d.%d-%d %s",
+		v.Major, v.Minor, v.Extra, v.Build, v.ReleaseName())
 }
 
 // CephVersionFormatted returns the Ceph version in a human readable format
 func (v *CephVersion) CephVersionFormatted() string {
-	return fmt.Sprintf("ceph version %d.%d.%d %s",
-		v.Major, v.Minor, v.Extra, v.ReleaseName())
+	return fmt.Sprintf("ceph version %d.%d.%d-%d %s",
+		v.Major, v.Minor, v.Extra, v.Build, v.ReleaseName())
 }
 
 // ReleaseName is the name of the Ceph release
@@ -82,8 +81,6 @@ func (v *CephVersion) ReleaseName() string {
 		return "octopus"
 	case Nautilus.Major:
 		return "nautilus"
-	case Mimic.Major:
-		return "mimic"
 	default:
 		return unknownVersionString
 	}
@@ -94,22 +91,22 @@ func ExtractCephVersion(src string) (*CephVersion, error) {
 	var build int
 	m := versionPattern.FindStringSubmatch(src)
 	if m == nil {
-		return nil, fmt.Errorf("failed to parse version from: %q", src)
+		return nil, errors.Errorf("failed to parse version from: %q", src)
 	}
 
 	major, err := strconv.Atoi(m[1])
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert version major part %q to an integer", m[1])
+		return nil, errors.Errorf("failed to parse version major part: %q", m[1])
 	}
 
 	minor, err := strconv.Atoi(m[2])
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert version minor part %q to an integer", m[2])
+		return nil, errors.Errorf("failed to parse version minor part: %q", m[2])
 	}
 
 	extra, err := strconv.Atoi(m[3])
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert version extra part %q to an integer", m[3])
+		return nil, errors.Errorf("failed to parse version extra part: %q", m[3])
 	}
 
 	// See if we are running on a build release
@@ -139,9 +136,19 @@ func (v *CephVersion) isRelease(other CephVersion) bool {
 	return v.Major == other.Major
 }
 
-// IsMimic checks if the Ceph version is Mimic
-func (v *CephVersion) IsMimic() bool {
-	return v.isRelease(Mimic)
+// IsNautilus checks if the Ceph version is Nautilus
+func (v *CephVersion) IsNautilus() bool {
+	return v.isRelease(Nautilus)
+}
+
+// IsOctopus checks if the Ceph version is Octopus
+func (v *CephVersion) IsOctopus() bool {
+	return v.isRelease(Octopus)
+}
+
+// IsPacific checks if the Ceph version is Pacific
+func (v *CephVersion) IsPacific() bool {
+	return v.isRelease(Pacific)
 }
 
 // IsAtLeast checks a given Ceph version is at least a given one
@@ -167,6 +174,11 @@ func (v *CephVersion) IsAtLeast(other CephVersion) bool {
 	return true
 }
 
+// IsAtLeastPacific check that the Ceph version is at least Pacific
+func (v *CephVersion) IsAtLeastPacific() bool {
+	return v.IsAtLeast(Pacific)
+}
+
 // IsAtLeastOctopus check that the Ceph version is at least Octopus
 func (v *CephVersion) IsAtLeastOctopus() bool {
 	return v.IsAtLeast(Octopus)
@@ -175,11 +187,6 @@ func (v *CephVersion) IsAtLeastOctopus() bool {
 // IsAtLeastNautilus check that the Ceph version is at least Nautilus
 func (v *CephVersion) IsAtLeastNautilus() bool {
 	return v.IsAtLeast(Nautilus)
-}
-
-// IsAtLeastMimic check that the Ceph version is at least Mimic
-func (v *CephVersion) IsAtLeastMimic() bool {
-	return v.IsAtLeast(Mimic)
 }
 
 // IsIdentical checks if Ceph versions are identical
@@ -260,11 +267,11 @@ func IsInferior(a, b CephVersion) bool {
 // ValidateCephVersionsBetweenLocalAndExternalClusters makes sure an external cluster can be connected
 // by checking the external ceph versions available and comparing it with the local image provided
 func ValidateCephVersionsBetweenLocalAndExternalClusters(localVersion, externalVersion CephVersion) error {
-	logger.Debugf("local version is %s, external version is %s", localVersion.String(), externalVersion.String())
+	logger.Debugf("local version is %q, external version is %q", localVersion.String(), externalVersion.String())
 
-	// We only support Luminous or newer
-	if !externalVersion.IsAtLeast(Luminous) {
-		return fmt.Errorf("unsupported external ceph version %s, need at least luminous", externalVersion.String())
+	// We only support Nautilus or newer
+	if !externalVersion.IsAtLeastNautilus() {
+		return errors.Errorf("unsupported ceph version %q, need at least nautilus, delete your cluster CR and create a new one with a correct ceph version", externalVersion.String())
 	}
 
 	// Identical version, regardless if other CRs are running, it's ok!
@@ -274,20 +281,20 @@ func ValidateCephVersionsBetweenLocalAndExternalClusters(localVersion, externalV
 
 	// Local version must never be higher than the external one
 	if IsSuperior(localVersion, externalVersion) {
-		return fmt.Errorf("local cluster ceph version is higher %s than the external cluster %s, this must never happen", externalVersion.String(), localVersion.String())
+		return errors.Errorf("local cluster ceph version is higher %q than the external cluster %q, this must never happen", externalVersion.String(), localVersion.String())
 	}
 
 	// External cluster was updated to a minor version higher, consider updating too!
 	if localVersion.Major == externalVersion.Major {
 		if IsSuperior(externalVersion, localVersion) {
-			logger.Warningf("external cluster ceph version is a minor version higher %s than the local cluster %s, consider upgrading", externalVersion.String(), localVersion.String())
+			logger.Warningf("external cluster ceph version is a minor version higher %q than the local cluster %q, consider upgrading", externalVersion.String(), localVersion.String())
 			return nil
 		}
 	}
 
 	// The external cluster was upgraded, consider upgrading too!
 	if localVersion.Major < externalVersion.Major {
-		logger.Errorf("external cluster ceph version is a major version higher %s than the local cluster %s, consider upgrading", externalVersion.String(), localVersion.String())
+		logger.Errorf("external cluster ceph version is a major version higher %q than the local cluster %q, consider upgrading", externalVersion.String(), localVersion.String())
 		return nil
 	}
 

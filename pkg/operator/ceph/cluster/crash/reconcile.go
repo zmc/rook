@@ -18,13 +18,19 @@ package crash
 
 import (
 	"context"
-	"fmt"
+	"time"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/rbd"
+	appsv1 "k8s.io/api/apps/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/file/mds"
 	"github.com/rook/rook/pkg/operator/ceph/object"
+	"github.com/rook/rook/pkg/operator/ceph/version"
 
 	"github.com/coreos/pkg/capnslog"
 
@@ -39,6 +45,11 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	getVersionRetryInterval = 5
+	getVersionMaxRetries    = 60
 )
 
 var (
@@ -75,7 +86,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: request.Name}}
 	err := r.client.Get(context.TODO(), request.NamespacedName, node)
 	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("could not get node %q", request.NamespacedName)
+		return reconcile.Result{}, errors.Errorf("could not get node %q", request.NamespacedName)
 	}
 
 	// Get the list of all the Ceph pods
@@ -84,7 +95,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		if len(cephPods) == 0 {
 			return reconcile.Result{}, nil
 		}
-		return reconcile.Result{}, fmt.Errorf("failed to list all ceph pods. %+v", err)
+		return reconcile.Result{}, errors.Wrapf(err, "failed to list all ceph pods")
 	}
 
 	namespaceToPodList := make(map[string][]corev1.Pod)
@@ -105,7 +116,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		cephClusters := &cephv1.CephClusterList{}
 		err := r.client.List(context.TODO(), cephClusters, client.InNamespace(namespace))
 		if err != nil {
-			return reconcile.Result{}, fmt.Errorf("could not get cephcluster in namespaces %q. %+v", namespace, err)
+			return reconcile.Result{}, errors.Wrapf(err, "could not get cephcluster in namespaces %q", namespace)
 		}
 		if len(cephClusters.Items) < 1 {
 			logger.Debugf("no CephCluster found in the namespace %q", namespace)
@@ -115,6 +126,38 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		cephCluster := cephClusters.Items[0]
 		if len(cephClusters.Items) > 1 {
 			logger.Errorf("more than one CephCluster found in the namespace %q, choosing the first one %q", namespace, cephCluster.GetName())
+		}
+
+		// If the crash controller is disabled in the spec let's do a noop
+		if cephCluster.Spec.CrashCollector.Disable {
+			deploymentList := &appsv1.DeploymentList{}
+			namespaceListOpts := client.InNamespace(request.Namespace)
+
+			// Try to fetch the list of existing deployment and remove them
+			err := r.client.List(context.TODO(), deploymentList, client.MatchingLabels{k8sutil.AppAttr: AppName}, namespaceListOpts)
+			if err != nil {
+				logger.Errorf("failed to list crash collector deployments, delete it/them manually. %v", err)
+				return reconcile.Result{}, nil
+			}
+
+			//  Try to delete all the crash deployments
+			for _, d := range deploymentList.Items {
+				err := r.deleteCrashCollector(d)
+				if err != nil {
+					logger.Errorf("failed to delete crash collector deployment %q, delete it manually. %v", d.Name, err)
+					continue
+				}
+				logger.Infof("crash collector deployment %q successfully removed", d.Name)
+			}
+
+			return reconcile.Result{}, nil
+		}
+
+		clusterImage := cephCluster.Spec.CephVersion.Image
+		cephVersion, err := getImageVersion(cephCluster)
+		if err != nil {
+			logger.Errorf("ceph version not found for image %q used by cluster %q. %v", clusterImage, cephCluster.Name, err)
+			return reconcile.Result{}, nil
 		}
 
 		uniqueTolerations := controllerconfig.TolerationSet{}
@@ -132,9 +175,9 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 
 		if hasCephPods {
 			tolerations := uniqueTolerations.ToList()
-			op, err := r.createOrUpdateCephCrash(*node, tolerations, cephCluster)
+			op, err := r.createOrUpdateCephCrash(*node, tolerations, cephCluster, cephVersion)
 			if err != nil {
-				return reconcile.Result{}, fmt.Errorf("node reconcile failed on op %q. %+v", op, err)
+				return reconcile.Result{}, errors.Wrapf(err, "node reconcile failed on op %q", op)
 			}
 			logger.Debugf("deployment successfully reconciled for node %q. operation: %q", request.Name, op)
 		}
@@ -151,11 +194,43 @@ func (r *ReconcileNode) cephPodList() ([]corev1.Pod, error) {
 		podList := &corev1.PodList{}
 		err := r.client.List(context.TODO(), podList, client.MatchingLabels{k8sutil.AppAttr: app})
 		if err != nil {
-			return cephPods, fmt.Errorf("could not list the %q pods. %+v", app, err)
+			return cephPods, errors.Wrapf(err, "could not list the %q pods", app)
 		}
 
 		cephPods = append(cephPods, podList.Items...)
 	}
 
 	return cephPods, nil
+}
+
+// getImageVersion returns the CephVersion registered for a specified image (if any) and whether any image was found.
+func getImageVersion(cephCluster cephv1.CephCluster) (*version.CephVersion, error) {
+	for i := 0; i < getVersionMaxRetries; i++ {
+		// If the Ceph cluster has not yet recorded the image and version for the current image in its spec, then the Crash
+		// controller should wait for the version to be detected.
+		if cephCluster.Status.CephVersion != nil && cephCluster.Spec.CephVersion.Image == cephCluster.Status.CephVersion.Image {
+			logger.Debugf("ceph version found %q", cephCluster.Status.CephVersion.Version)
+			return controller.ExtractCephVersionFromLabel(cephCluster.Status.CephVersion.Version)
+		}
+		<-time.After(time.Second * getVersionRetryInterval)
+	}
+	return nil, errors.New("attempt to determine ceph version for the current cluster image timed out")
+}
+
+func (r *ReconcileNode) deleteCrashCollector(deployment appsv1.Deployment) error {
+	deploymentName := deployment.ObjectMeta.Name
+	namespace := deployment.ObjectMeta.Namespace
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: namespace,
+		},
+	}
+
+	err := r.client.Delete(context.TODO(), dep)
+	if err != nil && !kerrors.IsNotFound(err) {
+		return errors.Wrapf(err, "could not delete crash collector deployment %q", deploymentName)
+	}
+
+	return nil
 }

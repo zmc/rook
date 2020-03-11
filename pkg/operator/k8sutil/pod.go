@@ -22,13 +22,14 @@ import (
 	"io"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 const (
@@ -117,6 +118,39 @@ func GetSpecContainerImage(spec v1.PodSpec, name string, initContainer bool) (st
 		return "", err
 	}
 	return image.Image, nil
+}
+
+// Replaces the pod default toleration of 300s used when the node controller
+// detect a not ready node (node.kubernetes.io/unreachable)
+func AddUnreachableNodeToleration(podSpec *v1.PodSpec) {
+	// The amount of time for this pod toleration can be modified by users
+	// changing the value of <ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS> Rook operator
+	// variable.
+	// Node controller will wait 40 seconds by default before mark a node as
+	// unreachable. After 40s + ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS the pod
+	// will be scheduled in other node
+	// Only one <toleration> to <unreachable> nodes can be added
+	var tolerationSeconds int64 = 5
+	urTolerationSeconds := os.Getenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS")
+	if urTolerationSeconds != "" {
+		if duration, err := strconv.ParseInt(urTolerationSeconds, 10, 64); err != nil {
+			logger.Warningf("using default value for <node.kubernetes.io/unreachable> toleration: %v seconds", tolerationSeconds)
+		} else {
+			tolerationSeconds = duration
+		}
+	}
+	urToleration := v1.Toleration{Key: "node.kubernetes.io/unreachable",
+		Operator:          "Exists",
+		Effect:            "NoExecute",
+		TolerationSeconds: &tolerationSeconds}
+
+	for index, item := range podSpec.Tolerations {
+		if item.Key == "node.kubernetes.io/unreachable" {
+			podSpec.Tolerations[index] = urToleration
+			return
+		}
+	}
+	podSpec.Tolerations = append(podSpec.Tolerations, urToleration)
 }
 
 // GetRunningPod reads the name and namespace of a pod from the
@@ -256,5 +290,44 @@ func ClusterDaemonEnvVars(image string) []v1.EnvVar {
 		// If request.cpu is not set in the pod definition, Kubernetes will use the formula "requests.cpu = limits.cpu" during pods's scheduling
 		// Kubernetes will set this variable to 0 or equal to limits.cpu if set
 		{Name: "POD_CPU_REQUEST", ValueFrom: &v1.EnvVarSource{ResourceFieldRef: &v1.ResourceFieldSelector{Resource: "requests.cpu"}}},
+	}
+}
+
+// SetNodeAntiAffinityForPod assign pod anti-affinity when pod should not be co-located
+func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuringScheduling, preferredDuringScheduling bool,
+	labels, nodeSelector map[string]string) {
+	p.ApplyToPodSpec(pod)
+	pod.NodeSelector = nodeSelector
+
+	// when a node selector is being used, skip the affinity business below
+	if nodeSelector != nil {
+		return
+	}
+
+	// label selector used in anti-affinity rules
+	podAntiAffinity := v1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{
+			MatchLabels: labels,
+		},
+		TopologyKey: v1.LabelHostname,
+	}
+
+	// Ensures that pod.Affinity is non-nil
+	if pod.Affinity.PodAntiAffinity == nil {
+		pod.Affinity.PodAntiAffinity = &v1.PodAntiAffinity{}
+	}
+	paa := pod.Affinity.PodAntiAffinity
+
+	// Set pod anti-affinity rules when pod should never be
+	// co-located (e.g. HostNetworking, not AllowMultiplePerHost)
+	if requiredDuringScheduling {
+		paa.RequiredDuringSchedulingIgnoredDuringExecution =
+			append(paa.RequiredDuringSchedulingIgnoredDuringExecution, podAntiAffinity)
+	} else if preferredDuringScheduling {
+		paa.PreferredDuringSchedulingIgnoredDuringExecution =
+			append(paa.PreferredDuringSchedulingIgnoredDuringExecution, v1.WeightedPodAffinityTerm{
+				Weight:          50,
+				PodAffinityTerm: podAntiAffinity,
+			})
 	}
 }

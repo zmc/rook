@@ -19,17 +19,14 @@ limitations under the License.
 package config
 
 import (
-	"fmt"
-	"net"
-	"strconv"
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
-	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -70,7 +67,7 @@ func GetStore(context *clusterd.Context, namespace string, ownerRef *metav1.Owne
 func (s *Store) CreateOrUpdate(clusterInfo *cephconfig.ClusterInfo) error {
 	// these are used for all ceph daemons on the commandline and must *always* be stored
 	if err := s.createOrUpdateMonHostSecrets(clusterInfo); err != nil {
-		return fmt.Errorf("failed to store mon host configs. %+v", err)
+		return errors.Wrapf(err, "failed to store mon host configs")
 	}
 
 	return nil
@@ -78,35 +75,10 @@ func (s *Store) CreateOrUpdate(clusterInfo *cephconfig.ClusterInfo) error {
 
 // update "mon_host" and "mon_initial_members" in the stored config
 func (s *Store) createOrUpdateMonHostSecrets(clusterInfo *cephconfig.ClusterInfo) error {
-	hosts := make([]string, len(clusterInfo.Monitors))
-	members := make([]string, len(clusterInfo.Monitors))
-	i := 0
-	for _, m := range clusterInfo.Monitors {
-		monIP := cephutil.GetIPFromEndpoint(m.Endpoint)
 
-		// This tries to detect the current port if the mon already exists
-		// This basically handles the transition between monitors running on 6790 to msgr2
-		// So whatever the previous monitor port was we keep it
-		currentMonPort := cephutil.GetPortFromEndpoint(m.Endpoint)
-
-		monPorts := [2]string{strconv.Itoa(int(Msgr2port)), strconv.Itoa(int(currentMonPort))}
-		msgr2Endpoint := net.JoinHostPort(monIP, monPorts[0])
-		msgr1Endpoint := net.JoinHostPort(monIP, monPorts[1])
-
-		// That's likely a fresh deployment
-		if clusterInfo.CephVersion.IsAtLeastNautilus() && currentMonPort == 6789 {
-			hosts[i] = "[v2:" + msgr2Endpoint + ",v1:" + msgr1Endpoint + "]"
-		} else if clusterInfo.CephVersion.IsAtLeastNautilus() && currentMonPort != 6789 {
-			// That's likely an upgrade from a Rook 0.9.x Mimic deployment
-			hosts[i] = "v1:" + msgr1Endpoint
-		} else {
-			// That's before Nautilus
-			hosts[i] = msgr1Endpoint
-		}
-
-		members[i] = m.Name
-		i++
-	}
+	// extract a list of just the monitor names, which will populate the "mon initial members"
+	// and "mon hosts" global config field
+	members, hosts := cephconfig.PopulateMonHostMembers(clusterInfo.Monitors)
 
 	// store these in a secret instead of the configmap; secrets are required by CSI drivers
 	secret := &v1.Secret{
@@ -126,19 +98,19 @@ func (s *Store) createOrUpdateMonHostSecrets(clusterInfo *cephconfig.ClusterInfo
 
 	_, err := clientset.CoreV1().Secrets(s.namespace).Get(StoreName, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			logger.Debugf("creating config secret %+v", secret)
 			if _, err := clientset.CoreV1().Secrets(s.namespace).Create(secret); err != nil {
-				return fmt.Errorf("failed to create config secret %+v. %+v", secret, err)
+				return errors.Wrapf(err, "failed to create config secret %+v", secret)
 			}
 		} else {
-			return fmt.Errorf("failed to get config secret %s. %+v", StoreName, err)
+			return errors.Wrapf(err, "failed to get config secret %s", StoreName)
 		}
 	}
 
 	logger.Debugf("updating config secret %+v", secret)
 	if _, err := clientset.CoreV1().Secrets(s.namespace).Update(secret); err != nil {
-		return fmt.Errorf("failed to update config secret %+v. %+v", secret, err)
+		return errors.Wrapf(err, "failed to update config secret %+v", secret)
 	}
 
 	return nil

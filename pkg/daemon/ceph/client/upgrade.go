@@ -18,10 +18,10 @@ package client
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/util"
@@ -48,7 +48,7 @@ func getCephMonVersionString(context *clusterd.Context, clusterName string) (str
 	args := []string{"version"}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return "", fmt.Errorf("failed to run 'ceph version'. %+v", err)
+		return "", errors.Wrapf(err, "failed to run 'ceph version")
 	}
 	output := string(buf)
 	logger.Debug(output)
@@ -60,7 +60,7 @@ func getAllCephDaemonVersionsString(context *clusterd.Context, clusterName strin
 	args := []string{"versions"}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return "", fmt.Errorf("failed to run 'ceph versions'. %+v", err)
+		return "", errors.Wrapf(err, "failed to run 'ceph versions")
 	}
 	output := string(buf)
 	logger.Debug(output)
@@ -78,7 +78,7 @@ func GetCephMonVersion(context *clusterd.Context, clusterName string) (*cephver.
 
 	v, err := cephver.ExtractCephVersion(output)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract ceph version. %+v", err)
+		return nil, errors.Wrapf(err, "failed to extract ceph version")
 	}
 
 	return v, nil
@@ -95,7 +95,7 @@ func GetAllCephDaemonVersions(context *clusterd.Context, clusterName string) (*C
 	var cephVersionsResult CephDaemonsVersions
 	err = json.Unmarshal([]byte(output), &cephVersionsResult)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve ceph versions results. %+v", err)
+		return nil, errors.Wrapf(err, "failed to retrieve ceph versions results")
 	}
 
 	return &cephVersionsResult, nil
@@ -106,7 +106,7 @@ func EnableMessenger2(context *clusterd.Context, clusterName string) error {
 	args := []string{"mon", "enable-msgr2"}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to enable msgr2 protocol. %+v", err)
+		return errors.Wrapf(err, "failed to enable msgr2 protocol")
 	}
 	output := string(buf)
 	logger.Debug(output)
@@ -115,33 +115,25 @@ func EnableMessenger2(context *clusterd.Context, clusterName string) error {
 	return nil
 }
 
-// EnableNautilusOSD disallows pre-Nautilus OSDs and enables all new Nautilus-only functionality
-func EnableNautilusOSD(context *clusterd.Context, clusterName string) error {
-	args := []string{"osd", "require-osd-release", "nautilus"}
+// EnableReleaseOSDFunctionality disallows pre-Nautilus OSDs and enables all new Nautilus-only functionality
+func EnableReleaseOSDFunctionality(context *clusterd.Context, clusterName, release string) error {
+	args := []string{"osd", "require-osd-release", release}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to disallow pre-nautilus osds and enable all new nautilus-only functionality: %+v", err)
+		return errors.Wrapf(err, "failed to disallow pre-%s osds and enable all new %s-only functionality", release, release)
 	}
 	output := string(buf)
 	logger.Debug(output)
-	logger.Infof("successfully disallowed pre-nautilus osds and enabled all new nautilus-only functionality")
+	logger.Infof("successfully disallowed pre-%s osds and enabled all new %s-only functionality", release, release)
 
 	return nil
 }
 
 // OkToStop determines if it's ok to stop an upgrade
-func OkToStop(context *clusterd.Context, namespace, deployment, daemonType, daemonName string, cephVersion cephver.CephVersion) error {
-	// The ok-to-stop command for mon and mds landed on 14.2.1
-	// so we return nil if that Ceph version is not satisfied
-	if !cephVersion.IsAtLeast(cephver.CephVersion{Major: 14, Minor: 2, Extra: 1}) {
-		if daemonType != "osd" {
-			return nil
-		}
-	}
-
+func OkToStop(context *clusterd.Context, namespace, deployment, daemonType, daemonName string) error {
 	versions, err := GetAllCephDaemonVersions(context, namespace)
 	if err != nil {
-		return fmt.Errorf("failed to get ceph daemons versions. %+v", err)
+		return errors.Wrapf(err, "failed to get ceph daemons versions")
 	}
 
 	switch daemonType {
@@ -175,7 +167,7 @@ func OkToStop(context *clusterd.Context, namespace, deployment, daemonType, daem
 	//  - rbdmirror: you can chain as many as you want like mdss but there is no ok-to-stop logic yet
 	err = okToStopDaemon(context, deployment, namespace, daemonType, daemonName)
 	if err != nil {
-		return fmt.Errorf("failed to check if %s was ok to stop. %+v", deployment, err)
+		return errors.Wrapf(err, "failed to check if %s was ok to stop", deployment)
 	}
 
 	return nil
@@ -191,12 +183,12 @@ func OkToContinue(context *clusterd.Context, namespace, deployment, daemonType, 
 		}
 		err := okToContinueOSDDaemon(context, namespace)
 		if err != nil {
-			return fmt.Errorf("failed to check if %s was ok to continue. %+v", deployment, err)
+			return errors.Wrapf(err, "failed to check if %s was ok to continue", deployment)
 		}
 	case "mds":
 		err := okToContinueMDSDaemon(context, namespace, deployment, daemonType, daemonName)
 		if err != nil {
-			return fmt.Errorf("failed to check if %s was ok to continue. %+v", deployment, err)
+			return errors.Wrapf(err, "failed to check if %s was ok to continue", deployment)
 		}
 	}
 
@@ -208,7 +200,7 @@ func okToStopDaemon(context *clusterd.Context, deployment, clusterName, daemonTy
 		args := []string{daemonType, "ok-to-stop", daemonName}
 		buf, err := NewCephCommand(context, clusterName, args).Run()
 		if err != nil {
-			return fmt.Errorf("deployment %s cannot be stopped. %+v", deployment, err)
+			return errors.Wrapf(err, "deployment %s cannot be stopped", deployment)
 		}
 		output := string(buf)
 		logger.Debugf("deployment %s is ok to be updated. %s", deployment, output)
@@ -277,16 +269,16 @@ func LeastUptodateDaemonVersion(context *clusterd.Context, clusterName, daemonTy
 	// Always invoke ceph version before an upgrade so we are sure to be up-to-date
 	versions, err := GetAllCephDaemonVersions(context, clusterName)
 	if err != nil {
-		logger.Warningf("failed to get ceph daemons versions. %+v, this likely means there is no cluster yet.", err)
+		logger.Warningf("failed to get ceph daemons versions, this likely means there is no cluster yet. %v", err)
 	} else {
 		r, err = daemonMapEntry(versions, daemonType)
 		if err != nil {
-			return vv, fmt.Errorf("failed to find daemon map entry %+v", err)
+			return vv, errors.Wrapf(err, "failed to find daemon map entry")
 		}
 		for v := range r {
 			version, err := cephver.ExtractCephVersion(v)
 			if err != nil {
-				return vv, fmt.Errorf("failed to extract ceph version. %+v", err)
+				return vv, errors.Wrapf(err, "failed to extract ceph version")
 			}
 			vv = *version
 			// break right after the first iteration
@@ -318,28 +310,28 @@ func daemonMapEntry(versions *CephDaemonsVersions, daemonType string) (map[strin
 		return versions.RbdMirror, nil
 	}
 
-	return nil, fmt.Errorf("invalid daemonType %s", daemonType)
+	return nil, errors.Errorf("invalid daemonType %s", daemonType)
 }
 
 func allOSDsSameHost(context *clusterd.Context, clusterName string) (bool, error) {
 	tree, err := HostTree(context, clusterName)
 	if err != nil {
-		return false, fmt.Errorf("failed to get the osd tree %+v", err)
+		return false, errors.Wrapf(err, "failed to get the osd tree")
 	}
 
 	osds, err := OsdListNum(context, clusterName)
 	if err != nil {
-		return false, fmt.Errorf("failed to get the osd list %+v", err)
+		return false, errors.Wrapf(err, "failed to get the osd list")
 	}
 
 	hostOsdTree, err := buildHostListFromTree(tree)
 	if err != nil {
-		return false, fmt.Errorf("failed to build osd tree. %+v", err)
+		return false, errors.Wrapf(err, "failed to build osd tree")
 	}
 
 	hostOsdNodes := len(hostOsdTree.Nodes)
 	if hostOsdNodes == 0 {
-		return false, fmt.Errorf("no host in crush map yet?")
+		return false, errors.New("no host in crush map yet?")
 	}
 
 	// If the number of OSD node is 1, chances are this is simple setup with all OSDs on it
@@ -362,7 +354,7 @@ func buildHostListFromTree(tree OsdTree) (OsdTree, error) {
 	var osdList OsdTree
 
 	if tree.Nodes == nil {
-		return osdList, fmt.Errorf("osd tree not populated, missing 'nodes' field")
+		return osdList, errors.New("osd tree not populated, missing 'nodes' field")
 	}
 
 	for _, t := range tree.Nodes {
@@ -380,7 +372,7 @@ func buildHostListFromTree(tree OsdTree) (OsdTree, error) {
 func osdDoNothing(context *clusterd.Context, clusterName string) bool {
 	versions, err := GetAllCephDaemonVersions(context, clusterName)
 	if err != nil {
-		logger.Warningf("failed to get ceph daemons versions. %+v, this likely means there is no cluster yet.", err)
+		logger.Warningf("failed to get ceph daemons versions, this likely means there is no cluster yet. %v", err)
 		return true
 	}
 

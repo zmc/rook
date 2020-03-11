@@ -19,18 +19,11 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   serviceAccount: rook-edgefs-cluster
   dataDirHostPath: /data
   storage:
-    useAllNodes: true
-  # A key/value list of annotations
-  annotations:
-  #  all:
-  #    key: value
-  #  prepare:
-  #  mgr:
-  #  target:
+    useAllNodes: true   # use only for test deployments
 ```
 
 or if you have raw block devices provisioned, it can dynamically detect, format and utilize all raw devices on all nodes with simple CRD as below:
@@ -42,19 +35,61 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   serviceAccount: rook-edgefs-cluster
   dataDirHostPath: /data
   storage:
-    useAllNodes: true
+    useAllNodes: true   # use only for test deployments
     useAllDevices: true
-  # A key/value list of annotations
-  annotations:
-  #  all:
-  #    key: value
-  #  prepare:
-  #  mgr:
-  #  target:
+```
+
+or if you want to just install it on **single node1, single SSD device /dev/sdb**, use this sample:
+
+```yaml
+apiVersion: edgefs.rook.io/v1
+kind: Cluster
+metadata:
+  name: rook-edgefs
+  namespace: rook-edgefs
+spec:
+  edgefsImageName: edgefs/edgefs:latest
+  serviceAccount: rook-edgefs-cluster
+  dataDirHostPath: /data
+  sysRepCount: 1
+  failureDomain: "device"
+  storage:
+    useAllNodes: false
+    useAllDevices: false
+    config:
+      useAllSSD: "true"
+      useMetadataOffload: "false"
+    nodes:
+    - name: "node1"
+      devices:
+      - name: "sdb"
+```
+
+or if you want to just install it on **single node1, single directory /media**, use this sample:
+
+```yaml
+apiVersion: edgefs.rook.io/v1
+kind: Cluster
+metadata:
+  name: rook-edgefs
+  namespace: rook-edgefs
+spec:
+  edgefsImageName: edgefs/edgefs:latest
+  serviceAccount: rook-edgefs-cluster
+  dataDirHostPath: /data
+  sysRepCount: 1
+  failureDomain: "device"
+  storage:
+    useAllNodes: false
+    useAllDevices: false
+    directories:
+    - path: /media   # global for all nodes, cannot be per-node!
+    nodes:
+    - name: "node1"
 ```
 
 In addition to the CRD, you will also need to create a namespace, role, and role binding as seen in the [common cluster resources](#common-cluster-resources) below.
@@ -67,7 +102,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
 
 - `name`: The name that will be used internally for the EdgeFS cluster. Most commonly the name is the same as the namespace since multiple clusters are not supported in the same namespace.
 - `namespace`: The Kubernetes namespace that will be created for the Rook cluster. The services, pods, and other resources created by the operator will be added to this namespace. The common scenario is to create a single Rook cluster. If multiple clusters are created, they must not have conflicting devices or host paths.
-- `edgefsImageName`: EdgeFS image to use. If not specified then `edgefs/edgefs:latest` is used. We recommend to specify particular image version for production use, for example `edgefs/edgefs:1.2.64`.
+- `edgefsImageName`: EdgeFS image to use. If not specified then `edgefs/edgefs:latest` is used. We recommend to specify particular image version for production use, for example `edgefs/edgefs:1.2.124`.
 
 ### Cluster Settings
 
@@ -99,7 +134,7 @@ If this value is empty, each pod will get an ephemeral directory to store their 
   - [storage configuration settings](#storage-configuration-settings)
 - `skipHostPrepare`: By default all nodes selected for EdgeFS deployment will be automatically configured via preparation jobs. If this option set to `true` node configuration will be skipped.
 - `trlogProcessingInterval`: Controls for how many seconds cluster would aggregate object modifications prior to processing it by accounting, bucket updates, ISGW Links and notifications components. Has to be defined in seconds and must be composite of 60, i.e. 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30. Default is 10. Recommended range is 2 - 20. This is cluster wide setting and cannot be easily changed after cluster is created. Any new node added has to reflect exactly the same setting.
-- `trlogKeepDays`: Controls for how many days cluster need to keep transaction log interval batches with version manifest references. If you planning to have cluster disconnected from ISGW downlinks for longer period time, consider to increase this value. Default is 3. This is cluster wide setting and cannot be easily changed after cluster is created.
+- `trlogKeepDays`: Controls for how many days cluster need to keep transaction log interval batches with version manifest references. If you planning to have cluster disconnected from ISGW downlinks for longer period time, consider to increase this value. Default is 3. This is cluster wide setting and cannot be easily changed after cluster is created. The value can be fractional, e.g. 1.1 or 0.1
 - `maxContainerCapacity`: Overrides default total disks capacity per target container. Default is "132Ti".
 - `useHostLocalTime`: Force usage of the host's /etc/localtime inside EdgeFS containers. Default is `false`.
 
@@ -164,6 +199,14 @@ The following storage selection settings are specific to EdgeFS and do not apply
   - `3`: Most durable and reliable option at the cost of significant performance impact.
 - `maxSizeGB`: For `rtlfs`, defines maximum allowed size to use per directory in gigabytes. For `rtkvs` this is the maximum space the disk's metadata table can occupy.
 - `zone`: Enables the node's failure domain number. Default value is 0 (no zoning). Zoning number is a logical failure domain tagging mechanism and if enabled then it has to be set for all the nodes in the cluster. See also, the `failureDomain`
+- `noIP4Frag`: When set to `true` it prevents sending fragmented UDP traffic. **IMPORTANT**: maximum data chunk size will be redused significantly.
+- `sysMaxChunkSize`: Set maximum allowed data chunk size expressed in bytes. Must be a power of two value. Default is 1M.
+- `payloadS3URL`: When set, it activates payload data chunk forwarding to an external S3 server. The value is an URL of the S3 bucket the payload chunks will be put to. Example: http://s3.aws-region.amazonaws.com/bucket. Only applicable for RTRD (raw disk) engine. Disabled by default.
+- `payloadS3Region`: S3 server region. Default is `us-east-1`. Only applicable when the `payloadS3URL` is set.
+- `payloadS3MinKb`: a minimal payload chunk size to trigger the forwarding to the S3 bucket. Data chunks smaller than this value will be stored locally. Only applicable when the `payloadS3URL` is set.
+- `payloadS3CapacityGB`: capacity of the external S3 bucket expressed in GB. This is an artificial value used to report accurate usage summary and to limit storage size. Only applicable when the `payloadS3URL` is set.
+- `payloadS3Secret`: name of a Kubernetes secret to be used as an external S3 bucket credential. The secret needs to be pre-creted before deployment of the EdgeFS cluster and resides in the same namespace as the cluster. Secret's key neeed to be set to `cred` and value format is as follow: `<aws_key>,<aws_secret>`. See an example in the s3PayloadSecret.yaml
+
 
 ### Placement Configuration Settings
 
@@ -231,7 +274,7 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   dataDirHostPath: /var/lib/rook
   serviceAccount: rook-edgefs-cluster
   # cluster level storage configuration and selection
@@ -256,7 +299,7 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   dataDirHostPath: /var/lib/rook
   serviceAccount: rook-edgefs-cluster
   # cluster level storage configuration and selection
@@ -307,6 +350,87 @@ spec:
       - fullpath: "/dev/disk/by-id/nvme-SAMSUNG_MZQLB3T8HALS-000AZ_S3VJNY0K303383"
 ```
 
+### Storage Configuration: payload forwarding to S3
+
+A 4-nodes configuration with S3 payload forwarding enabled. Follow the next steps:
+1.  Create an EdgeFS namespace, default name is "rook-edgefs": `kubectl create ns rook-edgefs`
+2.  Create a S3 payload [secrets](https://kubernetes.io/docs/concepts/configuration/secret) in the EdgeFS namespace:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: node185-s3payload-secret
+  namespace: rook-edgefs
+type: Opaque
+data:
+  cred: bm9kZTEsbm9kZTEK  # aws key/secret made by a command "echo node1,node1 | base64"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: node186-s3payload-secret
+  namespace: rook-edgefs
+type: Opaque
+data:
+  cred: bm9kZTIsbm9kZTIK
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-s3payload-secret
+  namespace: rook-edgefs
+type: Opaque
+data:
+  cred: Y2x1c3RlcixjbHVzdGVyCg==
+```
+3.  Create EdgeFS cluster:
+
+```yaml
+spec:
+  edgefsImageName: edgefs/edgefs:1.2.0
+  serviceAccount: rook-edgefs-cluster
+  dataDirHostPath: /var/lib/edgefs
+  storage:
+    useAllNodes: false
+    useAllDevices: false
+    config:
+      useAllSSD: "true"  # allSSD is a preferable configuration
+      useMetadataOffload: "false"  # useMetadataOffload is not allowed
+      payloadS3URL: "http://http://s3.us-west-1.amazonaws.com/bucket  # Default S3 bucket for all nodes
+      payloadS3Region: "us-west-1"
+      payloadS3MinKb: "128" # Payloads larger than 128K will got to S3 bucket
+      payloadS3CapacityGB: "1024" # S3 bucket capacity is 1TB
+      payloadS3Secret: "cluster-s3payload-secret" # Secter for default S3 bucket
+    nodes:
+    - name: node183 # node level storage configuration
+      devices:
+      - name: "sdb"
+      - name: "sdc"
+    - name: node184 # node level storage configuration
+      devices: # specific devices to use for storage can be specified for each node
+      - name: "sdb"
+      - name: "sdc"
+    - name: node185 # node level storage configuration
+      devices: # specific devices to use for storage can be specified for each node
+      - name: "sdb"
+      - name: "sdc"
+      config: # configuration can be specified at the node level which overrides the cluster level config
+        payloadS3URL: "http://s3.asia.amazonaws.com/bucket185"
+        payloadS3Region: "asia"
+        payloadS3Capacity: "1099511627776"
+        payloadS3Secret: "node185-s3payload-secret"
+    - name: node186 # node level storage configuration
+      devices: # specific devices to use for storage can be specified for each node
+      - name: "sdb"
+      - name: "sdc"
+      config: # configuration can be specified at the node level which overrides the cluster level config
+        payloadS3URL: "http://s3.asia.amazonaws.com/bucket186"
+        payloadS3Region: "asia"
+        payloadS3Capacity: "1099511627776"
+        payloadS3Secret: "node186-s3payload-secret"
+```
+
 ### Node Affinity
 
 To control where various services will be scheduled by Kubernetes, use the placement configuration sections below.
@@ -320,7 +444,7 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   dataDirHostPath: /var/lib/rook
   serviceAccount: rook-edgefs-cluster
   placement:
@@ -356,7 +480,7 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   dataDirHostPath: /var/lib/rook
   serviceAccount: rook-edgefs-cluster
   # cluster level resource requests/limits configuration
@@ -385,7 +509,7 @@ metadata:
   name: rook-edgefs
   namespace: rook-edgefs
 spec:
-  edgefsImageName: edgefs/edgefs:1.2.64
+  edgefsImageName: edgefs/edgefs:latest
   dataDirHostPath: /var/lib/rook
   serviceAccount: rook-edgefs-cluster
   network:

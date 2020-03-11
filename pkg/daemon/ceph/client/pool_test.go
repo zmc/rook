@@ -16,10 +16,11 @@ limitations under the License.
 package client
 
 import (
-	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/daemon/ceph/model"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -45,10 +46,6 @@ func TestCreateECPoolWithOverwrites(t *testing.T) {
 					assert.Equal(t, "mypool", args[3])
 					assert.Equal(t, "true", args[5])
 					return "", nil
-				} else if args[4] == "min_size" {
-					assert.Equal(t, "mypool", args[3])
-					assert.Equal(t, "1", args[5])
-					return "", nil
 				}
 			}
 			if args[2] == "application" {
@@ -58,7 +55,7 @@ func TestCreateECPoolWithOverwrites(t *testing.T) {
 				return "", nil
 			}
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	err := CreateECPoolForApp(context, "myns", p, "myapp", true, model.ErasureCodedPoolConfig{DataChunkCount: 1})
@@ -80,8 +77,7 @@ func TestCreateECPoolWithoutOverwrites(t *testing.T) {
 			}
 			if args[2] == "set" {
 				assert.Equal(t, "mypool", args[3])
-				assert.Equal(t, "min_size", args[4])
-				assert.Equal(t, "1", args[5])
+				assert.Equal(t, "1", args[4])
 				return "", nil
 			}
 			if args[2] == "application" {
@@ -91,7 +87,7 @@ func TestCreateECPoolWithoutOverwrites(t *testing.T) {
 				return "", nil
 			}
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	err := CreateECPoolForApp(context, "myns", p, "myapp", false, model.ErasureCodedPoolConfig{DataChunkCount: 1})
@@ -156,7 +152,7 @@ func testCreateReplicaPool(t *testing.T, failureDomain, crushRoot, deviceClass s
 			}
 			return "", nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	p := CephStoragePoolDetails{Name: "mypool", Size: 12345, FailureDomain: failureDomain, CrushRoot: crushRoot, DeviceClass: deviceClass}
@@ -193,11 +189,11 @@ func TestGetPoolStatistics(t *testing.T) {
 				if args[2] == "replicapool" {
 					return a, nil
 				}
-				return "", fmt.Errorf("rbd:error opening pool '%s': (2) No such file or directory", args[3])
+				return "", errors.Errorf("rbd:error opening pool '%s': (2) No such file or directory", args[3])
 
 			}
 		}
-		return "", fmt.Errorf("unexpected rbd command '%v'", args)
+		return "", errors.Errorf("unexpected rbd command %q", args)
 	}
 
 	stats, err := GetPoolStatistics(context, "replicapool", "cluster")
@@ -207,4 +203,47 @@ func TestGetPoolStatistics(t *testing.T) {
 	stats, err = GetPoolStatistics(context, "rbd", "cluster")
 	assert.NotNil(t, err)
 	assert.Nil(t, stats)
+}
+
+func TestSetPoolReplicatedSizeProperty(t *testing.T) {
+	// TEST POOL SIZE > 1
+	p := CephStoragePoolDetails{Name: "mypool", Size: 12345}
+	executor := &exectest.MockExecutor{}
+	context := &clusterd.Context{Executor: executor}
+	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+
+		if args[2] == "set" {
+			assert.Equal(t, "mypool", args[3])
+			assert.Equal(t, "size", args[4])
+			assert.Equal(t, "12345", args[5])
+			return "", nil
+		}
+
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+
+	size := strconv.FormatUint(uint64(p.Size), 10)
+	err := SetPoolReplicatedSizeProperty(context, "myns", p.Name, size, p.RequireSafeReplicaSize)
+	assert.NoError(t, err)
+
+	// TEST POOL SIZE 1 AND RequireSafeReplicaSize True
+	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+
+		if args[2] == "set" {
+			assert.Equal(t, "mypool", args[3])
+			assert.Equal(t, "size", args[4])
+			assert.Equal(t, "1", args[5])
+			assert.Equal(t, "--yes-i-really-mean-it", args[6])
+			return "", nil
+		}
+
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	p.RequireSafeReplicaSize = true
+	p.Size = 1
+	size = strconv.FormatUint(uint64(p.Size), 10)
+	err = SetPoolReplicatedSizeProperty(context, "myns", p.Name, size, p.RequireSafeReplicaSize)
+	assert.NoError(t, err)
 }

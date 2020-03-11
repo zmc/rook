@@ -16,10 +16,10 @@ limitations under the License.
 package mgr
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
@@ -28,27 +28,31 @@ import (
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestGeneratePassword(t *testing.T) {
-	password := generatePassword(0)
+	password, err := generatePassword(0)
+	require.Nil(t, err)
 	assert.Equal(t, "", password)
 
-	password = generatePassword(1)
+	password, err = generatePassword(1)
+	require.Nil(t, err)
 	assert.Equal(t, 1, len(password))
 	logger.Infof("password: %s", password)
 
-	password = generatePassword(10)
+	password, err = generatePassword(10)
+	require.Nil(t, err)
 	assert.Equal(t, 10, len(password))
 	logger.Infof("password: %s", password)
 }
 
 func TestGetOrGeneratePassword(t *testing.T) {
-	c := &Cluster{context: &clusterd.Context{Clientset: test.New(3)}, Namespace: "myns"}
+	clientset := test.New(t, 3)
+	c := &Cluster{context: &clusterd.Context{Clientset: clientset}, Namespace: "myns"}
 	_, err := c.context.Clientset.CoreV1().Secrets(c.Namespace).Get(dashboardPasswordName, metav1.GetOptions{})
-	assert.True(t, errors.IsNotFound(err))
+	assert.True(t, kerrors.IsNotFound(err))
 
 	// Generate a password
 	password, err := c.getOrGenerateDashboardPassword()
@@ -72,6 +76,7 @@ func TestStartSecureDashboard(t *testing.T) {
 	disables := 0
 	moduleRetries := 0
 	exitCodeResponse := 0
+	clientset := test.New(t, 3)
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
 			logger.Infof("command: %s %v", command, args)
@@ -88,7 +93,7 @@ func TestStartSecureDashboard(t *testing.T) {
 					logger.Infof("simulating retry...")
 					exitCodeResponse = invalidArgErrorCode
 					moduleRetries++
-					return "", fmt.Errorf("test failure")
+					return "", errors.New("test failure")
 				}
 			}
 			return "", nil
@@ -99,9 +104,9 @@ func TestStartSecureDashboard(t *testing.T) {
 	}
 
 	clusterInfo := &cephconfig.ClusterInfo{
-		CephVersion: cephver.Mimic,
+		CephVersion: cephver.Nautilus,
 	}
-	c := &Cluster{clusterInfo: clusterInfo, context: &clusterd.Context{Clientset: test.New(3), Executor: executor}, Namespace: "myns",
+	c := &Cluster{clusterInfo: clusterInfo, context: &clusterd.Context{Clientset: clientset, Executor: executor}, Namespace: "myns",
 		dashboard: cephv1.DashboardSpec{Port: dashboardPortHTTP, Enabled: true, SSL: true}, cephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.2"}}
 	c.exitCode = func(err error) (int, bool) {
 		if exitCodeResponse != 0 {
@@ -136,6 +141,6 @@ func TestStartSecureDashboard(t *testing.T) {
 
 	svc, err = c.context.Clientset.CoreV1().Services(c.Namespace).Get("rook-ceph-mgr-dashboard", metav1.GetOptions{})
 	assert.NotNil(t, err)
-	assert.True(t, errors.IsNotFound(err))
+	assert.True(t, kerrors.IsNotFound(err))
 	assert.Nil(t, svc)
 }

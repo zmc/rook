@@ -17,10 +17,10 @@ limitations under the License.
 package config
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -29,8 +29,9 @@ import (
 
 func TestMonStore_Set(t *testing.T) {
 	executor := &exectest.MockExecutor{}
+	clientset := testop.New(t, 1)
 	ctx := &clusterd.Context{
-		Clientset: testop.New(1),
+		Clientset: clientset,
 		Executor:  executor,
 	}
 
@@ -42,7 +43,7 @@ func TestMonStore_Set(t *testing.T) {
 		func(debug bool, actionName string, command string, outfile string, args ...string) (string, error) {
 			execedCmd = command + " " + strings.Join(args, " ")
 			if execInjectErr {
-				return "output from cmd with error", fmt.Errorf("mocked error")
+				return "output from cmd with error", errors.New("mocked error")
 			}
 			return "", nil
 		}
@@ -72,9 +73,10 @@ func TestMonStore_Set(t *testing.T) {
 }
 
 func TestMonStore_SetAll(t *testing.T) {
+	clientset := testop.New(t, 1)
 	executor := &exectest.MockExecutor{}
 	ctx := &clusterd.Context{
-		Clientset: testop.New(1),
+		Clientset: clientset,
 		Executor:  executor,
 	}
 
@@ -88,7 +90,7 @@ func TestMonStore_SetAll(t *testing.T) {
 			execedCmds = append(execedCmds, execedCmd)
 			k := execInjectErrOnKeyword
 			if strings.Contains(execedCmd, k) {
-				return "output from cmd with error on keyword: " + k, fmt.Errorf("mocked error on keyword: " + k)
+				return "output from cmd with error on keyword: " + k, errors.Errorf("mocked error on keyword: " + k)
 			}
 			return "", nil
 		}

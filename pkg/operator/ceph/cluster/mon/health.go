@@ -17,17 +17,17 @@ limitations under the License.
 package mon
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
-	cephspec "github.com/rook/rook/pkg/operator/ceph/spec"
-	"k8s.io/apimachinery/pkg/api/errors"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -69,7 +69,7 @@ func (hc *HealthChecker) Check(stopCh chan struct{}) {
 			logger.Debugf("checking health of mons")
 			err := hc.monCluster.checkHealth()
 			if err != nil {
-				logger.Warningf("failed to check mon health. %+v", err)
+				logger.Warningf("failed to check mon health. %v", err)
 			}
 		}
 	}
@@ -83,9 +83,9 @@ func (c *Cluster) checkHealth() error {
 
 	// connect to the mons
 	// get the status and check for quorum
-	quorumStatus, err := client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name, true)
+	quorumStatus, err := client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name, client.IsDebugLevel())
 	if err != nil {
-		return fmt.Errorf("failed to get mon quorum status. %+v", err)
+		return errors.Wrapf(err, "failed to get mon quorum status")
 	}
 	logger.Debugf("Mon quorum status: %+v", quorumStatus)
 	if c.spec.External.Enable {
@@ -117,7 +117,9 @@ func (c *Cluster) checkHealth() error {
 			// enough mons, remove it else remove it on the next run
 			if inQuorum && len(quorumStatus.MonMap.Mons) > desiredMonCount {
 				logger.Warningf("mon %s not in source of truth but in quorum, removing", mon.Name)
-				c.removeMon(mon.Name)
+				if err := c.removeMon(mon.Name); err != nil {
+					logger.Warningf("failed to remove mon %q. %v", mon.Name, err)
+				}
 			} else {
 				logger.Warningf(
 					"mon %s not in source of truth and not in quorum, not enough mons to remove now (wanted: %d, current: %d)",
@@ -148,7 +150,8 @@ func (c *Cluster) checkHealth() error {
 			// when the timeout for the mon has been reached, continue to the
 			// normal failover/delete mon pod part of the code
 			if time.Since(c.monTimeoutList[mon.Name]) <= MonOutTimeout {
-				logger.Warningf("mon %s not found in quorum, waiting for timeout before failover", mon.Name)
+				timeToFailover := int(MonOutTimeout.Seconds() - time.Since(c.monTimeoutList[mon.Name]).Seconds())
+				logger.Warningf("mon %s not found in quorum, waiting for timeout (%d seconds left) before failover", mon.Name, timeToFailover)
 				continue
 			}
 
@@ -184,6 +187,12 @@ func (c *Cluster) checkHealth() error {
 		}
 	}
 
+	// remove any pending/not needed mon canary deployment if everything is ok
+	if allMonsInQuorum && len(quorumStatus.MonMap.Mons) == desiredMonCount {
+		logger.Debug("mon cluster is healthy, removing any existing canary deployment")
+		c.removeCanaryDeployments()
+	}
+
 	return nil
 }
 
@@ -192,18 +201,18 @@ func (c *Cluster) failMon(monCount, desiredMonCount int, name string) {
 	if monCount > desiredMonCount {
 		// no need to create a new mon since we have an extra
 		if err := c.removeMon(name); err != nil {
-			logger.Errorf("failed to remove mon %s. %+v", name, err)
+			logger.Errorf("failed to remove mon %q. %v", name, err)
 		}
 	} else {
 		// bring up a new mon to replace the unhealthy mon
 		if err := c.failoverMon(name); err != nil {
-			logger.Errorf("failed to failover mon %s. %+v", name, err)
+			logger.Errorf("failed to failover mon %q. %v", name, err)
 		}
 	}
 }
 
 func (c *Cluster) failoverMon(name string) error {
-	logger.Infof("Failing over monitor %s", name)
+	logger.Infof("Failing over monitor %q", name)
 
 	// Start a new monitor
 	m := c.newMonConfig(c.maxMonID + 1)
@@ -213,20 +222,20 @@ func (c *Cluster) failoverMon(name string) error {
 
 	// Assign the pod to a node
 	if err := c.assignMons(mConf); err != nil {
-		return fmt.Errorf("failed to place new mon on a node. %+v", err)
+		return errors.Wrapf(err, "failed to place new mon on a node")
 	}
 
 	if c.Network.IsHost() {
 		node, ok := c.mapping.Node[m.DaemonName]
 		if !ok {
-			return fmt.Errorf("mon %s doesn't exist in assignment map", m.DaemonName)
+			return errors.Errorf("mon %s doesn't exist in assignment map", m.DaemonName)
 		}
 		m.PublicIP = node.Address
 	} else {
 		// Create the service endpoint
 		serviceIP, err := c.createService(m)
 		if err != nil {
-			return fmt.Errorf("failed to create mon service. %+v", err)
+			return errors.Wrapf(err, "failed to create mon service")
 		}
 		m.PublicIP = serviceIP
 	}
@@ -234,7 +243,7 @@ func (c *Cluster) failoverMon(name string) error {
 
 	// Start the deployment
 	if err := c.startDeployments(mConf, true); err != nil {
-		return fmt.Errorf("failed to start new mon %s. %+v", m.DaemonName, err)
+		return errors.Wrapf(err, "failed to start new mon %s", m.DaemonName)
 	}
 
 	// Only increment the max mon id if the new pod started successfully
@@ -253,16 +262,16 @@ func (c *Cluster) removeMon(daemonName string) error {
 	propagation := metav1.DeletePropagationForeground
 	options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
 	if err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Delete(resourceName, options); err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			logger.Infof("dead mon %s was already gone", resourceName)
 		} else {
-			return fmt.Errorf("failed to remove dead mon deployment %s. %+v", resourceName, err)
+			return errors.Wrapf(err, "failed to remove dead mon deployment %s", resourceName)
 		}
 	}
 
 	// Remove the bad monitor from quorum
 	if err := removeMonitorFromQuorum(c.context, c.ClusterInfo.Name, daemonName); err != nil {
-		return fmt.Errorf("failed to remove mon %s from quorum. %+v", daemonName, err)
+		return errors.Wrapf(err, "failed to remove mon %s from quorum", daemonName)
 	}
 	delete(c.ClusterInfo.Monitors, daemonName)
 	// check if a mapping exists for the mon
@@ -272,15 +281,15 @@ func (c *Cluster) removeMon(daemonName string) error {
 
 	// Remove the service endpoint
 	if err := c.context.Clientset.CoreV1().Services(c.Namespace).Delete(resourceName, options); err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			logger.Infof("dead mon service %s was already gone", resourceName)
 		} else {
-			return fmt.Errorf("failed to remove dead mon service %s. %+v", resourceName, err)
+			return errors.Wrapf(err, "failed to remove dead mon service %s", resourceName)
 		}
 	}
 
 	if err := c.saveMonConfig(); err != nil {
-		return fmt.Errorf("failed to save mon config after failing over mon %s. %+v", daemonName, err)
+		return errors.Wrapf(err, "failed to save mon config after failing over mon %s", daemonName)
 	}
 
 	return nil
@@ -290,7 +299,7 @@ func removeMonitorFromQuorum(context *clusterd.Context, clusterName, name string
 	logger.Debugf("removing monitor %s", name)
 	args := []string{"mon", "remove", name}
 	if _, err := client.NewCephCommand(context, clusterName, args).Run(); err != nil {
-		return fmt.Errorf("mon %s remove failed: %+v", name, err)
+		return errors.Wrapf(err, "mon %s remove failed", name)
 	}
 
 	logger.Infof("removed monitor %s", name)
@@ -300,21 +309,21 @@ func removeMonitorFromQuorum(context *clusterd.Context, clusterName, name string
 func (c *Cluster) handleExternalMonStatus(status client.MonStatusResponse) error {
 	// We don't need to validate Ceph version if no image is present
 	if c.spec.CephVersion.Image == "" {
-		_, err := cephspec.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, c.ClusterInfo.CephVersion)
+		_, err := controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, c.ClusterInfo.CephVersion)
 		if err != nil {
-			return fmt.Errorf("failed to validate external ceph version. %+v", err)
+			return errors.Wrapf(err, "failed to validate external ceph version")
 		}
 	}
 
 	changed, err := c.addOrRemoveExternalMonitor(status)
 	if err != nil {
-		return fmt.Errorf("failed to add or remove external mon. %+v", err)
+		return errors.Wrapf(err, "failed to add or remove external mon")
 	}
 
 	// let's save the monitor's config if anything happened
 	if changed {
 		if err := c.saveMonConfig(); err != nil {
-			return fmt.Errorf("failed to save mon config after adding/removing external mon. %+v", err)
+			return errors.Wrapf(err, "failed to save mon config after adding/removing external mon")
 		}
 	}
 
@@ -323,12 +332,15 @@ func (c *Cluster) handleExternalMonStatus(status client.MonStatusResponse) error
 
 func (c *Cluster) addOrRemoveExternalMonitor(status client.MonStatusResponse) (bool, error) {
 	var changed bool
-	// clearing the content of clusterinfo monitors, it'll get populated in the next iteration
-	for mon := range c.ClusterInfo.Monitors {
-		delete(c.ClusterInfo.Monitors, mon)
+	oldClusterInfoMonitors := map[string]*cephconfig.MonInfo{}
+	// clearing the content of clusterinfo monitors
+	// and populate oldClusterInfoMonitors with monitors from clusterinfo
+	// later c.ClusterInfo.Monitors get populated again
+	for monName, mon := range c.ClusterInfo.Monitors {
+		oldClusterInfoMonitors[mon.Name] = mon
+		delete(c.ClusterInfo.Monitors, monName)
 	}
-	logger.Infof("ClusterInfo is now Empty, refilling it from status.MonMap.Mons")
-	monsNotFound := map[string]interface{}{}
+	logger.Debugf("ClusterInfo is now Empty, refilling it from status.MonMap.Mons")
 
 	monCount := len(status.MonMap.Mons)
 	if monCount%2 == 0 {
@@ -342,8 +354,8 @@ func (c *Cluster) addOrRemoveExternalMonitor(status client.MonStatusResponse) (b
 	// Iterate over the mons first and compare it with ClusterInfo
 	for _, mon := range status.MonMap.Mons {
 		inQuorum := monInQuorum(mon, status.Quorum)
-		// if the mon is not in clusterInfo
-		if _, ok := monsNotFound[mon.Name]; !ok {
+		// if the mon was not in clusterInfo
+		if _, ok := oldClusterInfoMonitors[mon.Name]; !ok {
 			// If the mon is part of the quorum
 			if inQuorum {
 				// let's add it to ClusterInfo
@@ -355,23 +367,39 @@ func (c *Cluster) addOrRemoveExternalMonitor(status client.MonStatusResponse) (b
 				// find IP and Port of that Mon
 				monIP := cephutil.GetIPFromEndpoint(endpoint)
 				monPort := cephutil.GetPortFromEndpoint(endpoint)
-				logger.Infof("new external mon %s found: %s, adding it", mon.Name, endpoint)
+				logger.Infof("new external mon %q found: %s, adding it", mon.Name, endpoint)
 				c.ClusterInfo.Monitors[mon.Name] = cephconfig.NewMonInfo(mon.Name, monIP, monPort)
-				changed = true
+			} else {
+				logger.Debugf("mon %q is not in quorum and not in ClusterInfo", mon.Name)
 			}
-			logger.Debugf("mon %s is not in quorum and not in ClusterInfo", mon.Name)
+			changed = true
 		} else {
 			// mon is in ClusterInfo
-			logger.Debugf("mon %s is in ClusterInfo, let's test if it's in quorum", mon.Name)
+			logger.Debugf("mon %q is in ClusterInfo, let's test if it's in quorum", mon.Name)
 			if !inQuorum {
-				// this mon was in clusterInfo but not part of the quorum anymore
-				// let's remove it from ClusterInfo
-				logger.Infof("monitor %s is not part of the external cluster monitor quorum, removing it", mon.Name)
-				delete(c.ClusterInfo.Monitors, mon.Name)
+				// this mon was in clusterInfo but is not part of the quorum anymore
+				// thus don't add it again to ClusterInfo
+				logger.Infof("monitor %q is not part of the external cluster monitor quorum, removing it", mon.Name)
+				changed = true
+			} else {
+				// this mon was in clusterInfo and is still in the quorum
+				// add it again
+				c.ClusterInfo.Monitors[mon.Name] = oldClusterInfoMonitors[mon.Name]
+				logger.Debugf("everything is fine mon %q in the clusterInfo and its quorum status is %v", mon.Name, inQuorum)
+			}
+		}
+	}
+	// compare old clusterInfo with new ClusterInfo
+	// if length differ -> the are different
+	// then check if all elements are the same
+	if len(oldClusterInfoMonitors) != len(c.ClusterInfo.Monitors) {
+		changed = true
+	} else {
+		for _, mon := range c.ClusterInfo.Monitors {
+			if old, ok := oldClusterInfoMonitors[mon.Name]; !ok || *old != *mon {
 				changed = true
 			}
 		}
-		logger.Debugf("everything is fine mon %s in the clusterInfo and its quorum status is %v", mon.Name, inQuorum)
 	}
 
 	logger.Debugf("ClusterInfo.Monitors is %+v", c.ClusterInfo.Monitors)

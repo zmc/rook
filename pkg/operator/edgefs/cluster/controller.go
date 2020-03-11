@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
-	opkit "github.com/rook/operator-kit"
 	edgefsv1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/edgefs/iscsi"
@@ -34,7 +33,7 @@ import (
 	"github.com/rook/rook/pkg/operator/edgefs/s3"
 	"github.com/rook/rook/pkg/operator/edgefs/s3x"
 	"github.com/rook/rook/pkg/operator/edgefs/swift"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -59,12 +58,11 @@ const (
 	defaultEdgefsImageName     = "edgefs/edgefs:latest"
 )
 
-var ClusterResource = opkit.CustomResource{
+var ClusterResource = k8sutil.CustomResource{
 	Name:    CustomResourceName,
 	Plural:  CustomResourceNamePlural,
 	Group:   edgefsv1.CustomResourceGroup,
 	Version: edgefsv1.Version,
-	Scope:   apiextensionsv1beta1.NamespaceScoped,
 	Kind:    reflect.TypeOf(edgefsv1.Cluster{}).Name(),
 }
 
@@ -94,7 +92,7 @@ func ClusterOwnerRef(clusterName, clusterID string) metav1.OwnerReference {
 	}
 }
 
-func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) error {
+func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) {
 
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAdd,
@@ -103,10 +101,7 @@ func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) e
 	}
 
 	logger.Infof("start watching edgefs clusters in all namespaces")
-	watcher := opkit.NewWatcher(ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.EdgefsV1().RESTClient())
-	go watcher.Watch(&edgefsv1.Cluster{}, stopCh)
-
-	return nil
+	go k8sutil.WatchCR(ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.EdgefsV1().RESTClient(), &edgefsv1.Cluster{}, stopCh)
 }
 
 func (c *ClusterController) StopWatch() {
@@ -130,7 +125,6 @@ func (c *ClusterController) onAdd(obj interface{}) {
 	}
 
 	logger.Infof("starting cluster in namespace %s", cluster.Namespace)
-
 	if c.devicesInUse && cluster.Spec.Storage.AnyUseAllDevices() {
 		c.updateClusterStatus(clusterObj.Namespace, clusterObj.Name, edgefsv1.ClusterStateError, "using all devices in more than one namespace is not supported")
 		return
@@ -144,10 +138,10 @@ func (c *ClusterController) onAdd(obj interface{}) {
 	err := wait.Poll(clusterCreateInterval, clusterCreateTimeout, func() (bool, error) {
 		c.updateClusterStatus(clusterObj.Namespace, clusterObj.Name, edgefsv1.ClusterStateCreating, "")
 
-		err := cluster.createInstance(c.containerImage, false)
+		done, err := cluster.createInstance(c.containerImage, false)
 		if err != nil {
-			logger.Errorf("failed to create cluster in namespace %s. %+v", cluster.Namespace, err)
-			return false, nil
+			logger.Errorf("%s", err)
+			return done, err
 		}
 
 		// cluster is created, update the cluster CRD status now
@@ -157,7 +151,7 @@ func (c *ClusterController) onAdd(obj interface{}) {
 	})
 	if err != nil {
 		c.updateClusterStatus(clusterObj.Namespace, clusterObj.Name, edgefsv1.ClusterStateError,
-			fmt.Sprintf("giving up creating cluster in namespace %s after %s", cluster.Namespace, clusterCreateTimeout))
+			fmt.Sprintf("giving up creating cluster in namespace %s after %s. Error: %s", cluster.Namespace, clusterCreateTimeout, err.Error()))
 		return
 	}
 
@@ -248,14 +242,14 @@ func (c *ClusterController) onAdd(obj interface{}) {
 	// add the finalizer to the crd
 	err = c.addFinalizer(clusterObj)
 	if err != nil {
-		logger.Errorf("failed to add finalizer to cluster crd. %+v", err)
+		logger.Errorf("failed to add finalizer to cluster crd. %v", err)
 	}
 }
 
 func (c *ClusterController) onUpdate(oldObj, newObj interface{}) {
 	oldCluster := oldObj.(*edgefsv1.Cluster).DeepCopy()
 	newCluster := newObj.(*edgefsv1.Cluster).DeepCopy()
-	logger.Infof("update event for cluster %s", newCluster.Namespace)
+	logger.Infof("update event for cluster %q", newCluster.Namespace)
 
 	// Check if the cluster is being deleted. This code path is called when a finalizer is specified in the crd.
 	// When a cluster is requested for deletion, K8s will only set the deletion timestamp if there are any finalizers in the list.
@@ -264,7 +258,7 @@ func (c *ClusterController) onUpdate(oldObj, newObj interface{}) {
 		logger.Infof("cluster %s has a deletion timestamp", newCluster.Namespace)
 		err := c.handleDelete(newCluster, time.Duration(clusterDeleteRetryInterval)*time.Second)
 		if err != nil {
-			logger.Errorf("failed finalizer for cluster. %+v", err)
+			logger.Errorf("failed finalizer for cluster. %v", err)
 			return
 		}
 		// remove the finalizer from the crd, which indicates to k8s that the resource can safely be deleted
@@ -290,12 +284,15 @@ func (c *ClusterController) onUpdate(oldObj, newObj interface{}) {
 
 	// attempt to update the cluster.  note this is done outside of wait.Poll because that function
 	// will wait for the retry interval before trying for the first time.
-	done, _ := c.handleUpdate(newCluster, cluster)
+	done, err := c.handleUpdate(newCluster, cluster)
 	if done {
+		if err != nil {
+			c.updateClusterStatus(newCluster.Namespace, newCluster.Name, edgefsv1.ClusterStateError, err.Error())
+		}
 		return
 	}
 
-	err := wait.Poll(updateClusterInterval, updateClusterTimeout, func() (bool, error) {
+	err = wait.Poll(updateClusterInterval, updateClusterTimeout, func() (bool, error) {
 		return c.handleUpdate(newCluster, cluster)
 	})
 	if err != nil {
@@ -313,9 +310,10 @@ func (c *ClusterController) handleUpdate(newClust *edgefsv1.Cluster, cluster *cl
 		c.containerImage = newClust.Spec.EdgefsImageName
 	}
 
-	if err := cluster.createInstance(c.containerImage, true); err != nil {
+	done, err := cluster.createInstance(c.containerImage, true)
+	if err != nil {
 		logger.Errorf("failed to update cluster in namespace %s. %+v", newClust.Namespace, err)
-		return false, nil
+		return done, err
 	}
 
 	c.updateClusterStatus(newClust.Namespace, newClust.Name, edgefsv1.ClusterStateCreated, "")
@@ -440,12 +438,16 @@ func (c *ClusterController) removeFinalizer(obj interface{}) {
 	maxRetries := 5
 	retrySeconds := 5 * time.Second
 	for i := 0; i < maxRetries; i++ {
-		var err error
+		var (
+			okCheck bool
+			err     error
+		)
 		if cluster, ok := obj.(*edgefsv1.Cluster); ok {
 			_, err = c.context.RookClientset.EdgefsV1().Clusters(cluster.Namespace).Update(cluster)
+			okCheck = true
 		}
 
-		if err != nil {
+		if okCheck != true || err != nil {
 			logger.Errorf("failed to remove finalizer %s from cluster %s. %+v", fname, objectMeta.Name, err)
 			time.Sleep(retrySeconds)
 			continue

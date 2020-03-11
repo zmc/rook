@@ -18,6 +18,7 @@ package target
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 
 	edgefsv1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1"
@@ -39,6 +40,10 @@ const (
 	stateVolumeFolder = ".state"
 	etcVolumeFolder   = ".etc"
 	kvsJournalFolder  = "kvsjournaldir"
+)
+
+var (
+	secNameRe *regexp.Regexp = regexp.MustCompile(S3PayloadSecretsPath + "(.+)/secret.key")
 )
 
 func (c *Cluster) createAppLabels() map[string]string {
@@ -258,8 +263,28 @@ func (c *Cluster) makeDaemonContainer(containerImage string, dro edgefsv1.Device
 			name := kvsJournalFolder + strconv.Itoa(i)
 			volumeMounts = append(volumeMounts, v1.VolumeMount{Name: name, MountPath: c.Storage.Directories[i].Path})
 		}
+	} else if c.deploymentConfig.DeploymentType == edgefsv1.DeploymentRtrd {
+		secMap := make(map[string]int)
+		for _, v := range c.deploymentConfig.DevConfig {
+			for _, dev := range v.Rtrd.Devices {
+				if len(dev.PayloadS3Secret) > 0 {
+					res := secNameRe.FindAllStringSubmatch(dev.PayloadS3Secret, -1)
+					if res == nil {
+						fmt.Printf("Invalid secret path %v\n", dev.PayloadS3Secret)
+						continue
+					}
+					secName := res[0][1]
+					if _, ok := secMap[secName]; !ok {
+						volumeMounts = append(volumeMounts, v1.VolumeMount{
+							Name:      "s3-payload-" + secName,
+							MountPath: S3PayloadSecretsPath + secName,
+						})
+					}
+					secMap[secName] = 1
+				}
+			}
+		}
 	}
-
 	name := "daemon"
 	args := []string{"daemon"}
 	if isInitContainer {
@@ -453,6 +478,37 @@ func (c *Cluster) createPodSpec(rookImage string, dro edgefsv1.DevicesResurrectO
 				},
 			})
 		}
+	} else if c.deploymentConfig.DeploymentType == edgefsv1.DeploymentRtrd {
+		secMap := make(map[string]int)
+		for _, v := range c.deploymentConfig.DevConfig {
+			for _, dev := range v.Rtrd.Devices {
+				if len(dev.PayloadS3Secret) > 0 {
+					res := secNameRe.FindAllStringSubmatch(dev.PayloadS3Secret, -1)
+					if res == nil {
+						fmt.Printf("Invalid secret path %v\n", dev.PayloadS3Secret)
+						continue
+					}
+					secName := res[0][1]
+					if _, ok := secMap[secName]; !ok {
+						volumes = append(volumes, v1.Volume{
+							Name: "s3-payload-" + secName,
+							VolumeSource: v1.VolumeSource{
+								Secret: &v1.SecretVolumeSource{
+									SecretName: secName,
+									Items: []v1.KeyToPath{
+										{
+											Key:  "cred",
+											Path: "secret.key",
+										},
+									},
+								},
+							},
+						})
+						secMap[secName] = 1
+					}
+				}
+			}
+		}
 	}
 
 	var containers []v1.Container
@@ -583,8 +639,12 @@ func (c *Cluster) makeStatefulSet(replicas int32, rookImage string, dro edgefsv1
 	k8sutil.SetOwnerRef(&statefulSet.ObjectMeta, &c.ownerRef)
 
 	if c.NetworkSpec.IsMultus() {
-		k8sutil.ApplyMultus(c.NetworkSpec, &statefulSet.ObjectMeta)
-		k8sutil.ApplyMultus(c.NetworkSpec, &statefulSet.Spec.Template.ObjectMeta)
+		if err := k8sutil.ApplyMultus(c.NetworkSpec, &statefulSet.ObjectMeta); err != nil {
+			return nil, fmt.Errorf("failed to apply multus spec to stateful set metadata. %v", err)
+		}
+		if err := k8sutil.ApplyMultus(c.NetworkSpec, &statefulSet.Spec.Template.ObjectMeta); err != nil {
+			return nil, fmt.Errorf("failed to apply multus spec to pod template metadata. %v", err)
+		}
 	}
 	c.annotations.ApplyToObjectMeta(&statefulSet.ObjectMeta)
 	c.annotations.ApplyToObjectMeta(&statefulSet.Spec.Template.ObjectMeta)

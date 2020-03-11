@@ -17,16 +17,16 @@ limitations under the License.
 package nfs
 
 import (
-	"fmt"
-
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
-	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -35,6 +35,7 @@ const (
 	appName             = "rook-ceph-nfs"
 	ganeshaConfigVolume = "ganesha-config"
 	nfsPort             = 2049
+	ganeshaPid          = "/var/run/ganesha/ganesha.pid"
 )
 
 func (c *CephNFSController) createCephNFSService(nfs cephv1.CephNFS, cfg daemonConfig) error {
@@ -64,8 +65,8 @@ func (c *CephNFSController) createCephNFSService(nfs cephv1.CephNFS, cfg daemonC
 
 	svc, err := c.context.Clientset.CoreV1().Services(nfs.Namespace).Create(svc)
 	if err != nil {
-		if !errors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create ganesha service. %+v", err)
+		if !kerrors.IsAlreadyExists(err) {
+			return errors.Wrapf(err, "failed to create ganesha service")
 		}
 		logger.Infof("ceph nfs service already created")
 		return nil
@@ -85,7 +86,7 @@ func (c *CephNFSController) makeDeployment(nfs cephv1.CephNFS, cfg daemonConfig)
 		},
 	}
 	k8sutil.AddRookVersionLabelToDeployment(deployment)
-	opspec.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, deployment)
+	controller.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, deployment)
 	nfs.Spec.Server.Annotations.ApplyToObjectMeta(&deployment.ObjectMeta)
 
 	cephConfigVol, _ := cephConfigVolumeAndMount()
@@ -113,6 +114,9 @@ func (c *CephNFSController) makeDeployment(nfs cephv1.CephNFS, cfg daemonConfig)
 		HostNetwork:       c.clusterSpec.Network.IsHost(),
 		PriorityClassName: nfs.Spec.Server.PriorityClassName,
 	}
+	// Replace default unreachable node toleration
+	k8sutil.AddUnreachableNodeToleration(&podSpec)
+
 	if c.clusterSpec.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
@@ -142,24 +146,17 @@ func (c *CephNFSController) makeDeployment(nfs cephv1.CephNFS, cfg daemonConfig)
 func (c *CephNFSController) connectionConfigInitContainer(nfs cephv1.CephNFS) v1.Container {
 	_, cephConfigMount := cephConfigVolumeAndMount()
 
-	return v1.Container{
-		Name: opspec.ConfigInitContainerName,
-		// command is already 'rook'
-		Args: []string{
-			"ceph", "config-init",
-			"--username", "client.admin",
-			"--keyring", keyring.VolumeMount().AdminKeyringFilePath(),
-		},
-		Image: c.rookImage,
-		VolumeMounts: []v1.VolumeMount{
+	return controller.GenerateMinimalCephConfInitContainer(
+		"client.admin",
+		keyring.VolumeMount().AdminKeyringFilePath(),
+		c.clusterSpec.CephVersion.Image,
+		[]v1.VolumeMount{
 			cephConfigMount,
 			keyring.VolumeMount().Admin(),
 		},
-		Env: append(
-			opspec.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
-		),
-		Resources: nfs.Spec.Server.Resources,
-	}
+		nfs.Spec.Server.Resources,
+		mon.PodSecurityContext(),
+	)
 }
 
 func (c *CephNFSController) daemonContainer(nfs cephv1.CephNFS, cfg daemonConfig) v1.Container {
@@ -175,6 +172,7 @@ func (c *CephNFSController) daemonContainer(nfs cephv1.CephNFS, cfg daemonConfig
 		Args: []string{
 			"-F",           // foreground
 			"-L", "STDERR", // log to stderr
+			"-p", ganeshaPid, // PID file location
 		},
 		Image: c.clusterSpec.CephVersion.Image,
 		VolumeMounts: []v1.VolumeMount{
@@ -184,9 +182,10 @@ func (c *CephNFSController) daemonContainer(nfs cephv1.CephNFS, cfg daemonConfig
 			dbusMount,
 		},
 		Env: append(
-			opspec.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
+			controller.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
 		),
-		Resources: nfs.Spec.Server.Resources,
+		Resources:       nfs.Spec.Server.Resources,
+		SecurityContext: mon.PodSecurityContext(),
 	}
 }
 
@@ -216,15 +215,15 @@ func (c *CephNFSController) dbusContainer(nfs cephv1.CephNFS) v1.Container {
 }
 
 func getLabels(n cephv1.CephNFS, name string) map[string]string {
-	labels := opspec.AppLabels(appName, n.Namespace)
+	labels := controller.AppLabels(appName, n.Namespace)
 	labels["ceph_nfs"] = n.Name
 	labels["instance"] = name
 	return labels
 }
 
 func cephConfigVolumeAndMount() (v1.Volume, v1.VolumeMount) {
-	// nfs ganesha produces its own ceph config file, so cannot use opspec.DaemonVolume or
-	// opspec.DaemonVolumeMounts since that will bring in global ceph config file
+	// nfs ganesha produces its own ceph config file, so cannot use controller.DaemonVolume or
+	// controller.DaemonVolumeMounts since that will bring in global ceph config file
 	cfgDir := cephconfig.DefaultConfigDir
 	volName := k8sutil.PathToVolumeName(cfgDir)
 	v := v1.Volume{Name: volName, VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}}

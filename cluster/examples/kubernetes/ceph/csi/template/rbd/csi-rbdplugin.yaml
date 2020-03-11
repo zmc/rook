@@ -7,6 +7,8 @@ spec:
   selector:
     matchLabels:
       app: csi-rbdplugin
+  updateStrategy:
+    type: {{ .RBDPluginUpdateStrategy }}
   template:
     metadata:
       labels:
@@ -21,9 +23,14 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: driver-registrar
+          # This is necessary only for systems with SELinux, where
+          # non-privileged sidecar containers cannot access unix domain socket
+          # created by privileged CSI driver container.
+          securityContext:
+            privileged: true
           image: {{ .RegistrarImage }}
           args:
-            - "--v=5"
+            - "--v={{ .LogLevel }}"
             - "--csi-address=/csi/csi.sock"
             - "--kubelet-registration-path={{ .KubeletDirPath }}/plugins/{{ .DriverNamePrefix }}rbd.csi.ceph.com/csi.sock"
           lifecycle:
@@ -50,11 +57,10 @@ spec:
           args :
             - "--nodeid=$(NODE_ID)"
             - "--endpoint=$(CSI_ENDPOINT)"
-            - "--v=5"
+            - "--v={{ .LogLevel }}"
             - "--type=rbd"
             - "--nodeserver=true"
             - "--drivername={{ .DriverNamePrefix }}rbd.csi.ceph.com"
-            - "--containerized=false"
             - "--pidlimit=-1"
             - "--metricsport={{ .RBDGRPCMetricsPort }}"
             - "--metricspath=/metrics"
@@ -96,6 +102,8 @@ spec:
             - name: keys-tmp-dir
               mountPath: /tmp/csi/keys
         - name: liveness-prometheus
+          securityContext:
+            privileged: true
           image: {{ .CSIPluginImage }}
           args:
             - "--type=liveness"

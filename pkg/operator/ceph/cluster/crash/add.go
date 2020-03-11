@@ -17,10 +17,11 @@ limitations under the License.
 package crash
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 
+	"github.com/pkg/errors"
+	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -44,7 +45,7 @@ const (
 )
 
 // Add adds a new Controller based on nodedrain.ReconcileNode and registers the relevant watches and handlers
-func Add(mgr manager.Manager) error {
+func Add(mgr manager.Manager, context *clusterd.Context) error {
 	reconcileNode := &ReconcileNode{
 		client: mgr.GetClient(),
 		scheme: mgr.GetScheme(),
@@ -54,7 +55,7 @@ func Add(mgr manager.Manager) error {
 	// Create a new controller
 	c, err := controller.New(controllerName, mgr, controller.Options{Reconciler: reconciler})
 	if err != nil {
-		return fmt.Errorf("failed to create a new %q. %+v", controllerName, err)
+		return errors.Wrapf(err, "failed to create a new %q", controllerName)
 	}
 
 	// Watch for changes to the nodes
@@ -68,7 +69,7 @@ func Add(mgr manager.Manager) error {
 	logger.Debugf("watch for changes to the nodes")
 	err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &handler.EnqueueRequestForObject{}, specChangePredicate)
 	if err != nil {
-		return fmt.Errorf("failed to watch for node changes. %+v", err)
+		return errors.Wrapf(err, "failed to watch for node changes")
 	}
 
 	// Watch for changes to the ceph-crash deployments
@@ -96,7 +97,7 @@ func Add(mgr manager.Manager) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to watch for changes on the ceph-crash deployment. %+v", err)
+		return errors.Wrapf(err, "failed to watch for changes on the ceph-crash deployment")
 	}
 
 	// Watch for changes to the ceph pod nodename and enqueue their nodes
@@ -141,7 +142,7 @@ func Add(mgr manager.Manager) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to watch for changes on the ceph pod nodename and enqueue their nodes. %+v", err)
+		return errors.Wrapf(err, "failed to watch for changes on the ceph pod nodename and enqueue their nodes")
 	}
 
 	return nil

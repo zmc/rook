@@ -36,7 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func testDeploymentObject(network cephv1.NetworkSpec) *apps.Deployment {
+func testDeploymentObject(t *testing.T, network cephv1.NetworkSpec) (*apps.Deployment, error) {
 	fs := cephv1.CephFilesystem{
 		ObjectMeta: metav1.ObjectMeta{Name: "myfs", Namespace: "ns"},
 		Spec: cephv1.FilesystemSpec{
@@ -59,12 +59,12 @@ func testDeploymentObject(network cephv1.NetworkSpec) *apps.Deployment {
 	}
 	clusterInfo := &cephconfig.ClusterInfo{
 		FSID:        "myfsid",
-		CephVersion: cephver.Mimic,
+		CephVersion: cephver.Nautilus,
 	}
-
+	clientset := testop.New(t, 1)
 	c := NewCluster(
 		clusterInfo,
-		&clusterd.Context{Clientset: testop.New(1)},
+		&clusterd.Context{Clientset: clientset},
 		"rook/rook:myversion",
 		&cephv1.ClusterSpec{
 			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:testversion"},
@@ -74,18 +74,18 @@ func testDeploymentObject(network cephv1.NetworkSpec) *apps.Deployment {
 		&client.CephFilesystemDetails{ID: 15},
 		metav1.OwnerReference{},
 		"/var/lib/rook/",
-		false,
 	)
 	mdsTestConfig := &mdsConfig{
 		DaemonID:     "myfs-a",
 		ResourceName: "rook-ceph-mds-myfs-a",
 		DataPathMap:  config.NewStatelessDaemonDataPathMap(config.MdsType, "myfs-a", "rook-ceph", "/var/lib/rook/"),
 	}
-	return c.makeDeployment(mdsTestConfig)
+	return c.makeDeployment(mdsTestConfig), nil
 }
 
 func TestPodSpecs(t *testing.T) {
-	d := testDeploymentObject(cephv1.NetworkSpec{HostNetwork: false}) // no host network
+	d, err := testDeploymentObject(t, cephv1.NetworkSpec{HostNetwork: false}) // no host network
+	assert.Nil(t, err)
 
 	assert.NotNil(t, d)
 	assert.Equal(t, v1.RestartPolicyAlways, d.Spec.Template.Spec.RestartPolicy)
@@ -101,7 +101,8 @@ func TestPodSpecs(t *testing.T) {
 }
 
 func TestHostNetwork(t *testing.T) {
-	d := testDeploymentObject(cephv1.NetworkSpec{HostNetwork: true}) // host network
+	d, err := testDeploymentObject(t, cephv1.NetworkSpec{HostNetwork: true}) // host network
+	assert.Nil(t, err)
 
 	assert.Equal(t, true, d.Spec.Template.Spec.HostNetwork)
 	assert.Equal(t, v1.DNSClusterFirstWithHostNet, d.Spec.Template.Spec.DNSPolicy)

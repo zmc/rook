@@ -13,16 +13,20 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package v1
 
 import "github.com/rook/rook/pkg/daemon/ceph/model"
 
+// ToModel translates the spec details to an internal data model of a pool
 func (p *PoolSpec) ToModel(name string) *model.Pool {
 	pool := &model.Pool{Name: name, FailureDomain: p.FailureDomain, CrushRoot: p.CrushRoot, DeviceClass: p.DeviceClass}
 	r := p.Replication()
 	if r != nil {
 		pool.ReplicatedConfig.Size = r.Size
 		pool.Type = model.Replicated
+		pool.ReplicatedConfig.TargetSizeRatio = r.TargetSizeRatio
+		pool.ReplicatedConfig.RequireSafeReplicaSize = r.RequireSafeReplicaSize
 	} else {
 		ec := p.ErasureCode()
 		if ec != nil {

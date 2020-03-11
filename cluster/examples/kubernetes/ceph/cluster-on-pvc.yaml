@@ -32,13 +32,17 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v14.2.4-20190917
+    image: ceph/ceph:v14.2.7
     allowUnsupported: false
+  skipUpgradeChecks: false
+  continueUpgradeAfterChecksEvenIfNotHealthy: false
   dashboard:
     enabled: true
     ssl: true
   network:
     hostNetwork: false
+  crashCollector:
+    disable: false
   storage:
     storageClassDeviceSets:
     - name: set1
@@ -48,6 +52,10 @@ spec:
       # this needs to be set to false. For example, if using the local storage provisioner
       # this should be false.
       portable: true
+      # Certain storage class in the Cloud are slow
+      # Rook can configure the OSD running on PVC to accommodate that by tuning some of the Ceph internal
+      # Currently, "gp2" has been identified as such
+      tuneSlowDeviceClass: true
       # Since the OSDs could end up on any node, an effort needs to be made to spread the OSDs
       # across nodes as much as possible. Unfortunately the pod anti-affinity breaks down
       # as soon as you have more than one OSD per node. If you have more OSDs than nodes, K8s may
@@ -83,6 +91,9 @@ spec:
       volumeClaimTemplates:
       - metadata:
           name: data
+          # if you are looking at giving your OSD a different CRUSH device class than the one detected by Ceph
+          # annotations:
+          #   crushDeviceClass: hybrid
         spec:
           resources:
             requests:
@@ -92,6 +103,19 @@ spec:
           volumeMode: Block
           accessModes:
             - ReadWriteOnce
+      # dedicated block device to store bluestore database (block.db)
+      # - metadata:
+      #     name: metadata
+      #   spec:
+      #     resources:
+      #       requests:
+      #         # Find the right size https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#sizing
+      #         storage: 5Gi
+      #     # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, gp2)
+      #     storageClassName: gp2
+      #     volumeMode: Block
+      #     accessModes:
+      #       - ReadWriteOnce
   disruptionManagement:
     managePodBudgets: false
     osdMaintenanceTimeout: 30

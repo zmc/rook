@@ -46,7 +46,7 @@ func TestPodSpecs(t *testing.T) {
 	}
 	store.Spec.Gateway.PriorityClassName = "my-priority-class"
 	info := testop.CreateConfigDir(1)
-	info.CephVersion = cephver.Mimic
+	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
 
 	c := &clusterConfig{
@@ -69,6 +69,14 @@ func TestPodSpecs(t *testing.T) {
 
 	s := c.makeRGWPodSpec(rgwConfig)
 
+	// Check pod anti affinity is well added to be compliant with HostNetwork setting
+	assert.Equal(t,
+		1,
+		len(s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+	assert.Equal(t,
+		c.getLabels(),
+		s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchLabels)
+
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
 	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
@@ -89,7 +97,7 @@ func TestSSLPodSpec(t *testing.T) {
 	}
 	store.Spec.Gateway.PriorityClassName = "my-priority-class"
 	info := testop.CreateConfigDir(1)
-	info.CephVersion = cephver.Mimic
+	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
 	store.Spec.Gateway.SSLCertificateRef = "mycert"
 	store.Spec.Gateway.SecurePort = 443

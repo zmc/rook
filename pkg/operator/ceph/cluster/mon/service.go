@@ -17,9 +17,9 @@ limitations under the License.
 package mon
 
 import (
-	"fmt"
 	"strconv"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,7 +27,7 @@ import (
 )
 
 func (c *Cluster) createService(mon *monConfig) (string, error) {
-	labels := c.getLabels(mon.DaemonName)
+	labels := c.getLabels(mon.DaemonName, false, "")
 	svcDef := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   mon.ResourceName,
@@ -50,27 +50,22 @@ func (c *Cluster) createService(mon *monConfig) (string, error) {
 	k8sutil.SetOwnerRef(&svcDef.ObjectMeta, &c.ownerRef)
 
 	// If deploying Nautilus or newer we need a new port for the monitor service
-	if c.ClusterInfo.CephVersion.IsAtLeastNautilus() {
-		addServicePort(svcDef, "msgr2", DefaultMsgr2Port)
-	}
+	addServicePort(svcDef, "msgr2", DefaultMsgr2Port)
 
 	s, err := k8sutil.CreateOrUpdateService(c.context.Clientset, c.Namespace, svcDef)
 	if err != nil {
-		return "", fmt.Errorf("failed to create service for mon %s. %+v", mon.DaemonName, err)
+		return "", errors.Wrapf(err, "failed to create service for mon %s", mon.DaemonName)
 	}
 
 	if s == nil {
-		logger.Errorf("service ip not found for mon %s. if this is not a unit test, this is an error", mon.ResourceName)
+		logger.Errorf("service ip not found for mon %q. if this is not a unit test, this is an error", mon.ResourceName)
 		return "", nil
 	}
 
 	// mon endpoint are not actually like, they remain with the mgrs1 format
 	// however it's interesting to show that monitors can be addressed via 2 different ports
 	// in the end the service has msgr1 and msgr2 ports configured so it's not entirely wrong
-	if c.ClusterInfo.CephVersion.IsAtLeastNautilus() {
-		logger.Infof("mon %s endpoint are [v2:%s:%s,v1:%s:%d]", mon.DaemonName, s.Spec.ClusterIP, strconv.Itoa(int(DefaultMsgr2Port)), s.Spec.ClusterIP, mon.Port)
-	} else {
-		logger.Infof("mon %s endpoint is %s:%d", mon.DaemonName, s.Spec.ClusterIP, mon.Port)
-	}
+	logger.Infof("mon %q endpoint are [v2:%s:%s,v1:%s:%d]", mon.DaemonName, s.Spec.ClusterIP, strconv.Itoa(int(DefaultMsgr2Port)), s.Spec.ClusterIP, mon.Port)
+
 	return s.Spec.ClusterIP, nil
 }

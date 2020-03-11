@@ -1,13 +1,17 @@
 ---
-title: EdgeFS Geo-Transparent Storage
+title: EdgeFS Data Fabric
 weight: 550
 indent: true
 ---
 
-# EdgeFS Geo-Transparent Storage Quickstart
+{% include_relative branch.liquid %}
+
+# EdgeFS Data Fabric Quickstart
+
+EdgeFS Data Fabric virtualzing common storage protocols and enables multi-cluster, multi-region data flow topologies.
 
 This guide will walk you through the basic setup of a EdgeFS cluster namespaces and enable you to consume S3 object, NFS file access, and iSCSI block storage
-from other pods running in your cluster, in Geo-Transparent and distributed ways.
+from other pods running in your cluster, in decentralized ways.
 
 ## Minimum Version
 
@@ -16,6 +20,8 @@ EdgeFS operator, CSI plugin and CRDs were tested with Kubernetes **v1.11** or hi
 ## Prerequisites
 
 To make sure you have a Kubernetes cluster that is ready for `Rook`, you can [follow these instructions](k8s-pre-reqs.md).
+
+A minimum of 3 storage devices are required with the default data replication count of 3. (To test EdgeFS on a single-node cluster with only one device or storage directory, set `sysRepCount` to `1` under the `rook-edgefs` `Cluster` object manifest in `cluster/examples/kubernetes/edgefs/cluster.yml`)
 
 To operate efficiently EdgeFS requires 1 CPU core and 1GB of memory per storage device. Minimal memory requirement for EdgeFS target pod is 4GB. To get maximum out of SSD/NVMe device we recommend to double requirements to 2 CPU and 2GB per device.
 
@@ -42,6 +48,7 @@ To turn off this node adjustment need to enable `skipHostPrepare` option in clus
 If you're feeling lucky, a simple EdgeFS Rook cluster can be created with the following kubectl commands. For the more detailed install, skip to the next section to [deploy the Rook operator](#deploy-the-rook-operator).
 
 ```console
+git clone --single-branch --branch {{ branchName }} https://github.com/rook/rook.git
 cd cluster/examples/kubernetes/edgefs
 kubectl create -f operator.yaml
 kubectl create -f cluster.yaml
@@ -68,8 +75,6 @@ kubectl create -f operator.yaml
 # verify the rook-edgefs-operator, and rook-discover pods are in the `Running` state before proceeding
 kubectl -n rook-edgefs-system get pod
 ```
-
-You can also deploy the operator with the [Rook EdgeFS Helm Chart](edgefs-helm-operator.md).
 
 ## Create a Rook Cluster
 

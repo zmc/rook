@@ -24,19 +24,21 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -51,6 +53,8 @@ const (
 	prometheusModuleName   = "prometheus"
 	crashModuleName        = "crash"
 	pgautoscalerModuleName = "pg_autoscaler"
+	balancerModuleName     = "balancer"
+	balancerModuleMode     = "upmap"
 	metricsPort            = 9283
 	monitoringPath         = "/etc/ceph-monitoring/"
 	serviceMonitorFile     = "service-monitor.yaml"
@@ -63,8 +67,8 @@ type Cluster struct {
 	clusterInfo       *cephconfig.ClusterInfo
 	Namespace         string
 	Replicas          int
-	placement         rookalpha.Placement
-	annotations       rookalpha.Annotations
+	placement         rookv1.Placement
+	annotations       rookv1.Annotations
 	context           *clusterd.Context
 	dataDir           string
 	Network           cephv1.NetworkSpec
@@ -78,7 +82,6 @@ type Cluster struct {
 	rookVersion       string
 	exitCode          func(err error) (int, bool)
 	dataDirHostPath   string
-	isUpgrade         bool
 	skipUpgradeChecks bool
 	appliedHttpBind   bool
 }
@@ -89,8 +92,8 @@ func New(
 	context *clusterd.Context,
 	namespace, rookVersion string,
 	cephVersion cephv1.CephVersionSpec,
-	placement rookalpha.Placement,
-	annotations rookalpha.Annotations,
+	placement rookv1.Placement,
+	annotations rookv1.Annotations,
 	network cephv1.NetworkSpec,
 	dashboard cephv1.DashboardSpec,
 	monitoringSpec cephv1.MonitoringSpec,
@@ -99,7 +102,6 @@ func New(
 	priorityClassName string,
 	ownerRef metav1.OwnerReference,
 	dataDirHostPath string,
-	isUpgrade bool,
 	skipUpgradeChecks bool,
 ) *Cluster {
 	return &Cluster{
@@ -121,7 +123,6 @@ func New(
 		ownerRef:          ownerRef,
 		exitCode:          getExitCode,
 		dataDirHostPath:   dataDirHostPath,
-		isUpgrade:         isUpgrade,
 		skipUpgradeChecks: skipUpgradeChecks,
 	}
 }
@@ -143,9 +144,9 @@ func (c *Cluster) getDaemonIDs() []string {
 // Start begins the process of running a cluster of Ceph mgrs.
 func (c *Cluster) Start() error {
 	// Validate pod's memory if specified
-	err := opspec.CheckPodMemory(c.resources, cephMgrPodMinimumMemory)
+	err := controller.CheckPodMemory(c.resources, cephMgrPodMinimumMemory)
 	if err != nil {
-		return fmt.Errorf("%v", err)
+		return errors.Wrap(err, "error checking pod memory")
 	}
 
 	logger.Infof("start running mgr")
@@ -161,16 +162,23 @@ func (c *Cluster) Start() error {
 		// generate keyring specific to this mgr daemon saved to k8s secret
 		keyring, err := c.generateKeyring(mgrConfig)
 		if err != nil {
-			return fmt.Errorf("failed to generate keyring for %q. %+v", resourceName, err)
+			return errors.Wrapf(err, "failed to generate keyring for %q", resourceName)
 		}
 
 		// start the deployment
 		d := c.makeDeployment(mgrConfig)
 		logger.Debugf("starting mgr deployment: %+v", d)
+
+		// Set the deployment hash as an annotation
+		err = patch.DefaultAnnotator.SetLastAppliedAnnotation(d)
+		if err != nil {
+			return errors.Wrapf(err, "failed to set annotation for deployment %q", d.Name)
+		}
+
 		_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(d)
 		if err != nil {
-			if !errors.IsAlreadyExists(err) {
-				return fmt.Errorf("failed to create mgr deployment %s. %+v", resourceName, err)
+			if !kerrors.IsAlreadyExists(err) {
+				return errors.Wrapf(err, "failed to create mgr deployment %s", resourceName)
 			}
 			logger.Infof("deployment for mgr %s already exists. updating if needed", resourceName)
 
@@ -178,34 +186,31 @@ func (c *Cluster) Start() error {
 			daemon := string(config.MgrType)
 			var cephVersionToUse cephver.CephVersion
 
-			// If this is not a Ceph upgrade there is no need to check the ceph version
-			if c.isUpgrade {
-				currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemon)
-				if err != nil {
-					logger.Warningf("failed to retrieve current ceph %s version. %+v", daemon, err)
-					logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with c.clusterInfo.CephVersion")
-					cephVersionToUse = c.clusterInfo.CephVersion
-				} else {
-					logger.Debugf("current cluster version for mgrs before upgrading is: %+v", currentCephVersion)
-					cephVersionToUse = currentCephVersion
-				}
+			currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemon)
+			if err != nil {
+				logger.Warningf("failed to retrieve current ceph %q version. %+v", daemon, err)
+				logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with %+v", c.clusterInfo.CephVersion)
+				cephVersionToUse = c.clusterInfo.CephVersion
+			} else {
+				logger.Debugf("current cluster version for mgrs before upgrading is: %+v", currentCephVersion)
+				cephVersionToUse = currentCephVersion
 			}
 
-			if err := updateDeploymentAndWait(c.context, d, c.Namespace, daemon, mgrConfig.DaemonID, cephVersionToUse, c.isUpgrade, c.skipUpgradeChecks); err != nil {
-				return fmt.Errorf("failed to update mgr deployment %s. %+v", resourceName, err)
+			if err := updateDeploymentAndWait(c.context, d, c.Namespace, daemon, mgrConfig.DaemonID, cephVersionToUse, c.skipUpgradeChecks, false); err != nil {
+				logger.Errorf("failed to update mgr deployment %q. %+v", resourceName, err)
 			}
 		}
 		if existingDeployment, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(d.GetName(), metav1.GetOptions{}); err != nil {
-			logger.Warningf("failed to find mgr deployment %s for keyring association: %+v", resourceName, err)
+			logger.Warningf("failed to find mgr deployment %q for keyring association. %v", resourceName, err)
 		} else {
 			if err = c.associateKeyring(keyring, existingDeployment); err != nil {
-				logger.Warningf("failed to associate keyring with mgr deployment %s: %+v", resourceName, err)
+				logger.Warningf("failed to associate keyring with mgr deployment %q. %v", resourceName, err)
 			}
 		}
 	}
 
 	if err := c.configureDashboardService(); err != nil {
-		logger.Errorf("failed to enable dashboard. %+v", err)
+		logger.Errorf("failed to enable dashboard. %v", err)
 	}
 
 	// configure the mgr modules
@@ -214,8 +219,8 @@ func (c *Cluster) Start() error {
 	// create the metrics service
 	service := c.makeMetricsService(AppName)
 	if _, err := c.context.Clientset.CoreV1().Services(c.Namespace).Create(service); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create mgr service. %+v", err)
+		if !kerrors.IsAlreadyExists(err) {
+			return errors.Wrapf(err, "failed to create mgr service")
 		}
 		logger.Infof("mgr metrics service already exists")
 	} else {
@@ -224,29 +229,25 @@ func (c *Cluster) Start() error {
 
 	// enable monitoring if `monitoring: enabled: true`
 	if c.monitoringSpec.Enabled {
-		if c.clusterInfo.CephVersion.IsAtLeastNautilus() {
-			logger.Infof("starting monitoring deployment")
-			// servicemonitor takes some metadata from the service for easy mapping
-			if err := c.enableServiceMonitor(service); err != nil {
-				logger.Errorf("failed to enable service monitor. %+v", err)
-			} else {
-				logger.Infof("servicemonitor enabled")
-			}
-			// namespace in which the prometheusRule should be deployed
-			// if left empty, it will be deployed in current namespace
-			namespace := c.monitoringSpec.RulesNamespace
-			if namespace == "" {
-				namespace = c.Namespace
-			}
-			if err := c.deployPrometheusRule(prometheusRuleName, namespace); err != nil {
-				logger.Errorf("failed to deploy prometheus rule. %+v", err)
-			} else {
-				logger.Infof("prometheusRule deployed")
-			}
-			logger.Debugf("ended monitoring deployment")
+		logger.Infof("starting monitoring deployment")
+		// servicemonitor takes some metadata from the service for easy mapping
+		if err := c.enableServiceMonitor(service); err != nil {
+			logger.Errorf("failed to enable service monitor. %v", err)
 		} else {
-			logger.Debugf("monitoring not supported for ceph versions <v%v", c.clusterInfo.CephVersion.Major)
+			logger.Infof("servicemonitor enabled")
 		}
+		// namespace in which the prometheusRule should be deployed
+		// if left empty, it will be deployed in current namespace
+		namespace := c.monitoringSpec.RulesNamespace
+		if namespace == "" {
+			namespace = c.Namespace
+		}
+		if err := c.deployPrometheusRule(prometheusRuleName, namespace); err != nil {
+			logger.Errorf("failed to deploy prometheus rule. %v", err)
+		} else {
+			logger.Infof("prometheusRule deployed")
+		}
+		logger.Debugf("ended monitoring deployment")
 	}
 	return nil
 }
@@ -254,10 +255,7 @@ func (c *Cluster) Start() error {
 func (c *Cluster) configureModules(daemonIDs []string) {
 	// Configure the modules asynchronously so we can complete all the configuration much sooner.
 	var wg sync.WaitGroup
-	if !c.needHTTPBindFix() {
-		startModuleConfiguration(&wg, "http bind settings", c.clearHTTPBindFix)
-	}
-
+	startModuleConfiguration(&wg, "http bind settings", c.clearHTTPBindFix)
 	startModuleConfiguration(&wg, "orchestrator modules", c.configureOrchestratorModules)
 	startModuleConfiguration(&wg, "prometheus", c.enablePrometheusModule)
 	startModuleConfiguration(&wg, "crash", c.enableCrashModule)
@@ -273,7 +271,7 @@ func startModuleConfiguration(wg *sync.WaitGroup, description string, configureM
 	go func() {
 		err := configureModules()
 		if err != nil {
-			logger.Errorf("failed modules: %s. %+v", description, err)
+			logger.Errorf("failed modules: %q. %v", description, err)
 		} else {
 			logger.Infof("successful modules: %s", description)
 		}
@@ -284,7 +282,7 @@ func startModuleConfiguration(wg *sync.WaitGroup, description string, configureM
 // Ceph docs about the prometheus module: http://docs.ceph.com/docs/master/mgr/prometheus/
 func (c *Cluster) enablePrometheusModule() error {
 	if err := client.MgrEnableModule(c.context, c.Namespace, prometheusModuleName, true); err != nil {
-		return fmt.Errorf("failed to enable mgr prometheus module. %+v", err)
+		return errors.Wrapf(err, "failed to enable mgr prometheus module")
 	}
 	return nil
 }
@@ -292,7 +290,7 @@ func (c *Cluster) enablePrometheusModule() error {
 // Ceph docs about the crash module: https://docs.ceph.com/docs/master/mgr/crash/
 func (c *Cluster) enableCrashModule() error {
 	if err := client.MgrEnableModule(c.context, c.Namespace, crashModuleName, true); err != nil {
-		return fmt.Errorf("failed to enable mgr crash module. %+v", err)
+		return errors.Wrapf(err, "failed to enable mgr crash module")
 	}
 	return nil
 }
@@ -301,37 +299,51 @@ func (c *Cluster) configureMgrModules() error {
 	// Enable mgr modules from the spec
 	for _, module := range c.mgrSpec.Modules {
 		if module.Name == "" {
-			return fmt.Errorf("name not specified for the mgr module configuration")
+			return errors.New("name not specified for the mgr module configuration")
 		}
 		if wellKnownModule(module.Name) {
-			return fmt.Errorf("cannot configure mgr module %s that is configured with other cluster settings", module.Name)
+			return errors.Errorf("cannot configure mgr module %q that is configured with other cluster settings", module.Name)
 		}
 		minVersion, versionOK := c.moduleMeetsMinVersion(module.Name)
 		if !versionOK {
-			return fmt.Errorf("module %s cannot be configured because it requires at least Ceph version %v", module.Name, minVersion)
+			return errors.Errorf("module %q cannot be configured because it requires at least Ceph version %q", module.Name, minVersion.String())
 		}
 
 		if module.Enabled {
+			if module.Name == balancerModuleName {
+				// Set min compat client to luminous before enabling the balancer mode "upmap"
+				err := client.SetMinCompatClientLuminous(c.context, c.Namespace)
+				if err != nil {
+					return errors.Wrap(err, "failed to set minimum compatibility client")
+				}
+				// Set balancer module mode
+				err = client.MgrSetBalancerMode(c.context, c.Namespace, balancerModuleMode)
+				if err != nil {
+					return errors.Wrapf(err, "failed to set module %q mode to %q", module.Name, balancerModuleMode)
+				}
+			}
+
 			if err := client.MgrEnableModule(c.context, c.Namespace, module.Name, false); err != nil {
-				return fmt.Errorf("failed to enable mgr module %s. %+v", module.Name, err)
+				return errors.Wrapf(err, "failed to enable mgr module %q", module.Name)
 			}
 
 			// Configure special settings for individual modules that are enabled
-			if module.Name == pgautoscalerModuleName && c.clusterInfo.CephVersion.IsAtLeastNautilus() {
+			if module.Name == pgautoscalerModuleName {
 				monStore := config.GetMonStore(c.context, c.Namespace)
 				// Ceph Octopus will have that option enabled
 				err := monStore.Set("global", "osd_pool_default_pg_autoscale_mode", "on")
 				if err != nil {
-					return fmt.Errorf("failed to enable pg autoscale mode for newly created pools. %+v", err)
+					return errors.Wrapf(err, "failed to enable pg autoscale mode for newly created pools")
 				}
 				err = monStore.Set("global", "mon_pg_warn_min_per_osd", "0")
 				if err != nil {
-					return fmt.Errorf("failed to set minimal number PGs per (in) osd before we warn the admin to 0. %+v", err)
+					return errors.Wrapf(err, "failed to set minimal number PGs per (in) osd before we warn the admin to")
 				}
 			}
+
 		} else {
 			if err := client.MgrDisableModule(c.context, c.Namespace, module.Name); err != nil {
-				return fmt.Errorf("failed to disable mgr module %s. %+v", module.Name, err)
+				return errors.Wrapf(err, "failed to disable mgr module %q", module.Name)
 			}
 		}
 	}
@@ -341,8 +353,8 @@ func (c *Cluster) configureMgrModules() error {
 
 func (c *Cluster) moduleMeetsMinVersion(name string) (*cephver.CephVersion, bool) {
 	minVersions := map[string]cephver.CephVersion{
-		// The PG autoscaler module requires Nautilus
-		pgautoscalerModuleName: {Major: 14},
+		// Put the modules here, example:
+		// pgautoscalerModuleName: {Major: 14},
 	}
 	if ver, ok := minVersions[name]; ok {
 		// Check if the required min version is met
@@ -368,7 +380,7 @@ func (c *Cluster) enableServiceMonitor(service *v1.Service) error {
 	namespace := service.GetNamespace()
 	serviceMonitor, err := k8sutil.GetServiceMonitor(path.Join(monitoringPath, serviceMonitorFile))
 	if err != nil {
-		return fmt.Errorf("service monitor could not be enabled. %+v", err)
+		return errors.Wrapf(err, "service monitor could not be enabled")
 	}
 	serviceMonitor.SetName(name)
 	serviceMonitor.SetNamespace(namespace)
@@ -376,7 +388,7 @@ func (c *Cluster) enableServiceMonitor(service *v1.Service) error {
 	serviceMonitor.Spec.NamespaceSelector.MatchNames = []string{namespace}
 	serviceMonitor.Spec.Selector.MatchLabels = service.GetLabels()
 	if _, err := k8sutil.CreateOrUpdateServiceMonitor(serviceMonitor); err != nil {
-		return fmt.Errorf("service monitor could not be enabled. %+v", err)
+		return errors.Wrapf(err, "service monitor could not be enabled")
 	}
 	return nil
 }
@@ -389,14 +401,14 @@ func (c *Cluster) deployPrometheusRule(name, namespace string) error {
 	prometheusRuleFile = path.Join(monitoringPath, prometheusRuleFile)
 	prometheusRule, err := k8sutil.GetPrometheusRule(prometheusRuleFile)
 	if err != nil {
-		return fmt.Errorf("prometheus rule could not be deployed. %+v", err)
+		return errors.Wrapf(err, "prometheus rule could not be deployed")
 	}
 	prometheusRule.SetName(name)
 	prometheusRule.SetNamespace(namespace)
 	owners := append(prometheusRule.GetOwnerReferences(), c.ownerRef)
 	k8sutil.SetOwnerRefs(&prometheusRule.ObjectMeta, owners)
 	if _, err := k8sutil.CreateOrUpdatePrometheusRule(prometheusRule); err != nil {
-		return fmt.Errorf("prometheus rule could not be deployed. %+v", err)
+		return errors.Wrapf(err, "prometheus rule could not be deployed")
 	}
 	return nil
 }

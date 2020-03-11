@@ -18,19 +18,23 @@ limitations under the License.
 package k8sutil
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/rook/rook/pkg/clusterd"
 	rookversion "github.com/rook/rook/pkg/version"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-k8sutil")
@@ -75,9 +79,10 @@ func GetK8SVersion(clientset kubernetes.Interface) (*version.Version, error) {
 	return version.MustParseSemantic(serverVersion.GitVersion), nil
 }
 
-// Hash MD5 hash a given string
+// Hash stableName computes a stable pseudorandom string suitable for inclusion in a Kubernetes object name from the given seed string.
 func Hash(s string) string {
-	return fmt.Sprintf("%x", md5.Sum([]byte(s)))
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:16])
 }
 
 // TruncateNodeName hashes the nodeName in case it would case the name to be longer than 63 characters
@@ -165,4 +170,20 @@ func validateLabelValue(value string) string {
 		sanitized = sanitized[:maxlen]
 	}
 	return sanitized
+}
+
+// StartOperatorSettingsWatch starts the watch for Operator Settings ConfigMap
+func StartOperatorSettingsWatch(context *clusterd.Context, operatorNamespace, operatorSettingConfigMapName string,
+	addFunc func(obj interface{}), updateFunc func(oldObj, newObj interface{}), deleteFunc func(obj interface{}), stopCh chan struct{}) {
+	_, cacheController := cache.NewInformer(cache.NewFilteredListWatchFromClient(context.Clientset.CoreV1().RESTClient(),
+		"configmaps", operatorNamespace, func(options *metav1.ListOptions) {
+			options.FieldSelector = fmt.Sprintf("%s=%s", "metadata.name", operatorSettingConfigMapName)
+		}), &v1.ConfigMap{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc:    addFunc,
+			UpdateFunc: updateFunc,
+			DeleteFunc: deleteFunc,
+		})
+	go cacheController.Run(stopCh)
 }

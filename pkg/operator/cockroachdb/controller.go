@@ -26,15 +26,13 @@ import (
 	"strings"
 	"time"
 
-	opkit "github.com/rook/operator-kit"
 	cockroachdbv1alpha1 "github.com/rook/rook/pkg/apis/cockroachdb.rook.io/v1alpha1"
-	rookv1alpha2 "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -61,12 +59,11 @@ const (
 	envVarValChannelInsecure       = "kubernetes-insecure"
 )
 
-var ClusterResource = opkit.CustomResource{
+var ClusterResource = k8sutil.CustomResource{
 	Name:    CustomResourceName,
 	Plural:  CustomResourceNamePlural,
 	Group:   cockroachdbv1alpha1.CustomResourceGroup,
 	Version: cockroachdbv1alpha1.Version,
-	Scope:   apiextensionsv1beta1.NamespaceScoped,
 	Kind:    reflect.TypeOf(cockroachdbv1alpha1.Cluster{}).Name(),
 }
 
@@ -88,7 +85,7 @@ type cluster struct {
 	context     *clusterd.Context
 	namespace   string
 	spec        cockroachdbv1alpha1.ClusterSpec
-	annotations rookv1alpha2.Annotations
+	annotations rookv1.Annotations
 	ownerRef    metav1.OwnerReference
 }
 
@@ -113,7 +110,7 @@ func clusterOwnerRef(name, clusterID string) metav1.OwnerReference {
 	}
 }
 
-func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) error {
+func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) {
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAdd,
 		UpdateFunc: c.onUpdate,
@@ -121,10 +118,8 @@ func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) e
 	}
 
 	logger.Infof("start watching cockroachdb clusters in all namespaces")
-	watcher := opkit.NewWatcher(ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CockroachdbV1alpha1().RESTClient())
-	go watcher.Watch(&cockroachdbv1alpha1.Cluster{}, stopCh)
+	go k8sutil.WatchCR(ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CockroachdbV1alpha1().RESTClient(), &cockroachdbv1alpha1.Cluster{}, stopCh)
 
-	return nil
 }
 
 func (c *ClusterController) onAdd(obj interface{}) {

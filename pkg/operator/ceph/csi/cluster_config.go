@@ -18,11 +18,11 @@ package csi
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"sync"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
@@ -56,7 +56,7 @@ func FormatCsiClusterConfig(
 
 	ccJson, err := json.Marshal(cc)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal csi cluster config. %+v", err)
+		return "", errors.Wrapf(err, "failed to marshal csi cluster config")
 	}
 	return string(ccJson), nil
 }
@@ -65,7 +65,7 @@ func parseCsiClusterConfig(c string) (csiClusterConfig, error) {
 	var cc csiClusterConfig
 	err := json.Unmarshal([]byte(c), &cc)
 	if err != nil {
-		return cc, fmt.Errorf("failed to parse csi cluster config. %+v", err)
+		return cc, errors.Wrapf(err, "failed to parse csi cluster config")
 	}
 	return cc, nil
 }
@@ -73,7 +73,7 @@ func parseCsiClusterConfig(c string) (csiClusterConfig, error) {
 func formatCsiClusterConfig(cc csiClusterConfig) (string, error) {
 	ccJson, err := json.Marshal(cc)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal csi cluster config. %+v", err)
+		return "", errors.Wrapf(err, "failed to marshal csi cluster config")
 	}
 	return string(ccJson), nil
 }
@@ -98,8 +98,7 @@ func UpdateCsiClusterConfig(
 	)
 	cc, err := parseCsiClusterConfig(curr)
 	if err != nil {
-		return "", fmt.Errorf(
-			"failed to parse current csi cluster config. %+v", err)
+		return "", errors.Wrapf(err, "failed to parse current csi cluster config")
 	}
 
 	for i, centry := range cc {
@@ -119,8 +118,9 @@ func UpdateCsiClusterConfig(
 }
 
 // CreateCsiConfigMap creates an empty config map that will be later used
-// to provide cluster configuration to ceph-csi.
-func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface) error {
+// to provide cluster configuration to ceph-csi. If a config map already
+// exists, it will return it.
+func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface, ownerRef *metav1.OwnerReference) error {
 	configMap := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ConfigName,
@@ -131,12 +131,21 @@ func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface) error 
 		ConfigKey: "[]",
 	}
 
-	if _, err := clientset.CoreV1().ConfigMaps(namespace).Create(configMap); err != nil {
+	k8sutil.SetOwnerRef(&configMap.ObjectMeta, ownerRef)
+	_, err := clientset.CoreV1().ConfigMaps(namespace).Create(configMap)
+	if err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
-			return fmt.Errorf(
-				"failed to create initial csi config map %v (in %v). %+v",
-				configMap.Name, namespace, err)
+			return errors.Wrapf(err, "failed to create initial csi config map %q (in %q)", configMap.Name, namespace)
 		}
+	}
+
+	logger.Infof("successfully created csi config map %q", configMap.Name)
+	return nil
+}
+
+func DeleteCsiConfigMap(namespace string, clientset kubernetes.Interface) error {
+	if err := clientset.CoreV1().ConfigMaps(namespace).Delete(ConfigName, &metav1.DeleteOptions{}); err != nil {
+		return errors.Wrapf(err, "failed to delete CSI driver configuration and deployments")
 	}
 	return nil
 }
@@ -144,7 +153,7 @@ func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface) error 
 // SaveClusterConfig updates the config map used to provide ceph-csi with
 // basic cluster configuration. The clusterNamespace and clusterInfo are
 // used to determine what "cluster" in the config map will be updated and
-// and the clusterNamespace value is epxected to match the clusterID
+// and the clusterNamespace value is expected to match the clusterID
 // value that is provided to ceph-csi uses in the storage class.
 // The locker l is typically a mutex and is used to prevent the config
 // map from being updated for multiple clusters simultaneously.
@@ -160,8 +169,7 @@ func SaveClusterConfig(
 	// csi is deployed into the same namespace as the operator
 	csiNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
 	if csiNamespace == "" {
-		return fmt.Errorf("namespace value missing (for %+v)",
-			k8sutil.PodNamespaceEnvVar)
+		return errors.Errorf("namespace value missing for %s", k8sutil.PodNamespaceEnvVar)
 	}
 	logger.Debugf("Using %+v for CSI ConfigMap Namespace", csiNamespace)
 
@@ -169,7 +177,7 @@ func SaveClusterConfig(
 	configMap, err := clientset.CoreV1().ConfigMaps(csiNamespace).Get(
 		ConfigName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to fetch current csi config map: %+v", err)
+		return errors.Wrapf(err, "failed to fetch current csi config map")
 	}
 
 	// update ConfigMap contents for current cluster
@@ -180,13 +188,14 @@ func SaveClusterConfig(
 	newData, err := UpdateCsiClusterConfig(
 		currData, clusterNamespace, clusterInfo.Monitors)
 	if err != nil {
-		return fmt.Errorf("failed to update csi config map data: %+v", err)
+		return errors.Wrapf(err, "failed to update csi config map data")
 	}
 	configMap.Data[ConfigKey] = newData
 
 	// update ConfigMap with new contents
 	if _, err := clientset.CoreV1().ConfigMaps(csiNamespace).Update(configMap); err != nil {
-		return fmt.Errorf("failed to update csi config map: %+v", err)
+		return errors.Wrapf(err, "failed to update csi config map")
 	}
+
 	return nil
 }

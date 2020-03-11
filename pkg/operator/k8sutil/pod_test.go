@@ -16,10 +16,13 @@ limitations under the License.
 package k8sutil
 
 import (
+	"os"
 	"testing"
 
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+
 	"github.com/stretchr/testify/assert"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -79,4 +82,153 @@ func TestGetPodPhaseMap(t *testing.T) {
 
 	// list of failed pods should have 1 entry
 	assert.Equal(t, 1, len(podPhaseMap[v1.PodFailed]))
+}
+
+func newToleration(defaultSeconds int64, tolerationKey string) v1.Toleration {
+	return v1.Toleration{Key: tolerationKey,
+		Operator:          "Exists",
+		Effect:            "NoExecute",
+		TolerationSeconds: &defaultSeconds}
+}
+
+func TestAddUnreachableNodeToleration(t *testing.T) {
+	podSpec := v1.PodSpec{}
+
+	// -------------------------------------------------------------------------
+	// Test one toleration of 5 seconds
+	expectedURToleration := newToleration(5, "node.kubernetes.io/unreachable")
+
+	// Change the UR toleration in the pod using env var and the tested function
+	os.Setenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS", "5")
+	AddUnreachableNodeToleration(&podSpec)
+
+	assert.Equal(t, 1, len(podSpec.Tolerations))
+	assert.Equal(t, expectedURToleration, podSpec.Tolerations[0])
+
+	//--------------------------------------------------------------------------
+	// Test adding one additional toleration, replaces the previous one,
+	// keeping only the last.
+	expectedURToleration = newToleration(6, "node.kubernetes.io/unreachable")
+
+	// Change the UR toleration in the pod using env var and the tested function
+	os.Setenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS", "6")
+	AddUnreachableNodeToleration(&podSpec)
+
+	assert.Equal(t, 1, len(podSpec.Tolerations))
+	assert.Equal(t, expectedURToleration, podSpec.Tolerations[0])
+
+	//--------------------------------------------------------------------------
+	// Changing the toleration at the beginning of the list
+	urTol := newToleration(10, "node.kubernetes.io/unreachable")
+	otherTol := newToleration(20, "node.kubernetes.io/network-unavailable")
+
+	podSpec.Tolerations = nil
+	podSpec.Tolerations = append(podSpec.Tolerations, urTol, otherTol)
+
+	expectedURToleration = newToleration(7, "node.kubernetes.io/unreachable")
+
+	// Change the Unreachable node toleration
+	os.Setenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS", "7")
+	AddUnreachableNodeToleration(&podSpec)
+
+	assert.Equal(t, 2, len(podSpec.Tolerations))
+	assert.Equal(t, expectedURToleration, podSpec.Tolerations[0])
+
+	//--------------------------------------------------------------------------
+	// Changing the toleration at the middle of the list
+	podSpec.Tolerations = nil
+	podSpec.Tolerations = append(podSpec.Tolerations, otherTol, urTol, otherTol)
+
+	expectedURToleration = newToleration(8, "node.kubernetes.io/unreachable")
+
+	// Change the Unreachable node toleration
+	os.Setenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS", "8")
+	AddUnreachableNodeToleration(&podSpec)
+
+	assert.Equal(t, 3, len(podSpec.Tolerations))
+	assert.Equal(t, expectedURToleration, podSpec.Tolerations[1])
+
+	//--------------------------------------------------------------------------
+	// Changing the toleration at the end of the list
+	podSpec.Tolerations = nil
+	podSpec.Tolerations = append(podSpec.Tolerations, otherTol, urTol)
+
+	expectedURToleration = newToleration(9, "node.kubernetes.io/unreachable")
+
+	// Change the Unreachable node toleration
+	os.Setenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS", "9")
+	AddUnreachableNodeToleration(&podSpec)
+
+	assert.Equal(t, 2, len(podSpec.Tolerations))
+	assert.Equal(t, expectedURToleration, podSpec.Tolerations[1])
+
+	// Environment var with wrong value format results in using default value
+	podSpec.Tolerations = nil
+
+	// The default value used for the Unreachable Node Toleration is 5 seconds
+	expectedURToleration = newToleration(5, "node.kubernetes.io/unreachable")
+
+	// Change the Unreachable node toleration using wrong format
+	os.Setenv("ROOK_UNREACHABLE_NODE_TOLERATION_SECONDS", "9s")
+	AddUnreachableNodeToleration(&podSpec)
+
+	assert.Equal(t, 1, len(podSpec.Tolerations))
+	assert.Equal(t, expectedURToleration, podSpec.Tolerations[0])
+
+}
+
+func testPodSpecPlacement(t *testing.T, requiredDuringScheduling, preferredDuringScheduling bool, req, pref int, placement *rookv1.Placement) {
+	spec := v1.PodSpec{
+		InitContainers: []v1.Container{},
+		Containers:     []v1.Container{},
+		RestartPolicy:  v1.RestartPolicyAlways,
+	}
+
+	SetNodeAntiAffinityForPod(&spec, *placement, requiredDuringScheduling, preferredDuringScheduling, map[string]string{"app": "mon"}, nil)
+
+	// should have a required anti-affinity and no preferred anti-affinity
+	assert.Equal(t,
+		req,
+		len(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+	assert.Equal(t,
+		pref,
+		len(spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution))
+}
+
+func makePlacement() rookv1.Placement {
+	return rookv1.Placement{
+		PodAntiAffinity: &v1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
+				{
+					TopologyKey: v1.LabelZoneFailureDomain,
+				},
+			},
+			PreferredDuringSchedulingIgnoredDuringExecution: []v1.WeightedPodAffinityTerm{
+				{
+					PodAffinityTerm: v1.PodAffinityTerm{
+						TopologyKey: v1.LabelZoneFailureDomain,
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestPodSpecPlacement(t *testing.T) {
+	// no placement settings in the crd
+	p := rookv1.Placement{}
+	testPodSpecPlacement(t, true, true, 1, 0, &p)
+	testPodSpecPlacement(t, true, false, 1, 0, &p)
+	testPodSpecPlacement(t, false, true, 0, 1, &p)
+	testPodSpecPlacement(t, false, false, 0, 0, &p)
+
+	// crd has other preferred and required anti-affinity setting
+	p = makePlacement()
+	testPodSpecPlacement(t, true, true, 2, 1, &p)
+	p = makePlacement()
+	testPodSpecPlacement(t, true, false, 2, 1, &p)
+	p = makePlacement()
+	testPodSpecPlacement(t, false, true, 1, 2, &p)
+	p = makePlacement()
+	testPodSpecPlacement(t, false, false, 1, 1, &p)
 }

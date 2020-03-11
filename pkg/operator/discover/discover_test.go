@@ -21,7 +21,7 @@ import (
 	"os"
 	"testing"
 
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	discoverDaemon "github.com/rook/rook/pkg/daemon/discover"
 	"github.com/rook/rook/pkg/operator/k8sutil"
@@ -34,7 +34,7 @@ import (
 )
 
 func TestStartDiscoveryDaemonset(t *testing.T) {
-	clientset := test.New(3)
+	clientset := test.New(t, 3)
 
 	os.Setenv(k8sutil.PodNamespaceEnvVar, "rook-system")
 	defer os.Unsetenv(k8sutil.PodNamespaceEnvVar)
@@ -47,6 +47,23 @@ func TestStartDiscoveryDaemonset(t *testing.T) {
 
 	namespace := "ns"
 	a := New(clientset)
+
+	// Create an operator pod
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rook-operator",
+			Namespace: "rook-system",
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "mypodContainer",
+					Image: "rook/test",
+				},
+			},
+		},
+	}
+	clientset.CoreV1().Pods("rook-system").Create(&pod)
 
 	// start a basic cluster
 	err := a.Start(namespace, "rook/rook:myversion", "mysa", false)
@@ -65,14 +82,14 @@ func TestStartDiscoveryDaemonset(t *testing.T) {
 	volumeMounts := agentDS.Spec.Template.Spec.Containers[0].VolumeMounts
 	assert.Equal(t, 3, len(volumeMounts))
 	envs := agentDS.Spec.Template.Spec.Containers[0].Env
-	assert.Equal(t, 2, len(envs))
+	assert.Equal(t, 3, len(envs))
 	image := agentDS.Spec.Template.Spec.Containers[0].Image
 	assert.Equal(t, "rook/rook:myversion", image)
 	assert.Nil(t, agentDS.Spec.Template.Spec.Tolerations)
 }
 
 func TestGetAvailableDevices(t *testing.T) {
-	clientset := test.New(3)
+	clientset := test.New(t, 3)
 	pvcBackedOSD := false
 	ns := "rook-system"
 	nodeName := "node123"
@@ -100,7 +117,7 @@ func TestGetAvailableDevices(t *testing.T) {
 	context := &clusterd.Context{
 		Clientset: clientset,
 	}
-	d := []rookalpha.Device{
+	d := []rookv1.Device{
 		{
 			Name: "sdc",
 		},

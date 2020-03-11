@@ -17,8 +17,8 @@ package client
 
 import (
 	"encoding/json"
-	"fmt"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 )
 
@@ -28,7 +28,7 @@ func AuthAdd(context *clusterd.Context, clusterName, name, keyringPath string, c
 	args := append([]string{"auth", "add", name, "-i", keyringPath}, caps...)
 	_, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to auth add for %s: %+v", name, err)
+		return errors.Wrapf(err, "failed to auth add for %s", name)
 	}
 
 	return nil
@@ -44,7 +44,7 @@ func AuthGetOrCreate(context *clusterd.Context, clusterName, name, keyringPath s
 	cmd.OutputFile = false
 	_, err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("failed to auth get-or-create for %s: %+v", name, err)
+		return errors.Wrapf(err, "failed to auth get-or-create for %s", name)
 	}
 
 	return nil
@@ -55,7 +55,7 @@ func AuthGetKey(context *clusterd.Context, clusterName, name string) (string, er
 	args := []string{"auth", "get-key", name}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return "", fmt.Errorf("failed to get key for %s: %+v", name, err)
+		return "", errors.Wrapf(err, "failed to get key for %s", name)
 	}
 
 	return parseAuthKey(buf)
@@ -66,7 +66,7 @@ func AuthGetOrCreateKey(context *clusterd.Context, clusterName, name string, cap
 	args := append([]string{"auth", "get-or-create-key", name}, caps...)
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return "", fmt.Errorf("failed get-or-create-key %s: %+v", name, err)
+		return "", errors.Wrapf(err, "failed get-or-create-key %s", name)
 	}
 
 	return parseAuthKey(buf)
@@ -77,9 +77,40 @@ func AuthUpdateCaps(context *clusterd.Context, clusterName, name string, caps []
 	args := append([]string{"auth", "caps", name}, caps...)
 	_, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to update caps for %s. %+v", name, err)
+		return errors.Wrapf(err, "failed to update caps for %s", name)
 	}
 	return err
+}
+
+// AuthGetCaps gets the capabilities for the given user.
+func AuthGetCaps(context *clusterd.Context, clusterName, name string) (caps map[string]string, error error) {
+	args := append([]string{"auth", "get", name})
+	output, err := NewCephCommand(context, clusterName, args).Run()
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get caps for %q", name)
+	}
+
+	var data []map[string]interface{}
+	err = json.Unmarshal(output, &data)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to unmarshal auth get response")
+	}
+	caps = make(map[string]string)
+
+	if data[0]["caps"].(map[string]interface{})["mon"] != nil {
+		caps["mon"] = data[0]["caps"].(map[string]interface{})["mon"].(string)
+	}
+	if data[0]["caps"].(map[string]interface{})["mds"] != nil {
+		caps["mds"] = data[0]["caps"].(map[string]interface{})["mds"].(string)
+	}
+	if data[0]["caps"].(map[string]interface{})["mgr"] != nil {
+		caps["mgr"] = data[0]["caps"].(map[string]interface{})["mgr"].(string)
+	}
+	if data[0]["caps"].(map[string]interface{})["osd"] != nil {
+		caps["osd"] = data[0]["caps"].(map[string]interface{})["osd"].(string)
+	}
+
+	return caps, err
 }
 
 // AuthDelete will delete the given user.
@@ -87,7 +118,7 @@ func AuthDelete(context *clusterd.Context, clusterName, name string) error {
 	args := []string{"auth", "del", name}
 	_, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to delete auth for %s. %v", name, err)
+		return errors.Wrapf(err, "failed to delete auth for %s", name)
 	}
 	return nil
 }
@@ -95,7 +126,7 @@ func AuthDelete(context *clusterd.Context, clusterName, name string) error {
 func parseAuthKey(buf []byte) (string, error) {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(buf, &resp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal get/create key response: %+v", err)
+		return "", errors.Wrapf(err, "failed to unmarshal get/create key response")
 	}
 	return resp["key"].(string), nil
 }

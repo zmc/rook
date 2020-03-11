@@ -18,22 +18,24 @@ package csi
 
 import (
 	"bytes"
-	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/template"
 
-	k8sutil "github.com/rook/rook/pkg/operator/k8sutil"
-
 	"github.com/ghodss/yaml"
+	"github.com/pkg/errors"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
+	k8sutil "github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 func loadTemplate(name, templatePath string, p templateParam) (string, error) {
-	b, err := ioutil.ReadFile(templatePath)
+	b, err := ioutil.ReadFile(filepath.Clean(templatePath))
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +44,7 @@ func loadTemplate(name, templatePath string, p templateParam) (string, error) {
 	t := template.New(name)
 	t, err = t.Parse(data)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse template %v. %+v", name, err)
+		return "", errors.Wrapf(err, "failed to parse template %v", name)
 	}
 	err = t.Execute(&writer, p)
 	return writer.String(), err
@@ -52,12 +54,12 @@ func templateToService(name, templatePath string, p templateParam) (*corev1.Serv
 	var svc corev1.Service
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load service template. %+v", err)
+		return nil, errors.Wrapf(err, "failed to load service template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &svc)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal service template %+v", err)
+		return nil, errors.Wrapf(err, "failed to unmarshal service template")
 	}
 	return &svc, nil
 }
@@ -66,12 +68,12 @@ func templateToStatefulSet(name, templatePath string, p templateParam) (*apps.St
 	var ss apps.StatefulSet
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load statefulset template. %+v", err)
+		return nil, errors.Wrapf(err, "failed to load statefulset template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ss)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal statefulset template %+v", err)
+		return nil, errors.Wrapf(err, "failed to unmarshal statefulset template")
 	}
 	return &ss, nil
 }
@@ -80,12 +82,12 @@ func templateToDaemonSet(name, templatePath string, p templateParam) (*apps.Daem
 	var ds apps.DaemonSet
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load daemonset template. %+v", err)
+		return nil, errors.Wrapf(err, "failed to load daemonset template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ds)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal daemonset template %+v", err)
+		return nil, errors.Wrapf(err, "failed to unmarshal daemonset template")
 	}
 	return &ds, nil
 }
@@ -94,31 +96,35 @@ func templateToDeployment(name, templatePath string, p templateParam) (*apps.Dep
 	var ds apps.Deployment
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load deployment template. %+v", err)
+		return nil, errors.Wrapf(err, "failed to load deployment template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ds)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal deployment template %+v", err)
+		return nil, errors.Wrapf(err, "failed to unmarshal deployment template")
 	}
 	return &ds, nil
 }
 
-func getToleration(provisioner bool) []corev1.Toleration {
+func getToleration(clientset kubernetes.Interface, provisioner bool) []corev1.Toleration {
 	// Add toleration if any
 	tolerations := []corev1.Toleration{}
 	var err error
 	tolerationsRaw := ""
 	if provisioner {
-		tolerationsRaw = os.Getenv(provisionerTolerationsEnv)
+		tolerationsRaw, err = k8sutil.GetOperatorSetting(clientset, controller.OperatorSettingConfigMapName, provisionerTolerationsEnv, "")
 	} else {
-		tolerationsRaw = os.Getenv(pluginTolerationsEnv)
+		tolerationsRaw, err = k8sutil.GetOperatorSetting(clientset, controller.OperatorSettingConfigMapName, pluginTolerationsEnv, "")
 	}
-	if tolerationsRaw != "" {
-		tolerations, err = k8sutil.YamlToTolerations(tolerationsRaw)
-		if err != nil {
-			logger.Warningf("failed to parse %s. %+v", tolerationsRaw, err)
-		}
+	if err != nil {
+		// tolerationsRaw is empty
+		logger.Warningf("tolerations will not be applied. %v", err)
+		return tolerations
+	}
+	tolerations, err = k8sutil.YamlToTolerations(tolerationsRaw)
+	if err != nil {
+		logger.Warningf("failed to parse %q. %v", tolerationsRaw, err)
+		return tolerations
 	}
 	for i := range tolerations {
 		if tolerations[i].Key == "" {
@@ -132,22 +138,28 @@ func getToleration(provisioner bool) []corev1.Toleration {
 	return tolerations
 }
 
-func getNodeAffinity(provisioner bool) *corev1.NodeAffinity {
+func getNodeAffinity(clientset kubernetes.Interface, provisioner bool) *corev1.NodeAffinity {
 	// Add NodeAffinity if any
 	nodeAffinity := ""
+	v1NodeAffinity := &corev1.NodeAffinity{}
+	var err error
 	if provisioner {
-		nodeAffinity = os.Getenv(provisionerNodeAffinityEnv)
+		nodeAffinity, err = k8sutil.GetOperatorSetting(clientset, controller.OperatorSettingConfigMapName, provisionerNodeAffinityEnv, "")
 	} else {
-		nodeAffinity = os.Getenv(pluginNodeAffinityEnv)
+		nodeAffinity, err = k8sutil.GetOperatorSetting(clientset, controller.OperatorSettingConfigMapName, pluginNodeAffinityEnv, "")
 	}
-	if nodeAffinity != "" {
-		v1NodeAffinity, err := k8sutil.GenerateNodeAffinity(nodeAffinity)
-		if err != nil {
-			logger.Warningf("failed to parse %s. %+v", nodeAffinity, err)
-		}
+	if err != nil {
+		logger.Warningf("node affinity will not be applied. %v", err)
+		// nodeAffinity will be empty by default in case of error
 		return v1NodeAffinity
 	}
-	return nil
+	if nodeAffinity != "" {
+		v1NodeAffinity, err = k8sutil.GenerateNodeAffinity(nodeAffinity)
+		if err != nil {
+			logger.Warningf("failed to parse %q. %v", nodeAffinity, err)
+		}
+	}
+	return v1NodeAffinity
 }
 
 func applyToPodSpec(pod *corev1.PodSpec, n *corev1.NodeAffinity, t []corev1.Toleration) {
@@ -164,7 +176,7 @@ func getPortFromENV(env string, defaultPort uint16) uint16 {
 	}
 	p, err := strconv.ParseUint(port, 10, 64)
 	if err != nil {
-		logger.Debugf("failed to parse port value for env %s. using default port %d. %+v", env, defaultPort, err)
+		logger.Debugf("failed to parse port value for env %q. using default port %d. %v", env, defaultPort, err)
 		return defaultPort
 	}
 	if p > 65535 {

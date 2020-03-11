@@ -5,11 +5,13 @@ weight: 1000
 
 # Prerequisites
 
-Rook can be installed on any existing Kubernetes clusters as long as it meets the minimum version and have the required privilege to run in the cluster (see below for more information). If you dont have a Kubernetes cluster, you can quickly set one up using [Minikube](#minikube), [Kubeadm](#kubeadm) or [CoreOS/Vagrant](#new-local-kubernetes-cluster-with-vagrant).
+Rook can be installed on any existing Kubernetes cluster as long as it meets the minimum version
+and Rook is granted the required privileges (see below for more information). If you don't have a Kubernetes cluster,
+you can quickly set one up using [Minikube](#minikube), [Kubeadm](#kubeadm) or [CoreOS/Vagrant](#new-local-kubernetes-cluster-with-vagrant).
 
 ## Minimum Version
 
-Kubernetes v1.10 or higher is supported by Rook.
+Kubernetes v1.13 or higher is supported by Rook.
 
 ## Privileges and RBAC
 
@@ -21,9 +23,20 @@ setting up Rook in a Kubernetes cluster with Pod Security Policies enabled.
 The Rook agent requires setup as a Flex volume plugin to manage the storage attachments in your cluster.
 See the [Flex Volume Configuration](flexvolume.md) topic to configure your Kubernetes deployment to load the Rook volume plugin.
 
-## Kernel with RBD module
+## Kernel
 
-Rook Ceph requires a Linux kernel built with the RBD module. Many distributions of Linux have this module but some don't, e.g. the GKE Container-Optimised OS (COS) does not have RBD. You can test your Kubernetes nodes by running `modprobe rbd`. If it says 'not found', you may have to [rebuild your kernel](https://rook.io/docs/rook/master/common-issues.html#rook-agent-rbd-module-missing-error) or choose a different Linux distribution.
+### RBD
+
+Rook Ceph requires a Linux kernel built with the RBD module. Many distributions of Linux have this module but some don't,
+e.g. the GKE Container-Optimised OS (COS) does not have RBD. You can test your Kubernetes nodes by running `modprobe rbd`.
+If it says 'not found', you may have to [rebuild your kernel](https://rook.io/docs/rook/master/common-issues.html#rook-agent-rbd-module-missing-error)
+or choose a different Linux distribution.
+
+### CephFS
+
+If you will be creating volumes from a Ceph shared file system (CephFS), the recommended minimum kernel version is 4.17.
+If you have a kernel version less than 4.17, the requested PVC sizes will not be enforced. Storage quotas will only be
+enforced on newer kernels.
 
 ## Kernel modules directory configuration
 

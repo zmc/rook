@@ -46,7 +46,7 @@ func TestCheckHealth(t *testing.T) {
 			return clienttest.MonInQuorumResponse(), nil
 		},
 	}
-	clientset := test.New(1)
+	clientset := test.New(t, 1)
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
@@ -54,7 +54,7 @@ func TestCheckHealth(t *testing.T) {
 		ConfigDir: configDir,
 		Executor:  executor,
 	}
-	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{}, false)
+	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 	logger.Infof("initial mons: %v", c.ClusterInfo.Monitors)
 	c.waitForStart = false
@@ -101,7 +101,7 @@ func TestCheckHealthNotFound(t *testing.T) {
 			return clienttest.MonInQuorumResponse(), nil
 		},
 	}
-	clientset := test.New(1)
+	clientset := test.New(t, 1)
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
@@ -109,7 +109,7 @@ func TestCheckHealthNotFound(t *testing.T) {
 		ConfigDir: configDir,
 		Executor:  executor,
 	}
-	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{}, false)
+	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 2, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 	c.waitForStart = false
 	defer os.RemoveAll(c.context.ConfigDir)
@@ -157,7 +157,7 @@ func TestAddRemoveMons(t *testing.T) {
 			return monQuorumResponse, nil
 		},
 	}
-	clientset := test.New(1)
+	clientset := test.New(t, 1)
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
@@ -165,7 +165,7 @@ func TestAddRemoveMons(t *testing.T) {
 		ConfigDir: configDir,
 		Executor:  executor,
 	}
-	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{}, false)
+	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 5, AllowMultiplePerNode: true}, "myversion")
 	c.maxMonID = 0 // "a" is max mon id
 	c.waitForStart = false
@@ -247,7 +247,7 @@ func TestAddOrRemoveExternalMonitor(t *testing.T) {
 	// both clusterInfo and mon map are identical so nil is expected
 	changed, err = c.addOrRemoveExternalMonitor(fakeResp)
 	assert.NoError(t, err)
-	assert.True(t, changed)
+	assert.False(t, changed)
 	assert.Equal(t, 1, len(c.ClusterInfo.Monitors))
 
 	//

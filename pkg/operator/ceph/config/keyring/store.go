@@ -20,15 +20,14 @@ limitations under the License.
 package keyring
 
 import (
-	"fmt"
-
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -85,15 +84,15 @@ func (k *SecretStore) GenerateKey(user string, access []string) (string, error) 
 	// get-or-create-key for the user account
 	key, err := client.AuthGetOrCreateKey(k.context, k.namespace, user, access)
 	if err != nil {
-		logger.Infof("Error getting or creating key for %s. "+
-			"Attempting to update capabilities in case the user already exists. %+v", user, err)
+		logger.Infof("Error getting or creating key for %q. "+
+			"Attempting to update capabilities in case the user already exists. %v", user, err)
 		uErr := client.AuthUpdateCaps(k.context, k.namespace, user, access)
 		if uErr != nil {
-			return "", fmt.Errorf("failed to get, create, or update auth key for %s. %+v", user, err)
+			return "", errors.Wrapf(err, "failed to get, create, or update auth key for %s", user)
 		}
 		key, uErr = client.AuthGetKey(k.context, k.namespace, user)
 		if uErr != nil {
-			return "", fmt.Errorf("failed to get key after updating existing auth capabilities for %s. %+v", user, err)
+			return "", errors.Wrapf(err, "failed to get key after updating existing auth capabilities for %s", user)
 		}
 	}
 	return key, nil
@@ -121,8 +120,8 @@ func (k *SecretStore) CreateOrUpdate(resourceName string, keyring string) error 
 func (k *SecretStore) Delete(resourceName string) error {
 	secretName := keyringSecretName(resourceName)
 	err := k.context.Clientset.CoreV1().Secrets(k.namespace).Delete(secretName, &metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		logger.Warningf("failed to delete keyring secret for %s. user may need to delete the resource manually. %+v", secretName, err)
+	if err != nil && !kerrors.IsNotFound(err) {
+		logger.Warningf("failed to delete keyring secret for %q. user may need to delete the resource manually. %v", secretName, err)
 	}
 
 	return nil
@@ -133,19 +132,19 @@ func (k *SecretStore) CreateSecret(secret *v1.Secret) error {
 	secretName := secret.ObjectMeta.Name
 	_, err := k.context.Clientset.CoreV1().Secrets(k.namespace).Get(secretName, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			logger.Debugf("creating secret for %s", secretName)
 			if _, err := k.context.Clientset.CoreV1().Secrets(k.namespace).Create(secret); err != nil {
-				return fmt.Errorf("failed to create secret for %s. %+v", secretName, err)
+				return errors.Wrapf(err, "failed to create secret for %s", secretName)
 			}
 			return nil
 		}
-		return fmt.Errorf("failed to get secret for %s. %+v", secretName, err)
+		return errors.Wrapf(err, "failed to get secret for %s", secretName)
 	}
 
 	logger.Debugf("updating secret for %s", secretName)
 	if _, err := k.context.Clientset.CoreV1().Secrets(k.namespace).Update(secret); err != nil {
-		return fmt.Errorf("failed to update secret for %s. %+v", secretName, err)
+		return errors.Wrapf(err, "failed to update secret for %s", secretName)
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 )
 
@@ -147,12 +148,12 @@ func Status(context *clusterd.Context, clusterName string, debug bool) (CephStat
 	cmd.Debug = debug
 	buf, err := cmd.Run()
 	if err != nil {
-		return CephStatus{}, fmt.Errorf("failed to get status: %+v", err)
+		return CephStatus{}, errors.Wrapf(err, "failed to get status. %s", string(buf))
 	}
 
 	var status CephStatus
 	if err := json.Unmarshal(buf, &status); err != nil {
-		return CephStatus{}, fmt.Errorf("failed to unmarshal status response: %+v", err)
+		return CephStatus{}, errors.Wrapf(err, "failed to unmarshal status response")
 	}
 
 	return status, nil
@@ -184,7 +185,7 @@ func IsClusterCleanError(context *clusterd.Context, clusterName string) error {
 		return err
 	}
 	if !clean {
-		return fmt.Errorf(msg)
+		return errors.New(msg)
 	}
 	return nil
 }
@@ -220,12 +221,12 @@ func getMDSRank(status CephStatus, clusterName, fsName string) (int, error) {
 		}
 	}
 	// if the mds is not shown in the map one reason might be because it's in standby
-	// if not in standby there is something else going wron
+	// if not in standby there is something else going wrong
 	if mdsRank < 0 && status.Fsmap.UpStandby < 1 {
 		// it might seem strange to log an error since this could be a warning too
-		// it is a warning until we reach the timeout, this should give enough time to the mds to transtion its state
+		// it is a warning until we reach the timeout, this should give enough time to the mds to transition its state
 		// after the timeout we consider that the mds might be gone or the timeout was not long enough...
-		return mdsRank, fmt.Errorf("mds %s not found in fsmap, this likely means mdss are transitioning between active and standby states", fsName)
+		return mdsRank, errors.Errorf("mds %s not found in fsmap, this likely means mdss are transitioning between active and standby states", fsName)
 	}
 
 	return mdsRank, nil
@@ -235,15 +236,15 @@ func getMDSRank(status CephStatus, clusterName, fsName string) (int, error) {
 func MdsActiveOrStandbyReplay(context *clusterd.Context, clusterName, fsName string) error {
 	status, err := Status(context, clusterName, false)
 	if err != nil {
-		return fmt.Errorf("failed to get ceph status. %+v", err)
+		return errors.Wrapf(err, "failed to get ceph status")
 	}
 
 	mdsRank, err := getMDSRank(status, clusterName, fsName)
 	if err != nil {
-		return fmt.Errorf("%+v", err)
+		return errors.Cause(err)
 	}
 
-	// this MDS is in standby so let's return immediatly
+	// this MDS is in standby so let's return immediately
 	if mdsRank < 0 {
 		logger.Infof("mds %s is in standby, nothing to check", fsName)
 		return nil
@@ -254,7 +255,7 @@ func MdsActiveOrStandbyReplay(context *clusterd.Context, clusterName, fsName str
 		return nil
 	}
 
-	return fmt.Errorf("mds %s is %s, bad state", fsName, status.Fsmap.ByRank[mdsRank].Status)
+	return errors.Errorf("mds %s is %s, bad state", fsName, status.Fsmap.ByRank[mdsRank].Status)
 }
 
 // IsCephHealthy verifies Ceph is healthy, useful when performing an upgrade
@@ -262,7 +263,7 @@ func MdsActiveOrStandbyReplay(context *clusterd.Context, clusterName, fsName str
 func IsCephHealthy(context *clusterd.Context, clusterName string) bool {
 	cephStatus, err := Status(context, clusterName, false)
 	if err != nil {
-		logger.Errorf("failed to detect if Ceph is healthy. failed to get ceph status. %+v", err)
+		logger.Errorf("failed to detect if Ceph is healthy. failed to get ceph status. %v", err)
 		return false
 	}
 

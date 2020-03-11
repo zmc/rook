@@ -21,27 +21,34 @@ import (
 	controllers "github.com/rook/rook/pkg/operator/ceph/disruption"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
 
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-func (o *Operator) startManager(stopCh <-chan struct{}) {
+func (o *Operator) startManager(namespaceToWatch string, stopCh <-chan struct{}) {
 
 	// Set up a manager
 	mgrOpts := manager.Options{
 		LeaderElection: false,
+		Namespace:      namespaceToWatch,
 	}
 
 	logger.Info("setting up the controller-runtime manager")
-	mgr, err := manager.New(o.context.KubeConfig, mgrOpts)
+	kubeConfig, err := config.GetConfig()
 	if err != nil {
-		logger.Errorf("unable to set up overall controller-runtime manager: %+v", err)
+		logger.Errorf("failed to get client config for controller-runtime manager. %v", err)
+		return
+	}
+	mgr, err := manager.New(kubeConfig, mgrOpts)
+	if err != nil {
+		logger.Errorf("failed to set up overall controller-runtime manager. %v", err)
 		return
 	}
 
 	// Add the registered controllers to the manager (entrypoint for controllers)
-	err = cluster.AddToManager(mgr)
+	err = cluster.AddToManager(mgr, o.context)
 	if err != nil {
-		logger.Errorf("Can't add controllers to controller-runtime manager: %+v", err)
+		logger.Errorf("failed to add controllers to controller-runtime manager. %v", err)
 	}
 	// options to pass to the controllers
 	controllerOpts := &controllerconfig.Context{
@@ -53,12 +60,12 @@ func (o *Operator) startManager(stopCh <-chan struct{}) {
 	// Add the registered controllers to the manager (entrypoint for controllers)
 	err = controllers.AddToManager(mgr, controllerOpts)
 	if err != nil {
-		logger.Errorf("Can't add controllers to controller-runtime manager: %+v", err)
+		logger.Errorf("failed to add controllers to controller-runtime manager. %v", err)
 	}
 
 	logger.Info("starting the controller-runtime manager")
 	if err := mgr.Start(stopCh); err != nil {
-		logger.Errorf("unable to run the controller-runtime manager: %+v", err)
+		logger.Errorf("unable to run the controller-runtime manager. %v", err)
 		return
 	}
 }

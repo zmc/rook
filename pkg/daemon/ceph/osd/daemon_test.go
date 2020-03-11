@@ -16,21 +16,19 @@ limitations under the License.
 package osd
 
 import (
-	"fmt"
-	"io/ioutil"
-	"os"
 	"strings"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
-	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/rook/rook/pkg/util/sys"
 	"github.com/stretchr/testify/assert"
 )
 
-const udevFSOutput = `
+const (
+	udevFSOutput = `
 DEVNAME=/dev/sdk
 DEVPATH=/devices/platform/host6/session2/target6:0:0/6:0:0:0/block/sdk
 DEVTYPE=disk
@@ -63,117 +61,78 @@ TAGS=:systemd:
 USEC_INITIALIZED=15981915740802
 `
 
-func TestRunDaemon(t *testing.T) {
-	configDir, _ := ioutil.TempDir("", "")
-	defer os.RemoveAll(configDir)
-	os.MkdirAll(configDir, 0755)
+	cvInventoryOutputAvailable = `
+	{
+		"available":true,
+		"lvs":[
 
-	defBkp := cephconfig.DefaultConfigDir
-	cephconfig.DefaultConfigDir = configDir
-	defer func() { cephconfig.DefaultConfigDir = defBkp }()
+		],
+		"rejected_reasons":[
+		   ""
+		],
+		"sys_api":{
+		   "size":10737418240.0,
+		   "scheduler_mode":"mq-deadline",
+		   "rotational":"0",
+		   "vendor":"",
+		   "human_readable_size":"10.00 GB",
+		   "sectors":0,
+		   "sas_device_handle":"",
+		   "rev":"",
+		   "sas_address":"",
+		   "locked":0,
+		   "sectorsize":"512",
+		   "removable":"0",
+		   "path":"/dev/sdb",
+		   "support_discard":"0",
+		   "model":"",
+		   "ro":"0",
+		   "nr_requests":"64",
+		   "partitions":{
 
-	agent, _, context := createTestAgent(t, "none", configDir, "node5375", &config.StoreConfig{StoreType: config.Bluestore})
-	agent.devices[0].IsFilter = true
+		   }
+		},
+		"path":"/dev/sdb",
+		"device_id":""
+	 }
+	 `
 
-	agent.pvcBacked = false
-	logger.Infof("Agent %+v", agent)
-	err := Provision(context, agent)
-	assert.Nil(t, err)
-}
+	cvInventoryOutputNotAvailableBluestoreLabel = `
+	{
+		"available":false,
+		"lvs":[
 
-func TestGetDataDirs(t *testing.T) {
-	configDir, _ := ioutil.TempDir("", "")
-	defer os.RemoveAll(configDir)
-	context := &clusterd.Context{ConfigDir: configDir}
-	defer os.RemoveAll(context.ConfigDir)
-	os.MkdirAll(context.ConfigDir, 0755)
+		],
+		"rejected_reasons":[
+		   "Has BlueStore device label"
+		]
+	 }
+	`
 
-	kv := mockKVStore()
-	nodeName := "node6046"
+	cvInventoryOutputNotAvailableLocked = `
+	{
+		"available":false,
+		"lvs":[
 
-	// user has specified devices to use, no dirs should be returned
-	dirMap, removedDirMap, err := getDataDirs(context, kv, "", true, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 0, len(dirMap))
-	assert.Equal(t, 0, len(removedDirMap))
+		],
+		"rejected_reasons":[
+		   "locked"
+		]
+	 }
+	 `
 
-	// user has no devices specified, should NO LONGER return default dir
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "", false, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 0, len(dirMap))
-	assert.Equal(t, 0, len(removedDirMap))
+	cvInventoryOutputNotAvailableSmall = `
+	{
+		"available":false,
+		"lvs":[
 
-	// user has no devices specified but does specify dirs, those should be returned
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "/rook/dir1", false, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(dirMap))
-	assert.Equal(t, unassignedOSDID, dirMap["/rook/dir1"])
-	assert.Equal(t, 0, len(removedDirMap))
-
-	// user has devices specified and also specifies dirs, those should be returned
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "/rook/dir1", true, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(dirMap))
-	assert.Equal(t, unassignedOSDID, dirMap["/rook/dir1"])
-	assert.Equal(t, 0, len(removedDirMap))
-
-	// simulate an OSD ID being assigned to the dir
-	dirMap["/rook/dir1"] = 1
-	// save the directory config
-	err = config.SaveOSDDirMap(kv, nodeName, dirMap)
-	assert.Nil(t, err)
-
-	// user has specified devices and also a new directory to use.  it should be added to the dir map
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "/rook/dir1,/tmp/mydir", true, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 2, len(dirMap))
-	assert.Equal(t, 1, dirMap["/rook/dir1"])
-	assert.Equal(t, unassignedOSDID, dirMap["/tmp/mydir"])
-	assert.Equal(t, 0, len(removedDirMap))
-
-	// simulate that the user's dir got an OSD by assigning it an ID
-	dirMap["/tmp/mydir"] = 23
-	err = config.SaveOSDDirMap(kv, nodeName, dirMap)
-	assert.Nil(t, err)
-
-	// user is still specifying the 2 directories, we should get back their IDs
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "/rook/dir1,/tmp/mydir", true, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 2, len(dirMap))
-	assert.Equal(t, 1, dirMap["/rook/dir1"])
-	assert.Equal(t, 23, dirMap["/tmp/mydir"])
-	assert.Equal(t, 0, len(removedDirMap))
-
-	// user is now only specifying 1 of the dirs, the other 1 should be returned as removed
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "/rook/dir1", true, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(dirMap))
-	assert.Equal(t, 1, dirMap["/rook/dir1"])
-	assert.Equal(t, 1, len(removedDirMap))
-	assert.Equal(t, 23, removedDirMap["/tmp/mydir"])
-
-	// clear the dir map and simulate the scenario where an OSD has been created in the default dir
-	kv.ClearStore(config.GetConfigStoreName(nodeName))
-	osdID := 9802
-	dirMap = map[string]int{context.ConfigDir: osdID}
-	err = config.SaveOSDDirMap(kv, nodeName, dirMap)
-	assert.Nil(t, err)
-
-	// when an OSD has been created in the default dir, no dirs are specified, and no devices are specified,
-	// the default dir should still be in use (it should not come back as removed!)
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "", false, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 1, len(dirMap))
-	assert.Equal(t, osdID, dirMap[context.ConfigDir])
-	assert.Equal(t, 0, len(removedDirMap))
-
-	// if devices are specified (but no dirs), the existing osd in the default dir will not be preserved
-	dirMap, removedDirMap, err = getDataDirs(context, kv, "", true, nodeName)
-	assert.Nil(t, err)
-	assert.Equal(t, 0, len(dirMap))
-	assert.Equal(t, 1, len(removedDirMap))
-	assert.Equal(t, osdID, removedDirMap[context.ConfigDir])
-}
+		],
+		"rejected_reasons":[
+			["Insufficient space (<5GB)"]
+		]
+	 }
+	 `
+)
 
 func TestAvailableDevices(t *testing.T) {
 	executor := &exectest.MockExecutor{}
@@ -199,27 +158,44 @@ NAME="sdb1" SIZE="30" TYPE="part" PKNAME="sdb"`, nil
 				return udevFSOutput, nil
 			}
 			return "", nil
+		} else if command == "ceph-volume" {
+			if strings.Index(args[3], "/mnt/set1-0-data-qfhfk") != -1 {
+				return cvInventoryOutputNotAvailableBluestoreLabel, nil
+			} else if strings.Index(args[3], "sdb") != -1 {
+				// sdb is locked
+				return cvInventoryOutputNotAvailableLocked, nil
+			} else if strings.Index(args[3], "sdc") != -1 {
+				// sdc is too small
+				return cvInventoryOutputNotAvailableSmall, nil
+			}
+
+			return cvInventoryOutputAvailable, nil
 		}
 
-		return "", fmt.Errorf("unknown command %s %+v", command, args)
+		return "", errors.Errorf("unknown command %s %s", command, args)
 	}
 
 	context := &clusterd.Context{Executor: executor}
 	context.Devices = []*sys.LocalDisk{
-		{Name: "sda"},
-		{Name: "sdb"},
-		{Name: "sdc"},
-		{Name: "sdd"},
-		{Name: "nvme01"},
-		{Name: "rda"},
-		{Name: "rdb"},
+		{Name: "sda", DevLinks: "/dev/disk/by-id/scsi-0123 /dev/disk/by-path/pci-0:1:2:3-scsi-1", RealName: "sda"},
+		{Name: "sdb", DevLinks: "/dev/disk/by-id/scsi-4567 /dev/disk/by-path/pci-4:5:6:7-scsi-1", RealName: "sdb"},
+		{Name: "sdc", DevLinks: "/dev/disk/by-id/scsi-89ab /dev/disk/by-path/pci-8:9:a:b-scsi-1", RealName: "sdc"},
+		{Name: "sdd", DevLinks: "/dev/disk/by-id/scsi-cdef /dev/disk/by-path/pci-c:d:e:f-scsi-1", RealName: "sdd"},
+		{Name: "sde", DevLinks: "/dev/disk/by-id/sde-0x0000 /dev/disk/by-path/pci-0000:00:18.0-ata-1", RealName: "sde"},
+		{Name: "nvme01", DevLinks: "/dev/disk/by-id/nvme-0246 /dev/disk/by-path/pci-0:2:4:6-nvme-1", RealName: "nvme01"},
+		{Name: "rda", RealName: "rda"},
+		{Name: "rdb", RealName: "rdb"},
+		{Name: "/mnt/set1-0-data-qfhfk", RealName: "xvdcy", Type: "data"},
+		{Name: "sdt1", RealName: "sdt1", Type: sys.PartType},
 	}
+
+	version := cephver.Octopus
 
 	// select all devices, including nvme01 for metadata
 	pvcBackedOSD := false
-	mapping, err := getAvailableDevices(context, []DesiredDevice{{Name: "all"}}, "nvme01", pvcBackedOSD)
+	mapping, err := getAvailableDevices(context, []DesiredDevice{{Name: "all"}}, "nvme01", pvcBackedOSD, version)
 	assert.Nil(t, err)
-	assert.Equal(t, 5, len(mapping.Entries))
+	assert.Equal(t, 7, len(mapping.Entries))
 	assert.Equal(t, -1, mapping.Entries["sda"].Data)
 	assert.Equal(t, -1, mapping.Entries["sdd"].Data)
 	assert.Equal(t, -1, mapping.Entries["rda"].Data)
@@ -228,70 +204,70 @@ NAME="sdb1" SIZE="30" TYPE="part" PKNAME="sdb"`, nil
 	assert.NotNil(t, mapping.Entries["nvme01"].Metadata)
 	assert.Equal(t, 0, len(mapping.Entries["nvme01"].Metadata))
 
+	// Partition is skipped
+	version = cephver.Nautilus
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "all"}}, "nvme01", pvcBackedOSD, version)
+	assert.Nil(t, err)
+	assert.Equal(t, 6, len(mapping.Entries))
+
+	// Do not skip partition anymore
+	version = cephver.Octopus
+
 	// select no devices both using and not using a filter
-	mapping, err = getAvailableDevices(context, nil, "", pvcBackedOSD)
+	mapping, err = getAvailableDevices(context, nil, "", pvcBackedOSD, version)
 	assert.Nil(t, err)
 	assert.Equal(t, 0, len(mapping.Entries))
 
-	mapping, err = getAvailableDevices(context, nil, "", pvcBackedOSD)
+	mapping, err = getAvailableDevices(context, nil, "", pvcBackedOSD, version)
 	assert.Nil(t, err)
 	assert.Equal(t, 0, len(mapping.Entries))
 
 	// select the sd* devices
-	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "^sd.$", IsFilter: true}}, "", pvcBackedOSD)
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "^sd.$", IsFilter: true}}, "", pvcBackedOSD, version)
 	assert.Nil(t, err)
-	assert.Equal(t, 2, len(mapping.Entries))
+	assert.Equal(t, 3, len(mapping.Entries))
 	assert.Equal(t, -1, mapping.Entries["sda"].Data)
 	assert.Equal(t, -1, mapping.Entries["sdd"].Data)
 
 	// select an exact device
-	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "sdd"}}, "", pvcBackedOSD)
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "sdd"}}, "", pvcBackedOSD, version)
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(mapping.Entries))
 	assert.Equal(t, -1, mapping.Entries["sdd"].Data)
 
 	// select all devices except those that have a prefix of "s"
-	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "^[^s]", IsFilter: true}}, "", pvcBackedOSD)
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "^[^s]", IsFilter: true}}, "", pvcBackedOSD, version)
 	assert.Nil(t, err)
 	assert.Equal(t, 3, len(mapping.Entries))
 	assert.Equal(t, -1, mapping.Entries["rda"].Data)
 	assert.Equal(t, -1, mapping.Entries["rdb"].Data)
 	assert.Equal(t, -1, mapping.Entries["nvme01"].Data)
-}
 
-func TestGetRemovedDevices(t *testing.T) {
-	testGetRemovedDevicesHelper(t, &config.StoreConfig{StoreType: config.Bluestore})
-	testGetRemovedDevicesHelper(t, &config.StoreConfig{StoreType: config.Filestore})
-}
+	// select the sd* devices by path names
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "^/dev/sd.$", IsDevicePathFilter: true}}, "", pvcBackedOSD, version)
+	assert.Nil(t, err)
+	assert.Equal(t, 3, len(mapping.Entries))
+	assert.Equal(t, -1, mapping.Entries["sda"].Data)
+	assert.Equal(t, -1, mapping.Entries["sdd"].Data)
 
-func testGetRemovedDevicesHelper(t *testing.T, storeConfig *config.StoreConfig) {
-	configDir, _ := ioutil.TempDir("", "")
-	defer os.RemoveAll(configDir)
-	os.MkdirAll(configDir, 0755)
-	nodeName := "node3391"
-	agent, _, _ := createTestAgent(t, "none", configDir, nodeName, storeConfig)
-	agent.devices[0].IsFilter = true
+	// select the SCSI devices
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "^/dev/disk/by-path/.*-scsi-.*", IsDevicePathFilter: true}}, "", pvcBackedOSD, version)
+	assert.Nil(t, err)
+	assert.Equal(t, 2, len(mapping.Entries))
+	assert.Equal(t, -1, mapping.Entries["sda"].Data)
+	assert.Equal(t, -1, mapping.Entries["sdd"].Data)
 
-	// mock the pre-existence of osd 1 on device sdx
-	_, _, _ = mockPartitionSchemeEntry(t, 1, "sdx", &agent.storeConfig, agent.kv, nodeName)
-
-	// get the removed devices for this configuration (note we said to use devices "none" above),
-	// it should be osd 1 on device sdx
-	scheme, mapping, err := getRemovedDevices(agent)
+	// select a device by explicit link
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "/dev/disk/by-id/sde-0x0000"}}, "", pvcBackedOSD, version)
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(mapping.Entries))
-	assert.Equal(t, 1, len(scheme.Entries))
+	assert.Equal(t, -1, mapping.Entries["sde"].Data)
 
-	// assert the scheme has an entry for osd 1 and its data partition is on sdx
-	schemeEntry := scheme.Entries[0]
-	assert.Equal(t, 1, schemeEntry.ID)
-	assert.Equal(t, "sdx", schemeEntry.Partitions[schemeEntry.GetDataPartitionType()].Device)
-
-	// assert the removed device mapping has an entry for device sdx and it points to osd 1
-	mappingEntry, ok := mapping.Entries["sdx"]
-	assert.True(t, ok)
-	assert.NotNil(t, mappingEntry)
-	assert.Equal(t, 1, mappingEntry.Data)
+	// test on PVC
+	pvcBackedOSD = true
+	mapping, err = getAvailableDevices(context, []DesiredDevice{{Name: "all"}}, "", pvcBackedOSD, version)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(mapping.Entries), mapping)
 }
 
 func TestGetVolumeGroupName(t *testing.T) {
@@ -299,15 +275,12 @@ func TestGetVolumeGroupName(t *testing.T) {
 	invalidLVPath1 := "/dev//vgName2"
 	invalidLVPath2 := "/dev/"
 
-	vgName, err := getVolumeGroupName(validLVPath)
-	assert.Nil(t, err)
+	vgName := getVolumeGroupName(validLVPath)
 	assert.Equal(t, vgName, "vgName1")
 
-	vgName, err = getVolumeGroupName(invalidLVPath1)
-	assert.NotNil(t, err)
+	vgName = getVolumeGroupName(invalidLVPath1)
 	assert.Equal(t, vgName, "")
 
-	vgName, err = getVolumeGroupName(invalidLVPath2)
-	assert.NotNil(t, err)
+	vgName = getVolumeGroupName(invalidLVPath2)
 	assert.Equal(t, vgName, "")
 }

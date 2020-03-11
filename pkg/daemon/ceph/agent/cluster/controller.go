@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
-	opkit "github.com/rook/operator-kit"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/agent/flexvolume"
@@ -62,15 +61,13 @@ func NewClusterController(context *clusterd.Context, flexvolumeController flexvo
 }
 
 // StartWatch will start the watching of cluster events by this controller
-func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) error {
+func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) {
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		DeleteFunc: c.onDelete,
 	}
 
 	logger.Infof("start watching cluster resources")
-	watcher := opkit.NewWatcher(opcluster.ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient())
-	go watcher.Watch(&cephv1.CephCluster{}, stopCh)
-	return nil
+	go k8sutil.WatchCR(opcluster.ClusterResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient(), &cephv1.CephCluster{}, stopCh)
 }
 
 func (c *ClusterController) onDelete(obj interface{}) {
@@ -82,12 +79,12 @@ func (c *ClusterController) onDelete(obj interface{}) {
 func (c *ClusterController) handleClusterDelete(cluster *cephv1.CephCluster, retryInterval time.Duration) {
 	node := os.Getenv(k8sutil.NodeNameEnvVar)
 	agentNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
-	logger.Infof("cluster in namespace %s is being deleted, agent on node %s will attempt to clean up.", cluster.Namespace, node)
+	logger.Infof("cluster in namespace %q is being deleted, agent on node %q will attempt to clean up.", cluster.Namespace, node)
 
 	// TODO: filter this List operation by node name and cluster namespace on the server side
 	vols, err := c.volumeAttachment.List(agentNamespace)
 	if err != nil {
-		logger.Errorf("failed to get volume attachments for agent namespace %s: %+v", agentNamespace, err)
+		logger.Errorf("failed to get volume attachments for agent namespace %s. %v", agentNamespace, err)
 	}
 
 	var waitGroup sync.WaitGroup
@@ -97,7 +94,7 @@ func (c *ClusterController) handleClusterDelete(cluster *cephv1.CephCluster, ret
 	for _, vol := range vols.Items {
 		for _, a := range vol.Attachments {
 			if a.Node == node && a.ClusterName == cluster.Namespace {
-				logger.Infof("volume %s has an attachment belonging to deleted cluster %s, will clean it up now. mountDir: %s",
+				logger.Infof("volume %q has an attachment belonging to deleted cluster %q, will clean it up now. mountDir: %q",
 					vol.Name, cluster.Namespace, a.MountDir)
 
 				// we will perform all the cleanup asynchronously later on.  Right now, just add this one
@@ -115,9 +112,9 @@ func (c *ClusterController) handleClusterDelete(cluster *cephv1.CephCluster, ret
 		go func(mountDir string) {
 			defer waitGroup.Done()
 			if err := c.cleanupVolumeAttachment(mountDir, retryInterval); err != nil {
-				logger.Errorf("failed to clean up attachment for mountDir %s: %+v", mountDir, err)
+				logger.Errorf("failed to clean up attachment for mountDir %q. %v", mountDir, err)
 			} else {
-				logger.Infof("cleaned up attachment for mountDir %s", mountDir)
+				logger.Infof("cleaned up attachment for mountDir %q", mountDir)
 			}
 		}(cleanupList[i])
 	}

@@ -21,9 +21,8 @@ import (
 	"testing"
 
 	"github.com/ghodss/yaml"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/stretchr/testify/assert"
-
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
 )
 
 func TestClusterSpecMarshal(t *testing.T) {
@@ -38,21 +37,16 @@ storage:
   useAllNodes: false
   useAllDevices: false
   deviceFilter: "^sd."
+  devicePathFilter: "^/dev/disk/by-path/pci-.*"
   location: "region=us-west,datacenter=delmar"
   config:
     metadataDevice: "nvme01"
     journalSizeMB: "1024"
     databaseSizeMB: "1024"
-  directories:
-  - path: "/rook/dir2"
   nodes:
-  - name: "node1"
-    config:
-      storeType: filestore
-    directories:
-    - path: "/rook/dir1"
   - name: "node2"
-    deviceFilter: "^foo*"`)
+    deviceFilter: "^foo*"
+    devicePathFilter: "^/dev/disk/by-id/.*foo.*"`)
 
 	// convert the raw spec yaml into JSON
 	rawJSON, err := yaml.YAMLToJSON(specYaml)
@@ -75,32 +69,24 @@ storage:
 		Network: NetworkSpec{
 			HostNetwork: true,
 		},
-		Storage: rookalpha.StorageScopeSpec{
+		Storage: rookv1.StorageScopeSpec{
 			UseAllNodes: false,
-			Selection: rookalpha.Selection{
-				UseAllDevices: &useAllDevices,
-				DeviceFilter:  "^sd.",
-				Directories:   []rookalpha.Directory{{Path: "/rook/dir2"}},
+			Selection: rookv1.Selection{
+				UseAllDevices:    &useAllDevices,
+				DeviceFilter:     "^sd.",
+				DevicePathFilter: "^/dev/disk/by-path/pci-.*",
 			},
 			Config: map[string]string{
 				"metadataDevice": "nvme01",
 				"journalSizeMB":  "1024",
 				"databaseSizeMB": "1024",
 			},
-			Nodes: []rookalpha.Node{
-				{
-					Name: "node1",
-					Selection: rookalpha.Selection{
-						Directories: []rookalpha.Directory{{Path: "/rook/dir1"}},
-					},
-					Config: map[string]string{
-						"storeType": "filestore",
-					},
-				},
+			Nodes: []rookv1.Node{
 				{
 					Name: "node2",
-					Selection: rookalpha.Selection{
-						DeviceFilter: "^foo*",
+					Selection: rookv1.Selection{
+						DeviceFilter:     "^foo*",
+						DevicePathFilter: "^/dev/disk/by-id/.*foo.*",
 					},
 				},
 			},

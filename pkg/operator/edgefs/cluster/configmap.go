@@ -31,21 +31,20 @@ const (
 	defaultServerIfName            = "eth0"
 	defaultBrokerIfName            = "eth0"
 	defaultTrlogProcessingInterval = 10
-	defaultTrlogKeepDays           = 3
+	defaultTrlogKeepDays           = 3.0
 )
 
 // As we relying on StatefulSet, we want to build global ConfigMap shared
 // to all the nodes in the cluster. This way configuration is simplified and
 // available to all subcomponents at any point it time.
 func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploymentConfig, resurrect bool) error {
-
+	var err error
 	cm := make(map[string]edgefsv1.SetupNode)
 
 	dnsRecords := make([]string, len(deploymentConfig.DevConfig))
 	for i := 0; i < len(deploymentConfig.DevConfig); i++ {
 		dnsRecords[i] = target.CreateQualifiedHeadlessServiceName(i, c.Namespace)
 	}
-
 	serverIfName := defaultServerIfName
 	brokerIfName := defaultBrokerIfName
 
@@ -65,7 +64,6 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 		}
 	} else if c.Spec.Network.IsMultus() {
 		if serverDefined && brokerDefined {
-			var err error
 			serverIfName, err = k8sutil.GetMultusIfName(serverSelector)
 			if err != nil {
 				return err
@@ -76,14 +74,14 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 				return err
 			}
 		} else if serverDefined {
-			serverIfName, err := k8sutil.GetMultusIfName(serverSelector)
+			serverIfName, err = k8sutil.GetMultusIfName(serverSelector)
 			if err != nil {
 				return err
 			}
 
 			brokerIfName = serverIfName
 		} else if brokerDefined {
-			serverIfName, err := k8sutil.GetMultusIfName(brokerSelector)
+			serverIfName, err = k8sutil.GetMultusIfName(brokerSelector)
 			if err != nil {
 				return err
 			}
@@ -141,6 +139,10 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 		if c.Spec.CommitNWait > 0 {
 			commitWait = 0
 		}
+		noIpFrag := 0
+		if c.Spec.NoIP4Frag {
+			noIpFrag = 1
+		}
 		nodeConfig := edgefsv1.SetupNode{
 			Ccow: edgefsv1.CcowConf{
 				Trlog: edgefsv1.CcowTrlog{
@@ -153,17 +155,19 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 				Network: edgefsv1.CcowNetwork{
 					BrokerInterfaces: brokerIfName,
 					ServerUnixSocket: "/opt/nedge/var/run/sock/ccowd.sock",
+					NoIP4Frag:        noIpFrag,
 				},
 			},
 			Ccowd: edgefsv1.CcowdConf{
 				BgConfig: edgefsv1.CcowdBgConfig{
-					TrlogDeleteAfterHours:     defaultTrlogKeepDays * 24,
-					SpeculativeBackrefTimeout: defaultTrlogKeepDays * 24 * 3600 * 1000,
+					TrlogDeleteAfterHours:     int(defaultTrlogKeepDays * 24),
+					SpeculativeBackrefTimeout: int(defaultTrlogKeepDays * 24 * 3600 * 1000),
 				},
 				Zone: devConfig.Zone,
 				Network: edgefsv1.CcowdNetwork{
 					ServerInterfaces: serverIfName,
 					ServerUnixSocket: "/opt/nedge/var/run/sock/ccowd.sock",
+					NoIP4Frag:        noIpFrag,
 				},
 				Transport: []string{deploymentConfig.TransportKey},
 			},
@@ -189,14 +193,18 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploy
 		}
 
 		if c.Spec.TrlogKeepDays > 0 {
-			nodeConfig.Ccowd.BgConfig.TrlogDeleteAfterHours = c.Spec.TrlogKeepDays * 24
-			nodeConfig.Ccowd.BgConfig.SpeculativeBackrefTimeout = c.Spec.TrlogKeepDays * 24 * 3600 * 1000
+			nodeConfig.Ccowd.BgConfig.TrlogDeleteAfterHours = int(c.Spec.TrlogKeepDays * 24)
+			nodeConfig.Ccowd.BgConfig.SpeculativeBackrefTimeout = int(c.Spec.TrlogKeepDays * 24 * 3600 * 1000)
 		}
 
 		if c.Spec.SystemReplicationCount > 0 {
 			nodeConfig.Ccow.Tenant.ReplicationCount = c.Spec.SystemReplicationCount
 			nodeConfig.Ccow.Tenant.SyncPut = c.Spec.SystemReplicationCount
 			nodeConfig.Ccow.Tenant.SyncPutNamed = c.Spec.SystemReplicationCount
+		}
+
+		if c.Spec.SysChunkSize > 0 {
+			nodeConfig.Ccow.Tenant.ChunkSize = c.Spec.SysChunkSize
 		}
 
 		cm[nodeName] = nodeConfig

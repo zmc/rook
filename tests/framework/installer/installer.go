@@ -28,10 +28,9 @@ import (
 )
 
 const (
-	// Version tag for the latest manifests
+	// VersionMaster tag for the latest manifests
 	VersionMaster = "master"
-	// Version tag for Rook v1.0
-	Version1_0 = "v1.0.6"
+
 	// test suite names
 	CassandraTestSuite   = "cassandra"
 	CephTestSuite        = "ceph"
@@ -95,10 +94,4 @@ func checkError(t *testing.T, err error, message string) {
 		return
 	}
 	assert.NoError(t, err, "%s. %+v", message, err)
-}
-
-func concatYaml(first, second string) string {
-	return first + `
----
-` + second
 }

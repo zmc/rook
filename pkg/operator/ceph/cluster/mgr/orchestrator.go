@@ -18,52 +18,49 @@ limitations under the License.
 package mgr
 
 import (
-	"fmt"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 )
 
 const (
 	orchestratorModuleName = "orchestrator_cli"
 	rookModuleName         = "rook"
+	orchestratorOldCLIName = "orchestrator"
+	orchestratorNewCLIName = "orch"
 )
 
 var (
 	orchestratorInitWaitTime = 5 * time.Second
+	orchestratorCLIName      = orchestratorOldCLIName
 )
 
 // Ceph docs about the orchestrator modules: http://docs.ceph.com/docs/master/mgr/orchestrator_cli/
 func (c *Cluster) configureOrchestratorModules() error {
-	if !c.clusterInfo.CephVersion.IsAtLeastNautilus() {
-		logger.Infof("skipping enabling orchestrator modules on releases older than nautilus")
-		return nil
-	}
-
 	if err := client.MgrEnableModule(c.context, c.Namespace, rookModuleName, true); err != nil {
-		return fmt.Errorf("failed to enable mgr rook module. %+v", err)
+		return errors.Wrapf(err, "failed to enable mgr rook module")
 	}
 	if err := client.MgrEnableModule(c.context, c.Namespace, orchestratorModuleName, true); err != nil {
-		return fmt.Errorf("failed to enable mgr orchestrator module. %+v", err)
+		return errors.Wrapf(err, "failed to enable mgr orchestrator module")
 	}
 	if err := c.setRookOrchestratorBackend(); err != nil {
-		return fmt.Errorf("failed to set rook orchestrator backend. %+v", err)
+		return errors.Wrapf(err, "failed to set rook orchestrator backend")
 	}
 	return nil
 }
 
 func (c *Cluster) setRookOrchestratorBackend() error {
-	if !c.clusterInfo.CephVersion.IsAtLeastNautilus() {
-		return nil
+	if c.clusterInfo.CephVersion.IsAtLeastOctopus() {
+		orchestratorCLIName = orchestratorNewCLIName
 	}
-
 	// retry a few times in the case that the mgr module is not ready to accept commands
 	_, err := client.ExecuteCephCommandWithRetry(func() ([]byte, error) {
-		args := []string{"orchestrator", "set", "backend", "rook"}
+		args := []string{orchestratorCLIName, "set", "backend", "rook"}
 		return client.NewCephCommand(c.context, c.Namespace, args).RunWithTimeout(client.CmdExecuteTimeout)
 	}, c.exitCode, 5, invalidArgErrorCode, orchestratorInitWaitTime)
 	if err != nil {
-		return fmt.Errorf("failed to set rook as the orchestrator backend. %+v", err)
+		return errors.Wrapf(err, "failed to set rook as the orchestrator backend")
 	}
 
 	return nil

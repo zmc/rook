@@ -20,10 +20,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
@@ -73,7 +75,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		return reconcile.Result{}, nil
 	}
 
-	logger.Debugf("reconciling node: %s", request.Name)
+	logger.Debugf("reconciling node: %q", request.Name)
 
 	// Create or Update the deployment default/foo
 	deploy := &appsv1.Deployment{
@@ -86,23 +88,27 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: request.Name}}
 
 	err := r.client.Get(context.TODO(), request.NamespacedName, node)
-	if errors.IsNotFound(err) {
+	if kerrors.IsNotFound(err) {
 		// delete any canary deployments if the node doesn't exist
-		r.client.Delete(context.TODO(), deploy)
+		logger.Infof("deleting drain-canary deployment for deleted node %q", request.Name)
+		err = r.client.Delete(context.TODO(), deploy)
+		if err != nil {
+			return reconcile.Result{}, errors.Wrapf(err, "could not delete drain-canary deployment for deleted node %q", request.Name)
+		}
 		return reconcile.Result{}, nil
 	} else if err != nil {
-		return reconcile.Result{}, fmt.Errorf("Could not get node %s", request.NamespacedName)
+		return reconcile.Result{}, errors.Errorf("could not get node %q", request.NamespacedName)
 	}
 
 	nodeHostnameLabel, ok := node.ObjectMeta.Labels[corev1.LabelHostname]
 	if !ok {
-		return reconcile.Result{}, fmt.Errorf("Label key %s does not exist on node %s", corev1.LabelHostname, request.NamespacedName)
+		return reconcile.Result{}, errors.Errorf("Label key %q does not exist on node %q", corev1.LabelHostname, request.NamespacedName)
 	}
 
 	osdPodList := &corev1.PodList{}
 	err = r.client.List(context.TODO(), osdPodList, client.MatchingLabels{k8sutil.AppAttr: osd.AppName})
 	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("could not list the osd pods: %+v", err)
+		return reconcile.Result{}, errors.Wrap(err, "could not list the osd pods")
 	}
 
 	// map with tolerations as keys and empty struct as values for uniqueness
@@ -120,12 +126,12 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 			var deployment appsv1.Deployment
 			err := r.client.List(context.TODO(), deploymentList, client.MatchingLabels(labelSelector), client.InNamespace(osdPod.GetNamespace()))
 			if err != nil || len(deploymentList.Items) < 1 {
-				logger.Errorf("Cannot find deployment for osd id %s in namespace %s", labels[osd.OsdIdLabelKey], osdPod.GetNamespace())
+				logger.Errorf("cannot find deployment for osd id %q in namespace %q", labels[osd.OsdIdLabelKey], osdPod.GetNamespace())
 			} else {
 				deployment = deploymentList.Items[0]
 			}
 			if len(deploymentList.Items) > 1 {
-				logger.Errorf("Found multiple deployments for osd id %s in namespace %s: %+v", labels[osd.OsdIdLabelKey], osdPod.GetNamespace(), deploymentList)
+				logger.Errorf("found multiple deployments for osd id %q in namespace %q: %+v", labels[osd.OsdIdLabelKey], osdPod.GetNamespace(), deploymentList)
 			}
 
 			occupiedByOSD = true
@@ -133,7 +139,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 			for _, osdToleration := range deployment.Spec.Template.Spec.Tolerations {
 				if osdToleration.Key == "node.kubernetes.io/unschedulable" {
 					logger.Errorf(
-						"osd %s in namespace %s tolerates the drain taint, but the drain canary will not.",
+						"osd %q in namespace %q tolerates the drain taint, but the drain canary will not.",
 						labels[osd.OsdIdLabelKey],
 						labels[k8sutil.ClusterAttr],
 					)
@@ -165,11 +171,11 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		}
 
 		ownerReferences := []metav1.OwnerReference{}
-		// get the operator Deployment to use as an owner refreence
+		// get the operator Deployment to use as an owner reference
 		operatorPodKey := types.NamespacedName{Name: os.Getenv(k8sutil.PodNameEnvVar), Namespace: r.context.OperatorNamespace}
 		operatorDeployment, err := getDeploymentForPod(r.client, operatorPodKey)
 		if err != nil {
-			logger.Errorf("could not find rook operator deployment for pod %+v: %+v", operatorPodKey, err)
+			logger.Errorf("could not find rook operator deployment for pod %+v. %v", operatorPodKey, err)
 		} else {
 			operatorDeployment := operatorDeployment
 			controllerBool := true
@@ -185,7 +191,7 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 		deploy.ObjectMeta.OwnerReferences = ownerReferences
 
 		// update the deployment labels
-		topology, _ := osd.ExtractRookTopologyFromLabels(node.GetLabels())
+		topology := osd.ExtractOSDTopologyFromLabels(node.GetLabels())
 		for key, value := range topology {
 			selectorLabels[key] = value
 		}
@@ -206,32 +212,38 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 	if occupiedByOSD {
 		op, err := controllerutil.CreateOrUpdate(context.TODO(), r.client, deploy, mutateFunc)
 		if err != nil {
-			return reconcile.Result{}, fmt.Errorf("Node reconcile failed on op: %s : %+v", op, err)
+			return reconcile.Result{}, errors.Wrapf(err, "node reconcile failed on op %q", op)
 		}
-		logger.Debugf("deployment successfully reconciled for node %s. operation: %s", request.Name, op)
+		msg := fmt.Sprintf("deployment successfully reconciled for node %q. operation: %q", request.Name, op)
+		if op == controllerutil.OperationResultCreated {
+			logger.Info(msg)
+		} else {
+			logger.Debug(msg)
+		}
 	} else {
-		logger.Debugf("not watching for drains on node %s as there are no osds running there.", request.Name)
+		logger.Debugf("not watching for drains on node %q as there are no osds running there.", request.Name)
 
 		// get the canary deployment
 		canarayDeployment := &appsv1.Deployment{}
 		key := types.NamespacedName{Name: deploy.GetName(), Namespace: deploy.GetNamespace()}
 		err := r.client.Get(context.TODO(), key, canarayDeployment)
-		if err != nil && !errors.IsNotFound(err) {
-			return reconcile.Result{}, fmt.Errorf("could not fetch deployment %q: %+v", key, err)
-		} else if errors.IsNotFound(err) {
+		if err != nil && !kerrors.IsNotFound(err) {
+			return reconcile.Result{}, errors.Wrapf(err, "could not fetch deployment %q", key)
+		} else if kerrors.IsNotFound(err) {
 			return reconcile.Result{}, nil
 		}
 
 		// delete the canary deployments that aren't triggered by drains, but are on nodes that aren't occupied by OSDs
 		// if it's on a draining node, we don't want to kill the canary.
 		if canarayDeployment.Status.ReadyReplicas > 0 {
+			logger.Infof("deleting drain-canary deployment on node %q as OSDs are no longer scheduled here", request.Name)
 			err := r.client.Delete(context.TODO(), canarayDeployment)
 			if err != nil {
-				return reconcile.Result{}, fmt.Errorf("could not delete deployment %q: %+v", key, err)
+				return reconcile.Result{}, errors.Wrapf(err, "could not delete deployment %q", key)
 			}
 		}
 	}
-	return reconcile.Result{}, nil
+	return reconcile.Result{Requeue: true, RequeueAfter: time.Minute * 15}, nil
 }
 
 // returns a container that does nothing
@@ -249,7 +261,7 @@ func getDeploymentForPod(client client.Client, podKey types.NamespacedName) (*ap
 	operatorPod := &corev1.Pod{}
 	err := client.Get(context.TODO(), podKey, operatorPod)
 	if err != nil {
-		return nil, fmt.Errorf("could not get pod %+v: %+v", podKey, err)
+		return nil, errors.Wrapf(err, "could not get pod %+v", podKey)
 	} else {
 		for _, rsRef := range operatorPod.ObjectMeta.OwnerReferences {
 			if *rsRef.Controller {
@@ -258,7 +270,7 @@ func getDeploymentForPod(client client.Client, podKey types.NamespacedName) (*ap
 				replicaSetKey := types.NamespacedName{Name: rsRef.Name, Namespace: podKey.Namespace}
 				err := client.Get(context.TODO(), replicaSetKey, replicaSet)
 				if err != nil {
-					return nil, fmt.Errorf("could not get replicaset %+v: %+v", replicaSetKey, err)
+					return nil, errors.Wrapf(err, "could not get replicaset %+v", replicaSetKey)
 				} else {
 					for _, depRef := range replicaSet.ObjectMeta.OwnerReferences {
 						if *depRef.Controller {
@@ -273,5 +285,5 @@ func getDeploymentForPod(client client.Client, podKey types.NamespacedName) (*ap
 			}
 		}
 	}
-	return nil, fmt.Errorf("could not get deployment for pod %+v", podKey)
+	return nil, errors.Errorf("could not get deployment for pod %+v", podKey)
 }

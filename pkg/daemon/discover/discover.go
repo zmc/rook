@@ -36,15 +36,23 @@ import (
 	"github.com/rook/rook/pkg/util/sys"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	discoverDaemonUdev = "DISCOVER_DAEMON_UDEV_BLACKLIST"
+)
+
 var (
-	logger          = capnslog.NewPackageLogger("github.com/rook/rook", "rook-discover")
-	AppName         = "rook-discover"
-	NodeAttr        = "rook.io/node"
+	logger = capnslog.NewPackageLogger("github.com/rook/rook", "rook-discover")
+	// AppName is the name of the pod
+	AppName = "rook-discover"
+	// NodeAttr is the attribute of that node
+	NodeAttr = "rook.io/node"
+	// LocalDiskCMData is the data name of the config map storing devices
 	LocalDiskCMData = "devices"
+	// LocalDiskCMName is name of the config map storing devices
 	LocalDiskCMName = "local-device-%s"
 	nodeName        string
 	namespace       string
@@ -55,6 +63,7 @@ var (
 	useCVInventory  bool
 )
 
+// CephVolumeInventory is the Go struct representation of the json output
 type CephVolumeInventory struct {
 	Path            string          `json:"path"`
 	Available       bool            `json:"available"`
@@ -63,6 +72,7 @@ type CephVolumeInventory struct {
 	LVS             json.RawMessage `json:"lvs"`
 }
 
+// Run is the entry point of that package execution
 func Run(context *clusterd.Context, probeInterval time.Duration, useCV bool) error {
 	if context == nil {
 		return fmt.Errorf("nil context")
@@ -84,18 +94,21 @@ func Run(context *clusterd.Context, probeInterval time.Duration, useCV bool) err
 
 	udevEvents := make(chan string)
 	go udevBlockMonitor(udevEvents, udevEventPeriod)
-
 	for {
 		select {
 		case <-sigc:
 			logger.Infof("shutdown signal received, exiting...")
 			return nil
 		case <-time.After(probeInterval):
-			updateDeviceCM(context)
+			if err := updateDeviceCM(context); err != nil {
+				logger.Errorf("failed to update device configmap during probe interval. %v", err)
+			}
 		case _, ok := <-udevEvents:
 			if ok {
 				logger.Info("trigger probe from udev event")
-				updateDeviceCM(context)
+				if err := updateDeviceCM(context); err != nil {
+					logger.Errorf("failed to update device configmap triggered from udev event. %v", err)
+				}
 			} else {
 				logger.Warningf("disabling udev monitoring")
 				udevEvents = nil
@@ -176,13 +189,25 @@ func rawUdevBlockMonitor(c chan string, matches, exclusions []string) {
 // only one event is emitted per period in order to deal with flapping.
 func udevBlockMonitor(c chan string, period time.Duration) {
 	defer close(c)
+	var udevFilter []string
 
 	// return any add or remove events, but none that match device mapper
-	// events. string matching is case-insensitve
+	// events. string matching is case-insensitive
 	events := make(chan string)
+
+	// get discoverDaemonUdevBlacklist from the environment variable
+	// if user doesn't provide any regex; generate the default regex
+	// else use the regex provided by user
+	discoverUdev := os.Getenv(discoverDaemonUdev)
+	if discoverUdev == "" {
+		discoverUdev = "(?i)dm-[0-9]+,(?i)rbd[0-9]+,(?i)nbd[0-9]+"
+	}
+	udevFilter = strings.Split(discoverUdev, ",")
+	logger.Infof("using the regular expressions %q", udevFilter)
+
 	go rawUdevBlockMonitor(events,
 		[]string{"(?i)add", "(?i)remove"},
-		[]string{"(?i)dm-[0-9]+", "(?i)rbd[0-9]+", "(?i)nbd[0-9]+"})
+		udevFilter)
 
 	for {
 		event, ok := <-events
@@ -278,6 +303,7 @@ func checkDeviceListsEqual(oldDevs, newDevs []sys.LocalDisk) bool {
 	return true
 }
 
+// DeviceListsEqual checks whether 2 lists are equal or not
 func DeviceListsEqual(old, new string) (bool, error) {
 	var oldDevs []sys.LocalDisk
 	var newDevs []sys.LocalDisk
@@ -302,13 +328,13 @@ func updateDeviceCM(context *clusterd.Context) error {
 		logger.Infof("failed to probe devices: %v", err)
 		return err
 	}
-	deviceJson, err := json.Marshal(devices)
+	deviceJSON, err := json.Marshal(devices)
 	if err != nil {
 		logger.Infof("failed to marshal: %v", err)
 		return err
 	}
 
-	deviceStr := string(deviceJson)
+	deviceStr := string(deviceJSON)
 	if cm == nil {
 		cm, err = context.Clientset.CoreV1().ConfigMaps(namespace).Get(cmName, metav1.GetOptions{})
 	}
@@ -316,7 +342,7 @@ func updateDeviceCM(context *clusterd.Context) error {
 		lastDevice = cm.Data[LocalDiskCMData]
 		logger.Debugf("last devices %s", lastDevice)
 	} else {
-		if !errors.IsNotFound(err) {
+		if !kerrors.IsNotFound(err) {
 			logger.Infof("failed to get configmap: %v", err)
 			return err
 		}
@@ -336,6 +362,15 @@ func updateDeviceCM(context *clusterd.Context) error {
 			},
 			Data: data,
 		}
+
+		// Get the discover daemon pod details to attach the owner reference to the config map
+		discoverPod, err := k8sutil.GetRunningPod(context.Clientset)
+		if err != nil {
+			logger.Warningf("failed to get discover pod to set ownerref. %+v", err)
+		} else {
+			k8sutil.SetOwnerRefsWithoutBlockOwner(&cm.ObjectMeta, discoverPod.OwnerReferences)
+		}
+
 		cm, err = context.Clientset.CoreV1().ConfigMaps(namespace).Create(cm)
 		if err != nil {
 			logger.Infof("failed to create configmap: %v", err)
@@ -363,7 +398,7 @@ func updateDeviceCM(context *clusterd.Context) error {
 func probeDevices(context *clusterd.Context) ([]sys.LocalDisk, error) {
 	devices := make([]sys.LocalDisk, 0)
 	localDevices, err := clusterd.DiscoverDevices(context.Executor)
-	logger.Infof("localdevices - %+v", localDevices)
+	logger.Infof("localdevices: %+v", localDevices)
 	if err != nil {
 		return devices, fmt.Errorf("failed initial hardware discovery. %+v", err)
 	}

@@ -19,6 +19,7 @@ package object
 import (
 	"fmt"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 )
@@ -39,9 +40,9 @@ func runAdminCommandNoRealm(c *Context, args ...string) (string, error) {
 	command, args := client.FinalizeCephCommandArgs("radosgw-admin", args, c.Context.ConfigDir, c.ClusterName)
 
 	// start the rgw admin command
-	output, err := c.Context.Executor.ExecuteCommandWithOutput(false, "", command, args...)
+	output, err := c.Context.Executor.ExecuteCommandWithOutput(client.IsDebugLevel(), "", command, args...)
 	if err != nil {
-		return "", fmt.Errorf("failed to run radosgw-admin: %+v", err)
+		return "", errors.Wrapf(err, "failed to run radosgw-admin")
 	}
 
 	return output, nil
