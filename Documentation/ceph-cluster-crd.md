@@ -31,7 +31,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -54,7 +54,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -105,7 +105,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
   To ensure a consistent version of the image is running across all nodes in the cluster, it is recommended to use a very specific image version.
   Tags also exist that would give the latest version, but they are only recommended for test environments. For example, the tag `v14` will be updated each time a new nautilus build is released.
   Using the `v14` or similar tag is not recommended in production because it may lead to inconsistent versions of the image running across different nodes in the cluster.
-  * `allowUnsupported`: If `true`, allow an unsupported major version of the Ceph release. Currently `mimic` and `nautilus` are supported, so `octopus` would require this to be set to `true`. Should be set to `false` in production.
+  * `allowUnsupported`: If `true`, allow an unsupported major version of the Ceph release. Currently `nautilus` and `octopus` are supported. Future versions such as `pacific` would require this to be set to `true`. Should be set to `false` in production.
 * `dataDirHostPath`: The path on the host ([hostPath](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath)) where config and data should be stored for each of the services. If the directory does not exist, it will be created. Because this directory persists on the host, it will remain after pods are deleted. Following paths and any of their subpaths **must not be used**: `/etc/ceph`, `/rook` or `/var/log/ceph`.
   * On **Minikube** environments, use `/data/rook`. Minikube boots into a tmpfs but it provides some [directories](https://github.com/kubernetes/minikube/blob/master/docs/persistent_volumes.md) where files can be persisted across reboots. Using one of these directories will ensure that Rook's data and configuration files are persisted and that enough storage space is available.
   * **WARNING**: For test scenarios, if you delete a cluster and start a new cluster on the same hosts, the path used by `dataDirHostPath` must be deleted. Otherwise, stale keys and other config will remain from the previous cluster and the new mons will fail to start.
@@ -441,7 +441,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -473,7 +473,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -514,7 +514,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -561,7 +561,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -661,7 +661,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -707,7 +707,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v14.2.8
+    image: ceph/ceph:v14.2.9
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -831,25 +831,37 @@ The script will look for the following populated environment variables:
 
 * `NAMESPACE`: the namespace where the configmap and secrets should be injected
 * `ROOK_EXTERNAL_FSID`: the fsid of the external Ceph cluster, it can be retrieved via the `ceph fsid` command
-* `ROOK_EXTERNAL_ADMIN_SECRET`: the external Ceph cluster admin secret key, it can be retrieved via the `ceph auth get-key client.admin` command
 * `ROOK_EXTERNAL_CEPH_MON_DATA`: is a common-separated list of running monitors IP address along with their ports, e.g: `a=172.17.0.4:6789,b=172.17.0.5:6789,c=172.17.0.6:6789`. You don't need to specify all the monitors, you can simply pass one and the Operator will discover the rest. The name of the monitor is the name that appears in the `ceph status` output.
+
+Now, we need to give Rook a key to connect to the cluster in order to perform various operations such as health cluster check, CSI keys management etc...
+It is recommended to generate keys with minimal access so the admin key does not need to be used by the external cluster.
+In this case, the admin key is only needed to generate the keys that will be used by the external cluster.
+But if the admin key is to be used by the external cluster, set the following variable:
+
+* `ROOK_EXTERNAL_ADMIN_SECRET`: **OPTIONAL:** the external Ceph cluster admin secret key, it can be retrieved via the `ceph auth get-key client.admin` command.
+
+> **WARNING**: If you plan to create CRs (pool, rgw, mds, nfs) in the external cluster, you **MUST** inject the client.admin keyring as well as injecting `cluster-external-management.yaml`
 
 **Example**:
 
 ```console
 export NAMESPACE=rook-ceph-external
 export ROOK_EXTERNAL_FSID=3240b4aa-ddbc-42ee-98ba-4ea7b2a61514
-export ROOK_EXTERNAL_ADMIN_SECRET=AQC6Ylxdja+NDBAAB7qy9MEAr4VLLq4dCIvxtg==
 export ROOK_EXTERNAL_CEPH_MON_DATA=a=172.17.0.4:6789
+export ROOK_EXTERNAL_ADMIN_SECRET=AQC6Ylxdja+NDBAAB7qy9MEAr4VLLq4dCIvxtg==
 ```
 
-Then you can simply execute the script like this:
+If the Ceph admin key is not provided, the following script needs to be executed on a machine that can connect to the Ceph cluster using the Ceph admin key.
+On that machine, run `cluster/examples/kubernetes/ceph/create-external-cluster-resources.sh`.
+The script will automatically create users and keys with the lowest possible privileges and populate the necessary environment variables for `cluster/examples/kubernetes/ceph/import-external-cluster.sh` to work correctly.
+
+Finally, you can simply execute the script like this from a machine that has access to your Kubernetes cluster:
 
 ```console
 bash cluster/examples/kubernetes/ceph/import-external-cluster.sh
 ```
 
-#### CephCluster example
+#### CephCluster example (consumer)
 
 Assuming the above section has successfully completed, here is a CR example:
 
@@ -862,10 +874,8 @@ metadata:
 spec:
   external:
     enable: true
-  dataDirHostPath: /var/lib/rook
-  # providing an image is optional, do this if you want to create other CRs (rgw, mds, nfs)
-  cephVersion:
-    image: ceph/ceph:v14.2.8 # MUST match external cluster version
+  crashCollector:
+    disable: true
 ```
 
 Choose the namespace carefully, if you have an existing cluster managed by Rook, you have likely already injected `common.yaml`.
@@ -880,3 +890,25 @@ kubectl create -f cluster/examples/kubernetes/ceph/cluster-external.yaml
 If the previous section has not been completed, the Rook Operator will still acknowledge the CR creation but will wait forever to receive connection information.
 
 > **WARNING**: If no cluster is managed by the current Rook Operator, you need to inject `common.yaml`, then modify `cluster-external.yaml` and specify `rook-ceph` as `namespace`.
+
+#### CephCluster example (management)
+
+The following CephCluster CR represents a cluster that will perform management tasks on the external cluster.
+It will not only act as a consumer but will also allow the deployment of other CRDs such as CephFilesystem or CephObjectStore.
+As mentioned above, you would need to inject the admin keyring for that.
+
+The corresponding YAML example:
+
+```yaml
+apiVersion: ceph.rook.io/v1
+kind: CephCluster
+metadata:
+  name: rook-ceph-external
+  namespace: rook-ceph-external
+spec:
+  external:
+    enable: true
+  dataDirHostPath: /var/lib/rook
+  cephVersion:
+    image: ceph/ceph:v14.2.9 # Should match external cluster version
+```
