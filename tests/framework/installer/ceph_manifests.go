@@ -1363,7 +1363,7 @@ roleRef:
 apiVersion: policy/v1beta1
 kind: PodSecurityPolicy
 metadata:
-  name: rook-privileged
+  name: 00-rook-privileged
   annotations:
     seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'runtime/default'
     seccomp.security.alpha.kubernetes.io/defaultProfileName:  'runtime/default'
@@ -1437,7 +1437,7 @@ rules:
     resources:
       - podsecuritypolicies
     resourceNames:
-      - rook-privileged
+      - 00-rook-privileged
     verbs:
       - use
 ---
@@ -1564,6 +1564,7 @@ data:
   ROOK_CSI_ENABLE_CEPHFS: "true"
   ROOK_CSI_ENABLE_RBD: "true"
   ROOK_CSI_ENABLE_GRPC_METRICS: "true"
+  ROOK_OBC_WATCH_OPERATOR_NAMESPACE: "true"
 `
 }
 
@@ -2258,7 +2259,7 @@ func (m *CephManifestsMaster) GetBucketStorageClass(storeNameSpace string, store
 kind: StorageClass
 metadata:
    name: ` + storageClassName + `
-provisioner: ceph.rook.io/bucket
+provisioner: ` + storeNameSpace + `.ceph.rook.io/bucket
 reclaimPolicy: ` + reclaimPolicy + `
 parameters:
     objectStoreName: ` + storeName + `
