@@ -291,7 +291,7 @@ func TestAddOrRemoveExternalMonitor(t *testing.T) {
 }
 
 func TestForceDeleteFailedMon(t *testing.T) {
-	clientset := test.New(t, 1)
+	clientset := test.New(1)
 	context := &clusterd.Context{
 		Clientset: clientset,
 	}
