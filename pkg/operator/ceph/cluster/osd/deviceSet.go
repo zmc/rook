@@ -39,10 +39,15 @@ func (c *Cluster) prepareStorageClassDeviceSets(config *provisionConfig) []rookv
 				logger.Warningf("no PVC available for storageClassDeviceSet %q", storageClassDeviceSet.Name)
 				continue
 			}
+
+			// Create the PVC source for each of the data, metadata, and other types of templates if defined.
+			pvcSources := map[string]v1.PersistentVolumeClaimVolumeSource{}
+			var dataSize string
+			var crushDeviceClass string
 			for _, pvcTemplate := range storageClassDeviceSet.VolumeClaimTemplates {
 				if pvcTemplate.Name == "" {
 					// For backward compatibility a blank name must be treated as a data volume
-					pvcTemplate.Name = bluestorePVCBlock
+					pvcTemplate.Name = bluestorePVCData
 				}
 
 				pvc, err := c.createStorageClassDeviceSetPVC(storageClassDeviceSet.Name, pvcTemplate, i)
@@ -50,22 +55,30 @@ func (c *Cluster) prepareStorageClassDeviceSets(config *provisionConfig) []rookv
 					config.addError("failed to create osd for storageClassDeviceSet %q for count %d. %v", storageClassDeviceSet.Name, i, err)
 					continue
 				}
-				volumeSources = append(volumeSources, rookv1.VolumeSource{
-					Name:      storageClassDeviceSet.Name,
-					Resources: storageClassDeviceSet.Resources,
-					Placement: storageClassDeviceSet.Placement,
-					Config:    storageClassDeviceSet.Config,
-					Type:      pvcTemplate.GetName(),
-					PersistentVolumeClaimSource: v1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvc.GetName(),
-						ReadOnly:  false,
-					},
-					Portable:            storageClassDeviceSet.Portable,
-					TuneSlowDeviceClass: storageClassDeviceSet.TuneSlowDeviceClass,
-					CrushDeviceClass:    pvcTemplate.Annotations["crushDeviceClass"],
-				})
+
+				if pvcTemplate.Name == bluestorePVCData {
+					pvcSize := pvc.Spec.Resources.Requests[v1.ResourceStorage]
+					dataSize = pvcSize.String()
+					crushDeviceClass = pvcTemplate.Annotations["crushDeviceClass"]
+				}
+				pvcSources[pvcTemplate.Name] = v1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvc.GetName(),
+					ReadOnly:  false,
+				}
 				logger.Infof("successfully provisioned pvc %q for VolumeClaimTemplates %q for storageClassDeviceSet %q of set %v", pvc.GetName(), pvcTemplate.GetName(), storageClassDeviceSet.Name, i)
 			}
+
+			volumeSources = append(volumeSources, rookv1.VolumeSource{
+				Name:                storageClassDeviceSet.Name,
+				Resources:           storageClassDeviceSet.Resources,
+				Placement:           storageClassDeviceSet.Placement,
+				Config:              storageClassDeviceSet.Config,
+				Size:                dataSize,
+				PVCSources:          pvcSources,
+				Portable:            storageClassDeviceSet.Portable,
+				TuneSlowDeviceClass: storageClassDeviceSet.TuneSlowDeviceClass,
+				CrushDeviceClass:    crushDeviceClass,
+			})
 		}
 	}
 
@@ -81,9 +94,10 @@ func (c *Cluster) createStorageClassDeviceSetPVC(storageClassDeviceSetName strin
 		return nil, errors.Wrapf(err, "failed to list pvc %s for storageClassDeviceSet %s", pvcStorageClassDeviceSetPVCIdLabelSelector, storageClassDeviceSetName)
 	}
 
-	// return old labelled pvc, if we find any
+	// return old labeled pvc, if we find any
 	if len(oldPresentPVCs.Items) == 1 {
-		logger.Debugf("old labelled pvc %q found", oldPresentPVCs.Items[0].Name)
+		logger.Debugf("old labeled pvc %q found", oldPresentPVCs.Items[0].Name)
+		c.updatePVCIfChanged(pvc, &oldPresentPVCs.Items[0])
 		return &oldPresentPVCs.Items[0], nil
 	}
 
@@ -107,6 +121,8 @@ func (c *Cluster) createStorageClassDeviceSetPVC(storageClassDeviceSetName strin
 		// The PVC is already present
 	} else if presentPVCsNum == 1 {
 		logger.Debugf("already present pvc %q", presentPVCs.Items[0].Name)
+		c.updatePVCIfChanged(pvc, &presentPVCs.Items[0])
+
 		// Updating with the new label
 		return &presentPVCs.Items[0], nil
 	}
@@ -114,7 +130,28 @@ func (c *Cluster) createStorageClassDeviceSetPVC(storageClassDeviceSetName strin
 	return nil, errors.Errorf("more than one PVCs exists with label %q, pvcs %q", pvcStorageClassDeviceSetPVCIdLabelSelector, presentPVCs)
 }
 
-func makeStorageClassDeviceSetPVC(storageClassDeviceSetName, pvcStorageClassDeviceSetPVCId string, setIndex int, pvcTemplate v1.PersistentVolumeClaim) (pvcs *v1.PersistentVolumeClaim) {
+func (c *Cluster) updatePVCIfChanged(desiredPVC *v1.PersistentVolumeClaim, currentPVC *v1.PersistentVolumeClaim) {
+	desiredSize, desiredOK := desiredPVC.Spec.Resources.Requests[v1.ResourceStorage]
+	currentSize, currentOK := currentPVC.Spec.Resources.Requests[v1.ResourceStorage]
+	if !desiredOK || !currentOK {
+		logger.Debugf("desired or current size are not specified for pvc %q", currentPVC.Name)
+		return
+	}
+	if desiredSize.Value() > currentSize.Value() {
+		currentPVC.Spec.Resources.Requests[v1.ResourceStorage] = desiredSize
+		logger.Infof("updating pvc %q size from %s to %s", currentPVC.Name, currentSize.String(), desiredSize.String())
+		if _, err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Update(currentPVC); err != nil {
+			// log the error, but don't fail the reconcile
+			logger.Errorf("failed to update pvc size. %v", err)
+			return
+		}
+		logger.Infof("successfully updated pvc %q size", currentPVC.Name)
+	} else if desiredSize.Value() < currentSize.Value() {
+		logger.Warningf("ignoring request to shrink osd pvc %q size from %s to %s, only expansion is allowed", currentPVC.Name, currentSize.String(), desiredSize.String())
+	}
+}
+
+func makeStorageClassDeviceSetPVC(storageClassDeviceSetName, pvcStorageClassDeviceSetPVCId string, setIndex int, pvcTemplate v1.PersistentVolumeClaim) *v1.PersistentVolumeClaim {
 	pvcLabels := makeStorageClassDeviceSetPVCLabel(storageClassDeviceSetName, pvcStorageClassDeviceSetPVCId, setIndex)
 
 	// pvc naming format <storageClassDeviceSetName>-<SetNumber>-<PVCIndex>
