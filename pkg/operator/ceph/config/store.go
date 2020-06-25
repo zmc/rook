@@ -36,7 +36,6 @@ const (
 
 	configVolumeName = "rook-ceph-config"
 
-	confFileName         = "ceph.conf"
 	monHostKey           = "mon_host"
 	monInitialMembersKey = "mon_initial_members"
 	// Msgr2port is the listening port of the messenger v2 protocol
@@ -67,7 +66,7 @@ func GetStore(context *clusterd.Context, namespace string, ownerRef *metav1.Owne
 func (s *Store) CreateOrUpdate(clusterInfo *cephconfig.ClusterInfo) error {
 	// these are used for all ceph daemons on the commandline and must *always* be stored
 	if err := s.createOrUpdateMonHostSecrets(clusterInfo); err != nil {
-		return errors.Wrapf(err, "failed to store mon host configs")
+		return errors.Wrap(err, "failed to store mon host configs")
 	}
 
 	return nil

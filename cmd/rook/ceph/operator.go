@@ -22,15 +22,19 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/agent/flexvolume/attachment"
 	operator "github.com/rook/rook/pkg/operator/ceph"
+	cluster "github.com/rook/rook/pkg/operator/ceph/cluster"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
-	"github.com/rook/rook/pkg/operator/ceph/disruption"
+
+	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/util/flags"
 	"github.com/spf13/cobra"
 )
 
-const containerName = "rook-ceph-operator"
+const (
+	containerName = "rook-ceph-operator"
+)
 
 var operatorCmd = &cobra.Command{
 	Use:   "operator",
@@ -46,18 +50,6 @@ func init() {
 	operatorCmd.Flags().BoolVar(&operator.EnableFlexDriver, "enable-flex-driver", true, "enable the rook flex driver")
 	operatorCmd.Flags().BoolVar(&operator.EnableDiscoveryDaemon, "enable-discovery-daemon", true, "enable the rook discovery daemon")
 
-	operatorCmd.Flags().BoolVar(&csi.EnableRBD, "csi-enable-rbd", true, "enable ceph-csi rbd support")
-	operatorCmd.Flags().BoolVar(&csi.EnableCephFS, "csi-enable-cephfs", true, "enable ceph-csi cephfs support")
-	operatorCmd.Flags().StringVar(&csi.CSIParam.DriverNamePrefix, "csi-driver-name-prefix", "", "custom csi driver name prefix")
-
-	// csi images
-	operatorCmd.Flags().StringVar(&csi.CSIParam.CSIPluginImage, "csi-ceph-image", csi.DefaultCSIPluginImage, "ceph-csi plugin image")
-	operatorCmd.Flags().StringVar(&csi.CSIParam.RegistrarImage, "csi-registrar-image", csi.DefaultRegistrarImage, "csi registrar image")
-	operatorCmd.Flags().StringVar(&csi.CSIParam.ProvisionerImage, "csi-provisioner-image", csi.DefaultProvisionerImage, "csi provisioner image")
-	operatorCmd.Flags().StringVar(&csi.CSIParam.AttacherImage, "csi-attacher-image", csi.DefaultAttacherImage, "csi attacher image")
-	operatorCmd.Flags().StringVar(&csi.CSIParam.SnapshotterImage, "csi-snapshotter-image", csi.DefaultSnapshotterImage, "csi snapshotter image")
-	operatorCmd.Flags().BoolVar(&csi.AllowUnsupported, "csi-allow-unsupported-version", false, "csi allow unsupported image version")
-
 	// csi deployment templates
 	operatorCmd.Flags().StringVar(&csi.RBDPluginTemplatePath, "csi-rbd-plugin-template-path", csi.DefaultRBDPluginTemplatePath, "path to ceph-csi rbd plugin template")
 	operatorCmd.Flags().StringVar(&csi.RBDProvisionerSTSTemplatePath, "csi-rbd-provisioner-sts-template-path", csi.DefaultRBDProvisionerSTSTemplatePath, "path to ceph-csi rbd provisioner statefulset template")
@@ -66,11 +58,8 @@ func init() {
 	operatorCmd.Flags().StringVar(&csi.CephFSPluginTemplatePath, "csi-cephfs-plugin-template-path", csi.DefaultCephFSPluginTemplatePath, "path to ceph-csi cephfs plugin template")
 	operatorCmd.Flags().StringVar(&csi.CephFSProvisionerSTSTemplatePath, "csi-cephfs-provisioner-sts-template-path", csi.DefaultCephFSProvisionerSTSTemplatePath, "path to ceph-csi cephfs provisioner statefulset template")
 	operatorCmd.Flags().StringVar(&csi.CephFSProvisionerDepTemplatePath, "csi-cephfs-provisioner-dep-template-path", csi.DefaultCephFSProvisionerDepTemplatePath, "path to ceph-csi cephfs provisioner deployment template")
-	operatorCmd.Flags().BoolVar(&csi.EnableCSIGRPCMetrics, "csi-enable-grpc-metrics", true, "enable grpc metrics in ceph-csi")
 
-	operatorCmd.Flags().StringVar(&csi.CSIParam.KubeletDirPath, "csi-kubelet-dir-path", csi.DefaultKubeletDirPath, "kubelet directory path for mounting volumes")
-
-	operatorCmd.Flags().BoolVar(&disruption.EnableMachineDisruptionBudget, "enable-machine-disruption-budget", false, "enable fencing controllers")
+	operatorCmd.Flags().BoolVar(&cluster.EnableMachineDisruptionBudget, "enable-machine-disruption-budget", false, "enable fencing controllers")
 
 	flags.SetFlagsFromEnv(operatorCmd.Flags(), rook.RookEnvVarPrefix)
 	flags.SetLoggingFlags(operatorCmd.Flags())
@@ -83,7 +72,7 @@ func startOperator(cmd *cobra.Command, args []string) error {
 
 	rook.LogStartupInfo(operatorCmd.Flags())
 
-	logger.Infof("starting operator")
+	logger.Info("starting Rook-Ceph operator")
 	context := createContext()
 	context.NetworkInfo = clusterd.NetworkInfo{}
 	context.ConfigDir = k8sutil.DataDir
@@ -93,11 +82,18 @@ func startOperator(cmd *cobra.Command, args []string) error {
 	}
 
 	rookImage := rook.GetOperatorImage(context.Clientset, containerName)
+	rookBaseImageCephVersion, err := rook.GetOperatorBaseImageCephVersion(context)
+	if err != nil {
+		logger.Errorf("failed to get operator base image ceph version. %v", err)
+	}
+	opcontroller.OperatorCephBaseImageVersion = rookBaseImageCephVersion
+	logger.Infof("base ceph version inside the rook operator image is %q", opcontroller.OperatorCephBaseImageVersion)
+
 	serviceAccountName := rook.GetOperatorServiceAccount(context.Clientset)
 	op := operator.New(context, volumeAttachment, rookImage, serviceAccountName)
 	err = op.Run()
 	if err != nil {
-		rook.TerminateFatal(errors.Wrapf(err, "failed to run operator\n"))
+		rook.TerminateFatal(errors.Wrap(err, "failed to run operator\n"))
 	}
 
 	return nil

@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/coreos/pkg/capnslog"
+	netclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
+	"github.com/pkg/errors"
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
@@ -125,8 +127,6 @@ func NewContext() *clusterd.Context {
 		context.Executor = &exec.TranslateCommandExecutor{
 			Executor: context.Executor,
 			Translator: func(
-				debug bool,
-				actionName string,
 				command string,
 				arg ...string,
 			) (string, []string) {
@@ -155,6 +155,9 @@ func NewContext() *clusterd.Context {
 
 	context.RookClientset, err = rookclient.NewForConfig(context.KubeConfig)
 	TerminateOnError(err, "failed to create rook clientset")
+
+	context.NetworkClient, err = netclient.NewForConfig(context.KubeConfig)
+	TerminateOnError(err, "failed to create network clientset")
 
 	return context
 }
@@ -214,4 +217,14 @@ func TerminateFatal(reason error) {
 	}
 
 	os.Exit(1)
+}
+
+// GetOperatorBaseImageCephVersion returns the Ceph version of the operator image
+func GetOperatorBaseImageCephVersion(context *clusterd.Context) (string, error) {
+	output, err := context.Executor.ExecuteCommandWithOutput("ceph", "--version")
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to execute command to detect ceph version")
+	}
+
+	return output, nil
 }

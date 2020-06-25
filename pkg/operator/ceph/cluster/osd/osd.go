@@ -70,7 +70,7 @@ const (
 	portableKey                         = "portable"
 	cephOsdPodMinimumMemory      uint64 = 2048 // minimum amount of memory in MB to run the pod
 	bluestorePVCMetadata                = "metadata"
-	bluestorePVCBlock                   = "data"
+	bluestorePVCData                    = "data"
 )
 
 // Cluster keeps track of the OSDs
@@ -166,6 +166,7 @@ type osdProperties struct {
 	devices             []rookv1.Device
 	pvc                 v1.PersistentVolumeClaimVolumeSource
 	metadataPVC         v1.PersistentVolumeClaimVolumeSource
+	pvcSize             string
 	selection           rookv1.Selection
 	resources           v1.ResourceRequirements
 	storeConfig         osdconfig.StoreConfig
@@ -174,7 +175,16 @@ type osdProperties struct {
 	location            string
 	portable            bool
 	tuneSlowDeviceClass bool
+	schedulerName       string
 	crushDeviceClass    string
+}
+
+func (osdProps osdProperties) onPVC() bool {
+	return osdProps.pvc.ClaimName != ""
+}
+
+func (osdProps osdProperties) onPVCWithMetadata() bool {
+	return osdProps.metadataPVC.ClaimName != ""
 }
 
 // Start the osd management
@@ -236,48 +246,31 @@ func (c *Cluster) startProvisioningOverPVCs(config *provisionConfig) {
 		return
 	}
 
-	for i, volume := range c.ValidStorage.VolumeSources {
-		// If the metadata template is first, we fail and assume we cannot build the data/metadata block relationship
-		if i == 0 && volume.Type == bluestorePVCMetadata {
-			config.addError("wrong template ordering, the %q device must be declared after the %q device.", bluestorePVCMetadata, bluestorePVCBlock)
-			return
-		}
+	for _, volume := range c.ValidStorage.VolumeSources {
+		dataSource, dataOK := volume.PVCSources[bluestorePVCData]
 
-		metadataDevicePVCSource := v1.PersistentVolumeClaimVolumeSource{}
-
-		// If the volumeTemplate is unknown we do nothing
-		if volume.Type != bluestorePVCMetadata && volume.Type != bluestorePVCBlock {
-			logger.Errorf("unknown PVC template type %q, valid names are %q for the main OSD block and %q for a metadata device to back the OSD.", volume.Type, bluestorePVCBlock, bluestorePVCMetadata)
+		// The data PVC template is required.
+		if !dataOK {
+			config.addError("failed to create osd for storageClassDeviceSet %q, missing the data template", volume.Name)
 			continue
 		}
 
-		// We don't need to use the metadata devices as OSDs
-		// They are just attached to OSD and field in their property
-		if volume.Type == bluestorePVCMetadata {
-			logger.Infof("PVC %q is not an OSD but a %q device", volume.PersistentVolumeClaimSource.ClaimName, volume.Type)
-			continue
-		}
-
-		// Let's see how the next PVC looks like
-		// If the next PVC has been identified as a PVC let's attached to this OSD property
-		//
-		// The logic will get a bit more complex if we plan support for a third device for "block.wal"
-		m := i + 1
-		if m < len(c.ValidStorage.VolumeSources) {
-			if c.ValidStorage.VolumeSources[m].Type == bluestorePVCMetadata {
-				logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", volume.PersistentVolumeClaimSource.ClaimName, c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource.ClaimName)
-				metadataDevicePVCSource = c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource
-			}
+		metadataSource, metadataOK := volume.PVCSources[bluestorePVCMetadata]
+		if metadataOK {
+			logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", dataSource.ClaimName, metadataSource.ClaimName)
+		} else {
+			logger.Infof("OSD will have its main bluestore block on %q", dataSource.ClaimName)
 		}
 
 		osdProps := osdProperties{
-			crushHostname:    volume.PersistentVolumeClaimSource.ClaimName,
-			pvc:              volume.PersistentVolumeClaimSource,
-			metadataPVC:      metadataDevicePVCSource,
+			crushHostname:    dataSource.ClaimName,
+			pvc:              dataSource,
+			metadataPVC:      metadataSource,
 			resources:        volume.Resources,
 			placement:        volume.Placement,
 			portable:         volume.Portable,
 			crushDeviceClass: volume.CrushDeviceClass,
+			schedulerName:    volume.SchedulerName,
 		}
 
 		logger.Debugf("osdProps are %+v", osdProps)
@@ -289,7 +282,7 @@ func (c *Cluster) startProvisioningOverPVCs(config *provisionConfig) {
 		// Skip OSD prepare if deployment already exists for the PVC
 		listOpts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s,%s=%s",
 			k8sutil.AppAttr, AppName,
-			OSDOverPVCLabelKey, volume.PersistentVolumeClaimSource.ClaimName,
+			OSDOverPVCLabelKey, dataSource.ClaimName,
 		)}
 
 		osdDeployments, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).List(listOpts)
@@ -449,7 +442,7 @@ func (c *Cluster) startOSDDaemonsOnPVC(pvcName string, config *provisionConfig, 
 
 		// keyring must be generated before deployment creation in order to avoid a race condition resulting
 		// in intermittent failure of first-attempt OSD pods.
-		keyring, err := c.generateKeyring(osd.ID)
+		_, err := c.generateKeyring(osd.ID)
 		if err != nil {
 			errMsg := fmt.Sprintf("failed to create keyring for pvc %q, osd %v. %v", osdProps.crushHostname, osd, err)
 			config.addError(errMsg)
@@ -471,43 +464,23 @@ func (c *Cluster) startOSDDaemonsOnPVC(pvcName string, config *provisionConfig, 
 			continue
 		}
 
-		createdDeployment, createErr := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(dp)
+		_, createErr := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(dp)
 		if createErr != nil {
-			if !kerrors.IsAlreadyExists(createErr) {
+			if kerrors.IsAlreadyExists(createErr) {
+				logger.Infof("deployment for osd %d already exists. updating if needed", osd.ID)
+				if err = updateDeploymentAndWait(c.context, dp, c.Namespace, opconfig.OsdType, strconv.Itoa(osd.ID), c.skipUpgradeChecks, c.continueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
+					logger.Errorf("failed to update osd deployment %d. %v", osd.ID, err)
+				}
+			} else {
 				// we failed to create job, update the orchestration status for this pvc
 				logger.Warningf("failed to create osd deployment for pvc %q, osd %v. %v", osdProps.pvc.ClaimName, osd, createErr)
 				continue
 			}
-			logger.Infof("deployment for osd %d already exists. updating if needed", osd.ID)
-			createdDeployment, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(dp.Name, metav1.GetOptions{})
-			if err != nil {
-				logger.Warningf("failed to get existing OSD deployment %q for update. %v", dp.Name, err)
-				continue
-			}
-		}
-
-		err = c.associateKeyring(keyring, createdDeployment)
-		if err != nil {
-			logger.Errorf("failed to associate keyring for pvc %q, osd %v. %v", osdProps.pvc.ClaimName, osd, err)
 		}
 
 		if createErr != nil && kerrors.IsAlreadyExists(createErr) {
-			// Always invoke ceph version before an upgrade so we are sure to be up-to-date
-			daemon := string(opconfig.OsdType)
-			var cephVersionToUse cephver.CephVersion
-
-			currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemon)
-			if err != nil {
-				logger.Warningf("failed to retrieve current ceph %q version. %+v", daemon, err)
-				logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with %+v", c.clusterInfo.CephVersion)
-				cephVersionToUse = c.clusterInfo.CephVersion
-			} else {
-				logger.Debugf("current cluster version for osds before upgrading is: %+v", currentCephVersion)
-				cephVersionToUse = currentCephVersion
-			}
-
-			if err = updateDeploymentAndWait(c.context, dp, c.Namespace, daemon, strconv.Itoa(osd.ID), cephVersionToUse, c.skipUpgradeChecks, c.continueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
-				logger.Errorf("failed to update osd deployment %d. %+v", osd.ID, err)
+			if err = updateDeploymentAndWait(c.context, dp, c.Namespace, opconfig.OsdType, strconv.Itoa(osd.ID), c.skipUpgradeChecks, c.continueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
+				logger.Errorf("failed to update osd deployment %d. %v", osd.ID, err)
 			}
 		}
 		logger.Infof("started deployment for osd %d on pvc", osd.ID)
@@ -543,7 +516,7 @@ func (c *Cluster) startOSDDaemonsOnNode(nodeName string, config *provisionConfig
 
 		// keyring must be generated before deployment creation in order to avoid a race condition resulting
 		// in intermittent failure of first-attempt OSD pods.
-		keyring, err := c.generateKeyring(osd.ID)
+		_, err := c.generateKeyring(osd.ID)
 		if err != nil {
 			errMsg := fmt.Sprintf("failed to create keyring for node %q, osd %v. %v", n.Name, osd, err)
 			config.addError(errMsg)
@@ -565,46 +538,21 @@ func (c *Cluster) startOSDDaemonsOnNode(nodeName string, config *provisionConfig
 			continue
 		}
 
-		createdDeployment, createErr := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(dp)
+		_, createErr := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(dp)
 		if createErr != nil {
-			if !kerrors.IsAlreadyExists(createErr) {
-				// we failed to create job, update the orchestration status for this node
+			if kerrors.IsAlreadyExists(createErr) {
+				logger.Debugf("deployment for osd %d already exists. updating if needed", osd.ID)
+				if err = updateDeploymentAndWait(c.context, dp, c.Namespace, opconfig.OsdType, strconv.Itoa(osd.ID), c.skipUpgradeChecks, c.continueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
+					logger.Errorf("failed to update osd deployment %d. %v", osd.ID, err)
+				}
+			} else {
+				// we failed to create job, update the orchestration status for this pvc
 				logger.Warningf("failed to create osd deployment for node %q, osd %+v. %v", n.Name, osd, createErr)
 				continue
 			}
-			logger.Infof("deployment for osd %d already exists. updating if needed", osd.ID)
-			createdDeployment, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(dp.Name, metav1.GetOptions{})
-			if err != nil {
-				logger.Warningf("failed to get existing OSD deployment %q for update. %v", dp.Name, err)
-				continue
-			}
+		} else {
+			logger.Infof("created deployment for osd %d", osd.ID)
 		}
-
-		err = c.associateKeyring(keyring, createdDeployment)
-		if err != nil {
-			logger.Errorf("failed to associate keyring for node %q, osd %v. %v", n.Name, osd, err)
-		}
-
-		if createErr != nil && kerrors.IsAlreadyExists(createErr) {
-			// Always invoke ceph version before an upgrade so we are sure to be up-to-date
-			daemon := string(opconfig.OsdType)
-			var cephVersionToUse cephver.CephVersion
-
-			currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemon)
-			if err != nil {
-				logger.Warningf("failed to retrieve current ceph %q version. %+v", daemon, err)
-				logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with %+v", c.clusterInfo.CephVersion)
-				cephVersionToUse = c.clusterInfo.CephVersion
-			} else {
-				logger.Debugf("current cluster version for osds before upgrading is: %+v", currentCephVersion)
-				cephVersionToUse = currentCephVersion
-			}
-
-			if err = updateDeploymentAndWait(c.context, dp, c.Namespace, daemon, strconv.Itoa(osd.ID), cephVersionToUse, c.skipUpgradeChecks, c.continueUpgradeAfterChecksEvenIfNotHealthy); err != nil {
-				logger.Errorf("failed to update osd deployment %d. %+v", osd.ID, err)
-			}
-		}
-		logger.Infof("started deployment for osd %d", osd.ID)
 	}
 }
 
@@ -652,29 +600,36 @@ func (c *Cluster) resolveNode(nodeName string) *rookv1.Node {
 }
 
 func (c *Cluster) getOSDPropsForPVC(pvcName string) (osdProperties, error) {
-	var metadataDevicePVCSource v1.PersistentVolumeClaimVolumeSource
 
-	for i, volumeSource := range c.ValidStorage.VolumeSources {
-		// volumeSource should be consistent and the order always identical so doing the +1 thing shouldn't be too dangerous
-		if pvcName == volumeSource.PersistentVolumeClaimSource.ClaimName {
-			m := i + 1
-			if m < len(c.ValidStorage.VolumeSources) {
-				if c.ValidStorage.VolumeSources[m].Type == bluestorePVCMetadata {
-					logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", volumeSource.PersistentVolumeClaimSource.ClaimName, c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource.ClaimName)
-					metadataDevicePVCSource = c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource
-				}
+	for _, volumeSource := range c.ValidStorage.VolumeSources {
+		// The data PVC template is required.
+		dataSource, dataOK := volumeSource.PVCSources[bluestorePVCData]
+		if !dataOK {
+			logger.Warningf("failed to find data source daemon for device set %q, missing the data template", volumeSource.Name)
+			continue
+		}
+
+		if pvcName == dataSource.ClaimName {
+			metadataSource, metadataOK := volumeSource.PVCSources[bluestorePVCMetadata]
+			if metadataOK {
+				logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", dataSource.ClaimName, metadataSource.ClaimName)
+			} else {
+				logger.Infof("OSD will have its main bluestore block on %q", dataSource.ClaimName)
 			}
 
 			osdProps := osdProperties{
-				crushHostname:       volumeSource.PersistentVolumeClaimSource.ClaimName,
-				pvc:                 volumeSource.PersistentVolumeClaimSource,
-				metadataPVC:         metadataDevicePVCSource,
+				crushHostname:       dataSource.ClaimName,
+				pvc:                 dataSource,
+				metadataPVC:         metadataSource,
 				resources:           volumeSource.Resources,
 				placement:           volumeSource.Placement,
 				portable:            volumeSource.Portable,
 				tuneSlowDeviceClass: volumeSource.TuneSlowDeviceClass,
+				pvcSize:             volumeSource.Size,
+				schedulerName:       volumeSource.SchedulerName,
 			}
-			// If OSD isn't portable, we're getting the host name of the pod where the osd prepare job pod prepared the OSD.
+			// If OSD isn't portable, we're getting the host name either from the osd deployment that was already initialized
+			// or from the osd prepare job from initial creation.
 			if !volumeSource.Portable {
 				var err error
 				osdProps.crushHostname, err = c.getPVCHostName(pvcName)
@@ -688,21 +643,46 @@ func (c *Cluster) getOSDPropsForPVC(pvcName string) (osdProperties, error) {
 	return osdProperties{}, errors.Errorf("no valid VolumeSource found for pvc %s", pvcName)
 }
 
+// getPVCHostName finds the node where an OSD pod should be assigned with a node selector.
+// First look for the node selector that was previously used for the OSD, or if a new OSD
+// check for the assignment of the OSD prepare job.
 func (c *Cluster) getPVCHostName(pvcName string) (string, error) {
 	listOpts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", OSDOverPVCLabelKey, pvcName)}
-	podList, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(listOpts)
+
+	// Check for the existence of the OSD deployment where the node selector was applied
+	// in a previous reconcile.
+	deployments, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).List(listOpts)
 	if err != nil {
-		return "", err
+		return "", errors.Wrapf(err, "failed to get deployment for osd with pvc %q", pvcName)
 	}
-	for _, pod := range podList.Items {
+	for _, d := range deployments.Items {
+		selectors := d.Spec.Template.Spec.NodeSelector
+		for label, value := range selectors {
+			if label == v1.LabelHostname {
+				return value, nil
+			}
+		}
+	}
+
+	// Since the deployment wasn't found it must be a new deployment so look at the node
+	// assignment of the OSD prepare pod
+	pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(listOpts)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to get pod for osd with pvc %q", pvcName)
+	}
+	for _, pod := range pods.Items {
 		name, err := k8sutil.GetNodeHostName(c.context.Clientset, pod.Spec.NodeName)
 		if err != nil {
 			logger.Warningf("falling back to node name %s since hostname not found for node", pod.Spec.NodeName)
 			name = pod.Spec.NodeName
 		}
+		if name == "" {
+			return "", errors.Errorf("node name not found on the osd pod %q", pod.Name)
+		}
 		return name, nil
 	}
-	return "", err
+
+	return "", errors.Errorf("node selector not found on deployment for osd with pvc %q", pvcName)
 }
 
 func (c *Cluster) getOSDInfo(d *apps.Deployment) ([]OSDInfo, error) {
@@ -725,7 +705,14 @@ func (c *Cluster) getOSDInfo(d *apps.Deployment) ([]OSDInfo, error) {
 		if envVar.Name == "ROOK_CV_MODE" {
 			osd.CVMode = envVar.Value
 		}
-		if envVar.Name == "ROOK_METADATA_DEVICE" {
+		if envVar.Name == "ROOK_LV_BACKED_PV" {
+			lvBackedPV, err := strconv.ParseBool(envVar.Value)
+			if err != nil {
+				return []OSDInfo{}, errors.Wrap(err, "error parsing ROOK_LV_BACKED_PV")
+			}
+			osd.LVBackedPV = lvBackedPV
+		}
+		if envVar.Name == osdMetadataDeviceEnvVarName {
 			osd.MetadataPath = envVar.Value
 		}
 	}

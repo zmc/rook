@@ -22,6 +22,14 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+)
+
+const (
+	beforeOctopusTime            = "2006-01-02 15:04:05.999999999Z"
+	octopusAndAfterTime          = "2006-01-02T15:04:05.999999999Z"
+	operatorCephBaseImageVersion = "ROOK_CEPH_BASE_IMAGE_VERSION"
 )
 
 type ObjectBucketMetadata struct {
@@ -78,10 +86,10 @@ func GetBucketStats(c *Context, bucketName string) (*ObjectBucketStats, bool, er
 		"--bucket", bucketName)
 
 	if err != nil {
-		if strings.Contains(err.Error(), "No such file or directory") {
+		if strings.Contains(err.Error(), "exit status 2") {
 			return nil, true, errors.New("not found")
 		} else {
-			return nil, false, errors.Wrapf(err, "failed to get bucket stats")
+			return nil, false, errors.Wrap(err, "failed to get bucket stats")
 		}
 	}
 
@@ -100,7 +108,7 @@ func GetBucketsStats(c *Context) (map[string]ObjectBucketStats, error) {
 		"bucket",
 		"stats")
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to list buckets")
+		return nil, errors.Wrap(err, "failed to list buckets")
 	}
 
 	var rgwStats []rgwBucketStats
@@ -123,7 +131,7 @@ func getBucketMetadata(c *Context, bucket string) (*ObjectBucketMetadata, bool, 
 		"get",
 		"bucket:"+bucket)
 	if err != nil {
-		return nil, false, errors.Wrapf(err, "failed to list buckets")
+		return nil, false, errors.Wrap(err, "failed to list buckets")
 	}
 
 	if strings.Contains(result, "can't get key") {
@@ -140,7 +148,18 @@ func getBucketMetadata(c *Context, bucket string) (*ObjectBucketMetadata, bool, 
 		return nil, false, errors.Wrapf(err, "failed to read buckets list result=%s", result)
 	}
 
-	createdAt, err := time.Parse("2006-01-02 15:04:05.999999999Z", s.Data.CreationTime)
+	timeParser := octopusAndAfterTime
+	version, err := cephver.ExtractCephVersion(opcontroller.OperatorCephBaseImageVersion)
+	if err != nil {
+		logger.Errorf("failed to extract ceph version. %v", err)
+	} else {
+		vv := *version
+		if !vv.IsAtLeastOctopus() {
+			timeParser = beforeOctopusTime
+		}
+	}
+
+	createdAt, err := time.Parse(timeParser, s.Data.CreationTime)
 	if err != nil {
 		return nil, false, errors.Wrapf(err, "Error parsing date (%s)", s.Data.CreationTime)
 	}
@@ -153,7 +172,7 @@ func ListBuckets(c *Context) ([]ObjectBucket, error) {
 
 	stats, err := GetBucketsStats(c)
 	if err != nil {
-		return nil, errors.Wrapf(err, "Failed to get bucket stats")
+		return nil, errors.Wrap(err, "Failed to get bucket stats")
 	}
 
 	buckets := []ObjectBucket{}
@@ -177,7 +196,7 @@ func GetBucket(c *Context, bucket string) (*ObjectBucket, int, error) {
 	}
 
 	if err != nil {
-		return nil, RGWErrorUnknown, errors.Wrapf(err, "Failed to get bucket stats")
+		return nil, RGWErrorUnknown, errors.Wrap(err, "Failed to get bucket stats")
 	}
 
 	metadata, notFound, err := getBucketMetadata(c, bucket)
@@ -200,7 +219,7 @@ func DeleteBucket(c *Context, bucketName string, purge bool) (int, error) {
 
 	result, err := runAdminCommand(c, options...)
 	if err != nil {
-		return RGWErrorUnknown, errors.Wrapf(err, "failed to delete bucket")
+		return RGWErrorUnknown, errors.Wrap(err, "failed to delete bucket")
 	}
 
 	if result == "" {
@@ -211,5 +230,5 @@ func DeleteBucket(c *Context, bucketName string, purge bool) (int, error) {
 		return RGWErrorNotFound, errors.New("Bucket not found")
 	}
 
-	return RGWErrorUnknown, errors.Wrapf(err, "failed to delete bucket")
+	return RGWErrorUnknown, errors.Wrap(err, "failed to delete bucket")
 }

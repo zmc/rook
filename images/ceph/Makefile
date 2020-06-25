@@ -18,13 +18,13 @@ include ../image.mk
 # Image Build Options
 
 ifeq ($(GOARCH),amd64)
-CEPH_VERSION = v14.2.7-20200201
+CEPH_VERSION = v15.2.3-20200530
 else
-CEPH_VERSION = v14.2.7-20200206
+CEPH_VERSION = v15.2.3-20200530
 endif
 BASEIMAGE = ceph/ceph-$(GOARCH):$(CEPH_VERSION)
 CEPH_IMAGE = $(BUILD_REGISTRY)/ceph-$(GOARCH)
-OPERATOR_SDK_VERSION = v0.10.0
+OPERATOR_SDK_VERSION = v0.17.1
 GOHOST := GOOS=$(GOHOSTOS) GOARCH=$(GOHOSTARCH) go
 
 TEMP := $(shell mktemp -d)
@@ -41,7 +41,7 @@ YQ := $(TOOLS_HOST_DIR)/yq
 # Build Rook
 
 do.build: generate-csv-ceph-templates
-	@echo === docker build $(CEPH_IMAGE)
+	@echo === container build $(CEPH_IMAGE)
 	@cp Dockerfile $(TEMP)
 	@cp toolbox.sh $(TEMP)
 	@cp $(OUTPUT_DIR)/bin/linux_$(GOARCH)/rook $(TEMP)
@@ -69,7 +69,7 @@ generate-csv-ceph-templates: $(OPERATOR_SDK) $(YQ)
 $(YQ):
 	@if [ ! "$(INCLUDE_CSV_TEMPLATES)" = "" ]; then\
 		echo === installing yq $(GOHOST);\
-		curl -JL https://github.com/mikefarah/yq/releases/download/2.4.1/yq_$(HOST_PLATFORM) -o $(YQ);\
+		curl -JL https://github.com/mikefarah/yq/releases/download/3.3.0/yq_$(HOST_PLATFORM) -o $(YQ);\
 		chmod +x $(YQ);\
 	fi
 

@@ -31,6 +31,7 @@ import (
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
+	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +40,23 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+func TestOSDProperties(t *testing.T) {
+	osdProps := []osdProperties{
+		{pvc: v1.PersistentVolumeClaimVolumeSource{ClaimName: "claim"},
+			metadataPVC: v1.PersistentVolumeClaimVolumeSource{ClaimName: "claim"}},
+		{pvc: v1.PersistentVolumeClaimVolumeSource{ClaimName: ""},
+			metadataPVC: v1.PersistentVolumeClaimVolumeSource{ClaimName: ""}},
+	}
+	expected := [][2]bool{
+		{true, true},
+		{false, false},
+	}
+	for i, p := range osdProps {
+		actual := [2]bool{p.onPVC(), p.onPVCWithMetadata()}
+		assert.Equal(t, expected[i], actual, "detected a problem in `expected[%d]`", i)
+	}
+}
 
 func TestStart(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
@@ -124,7 +142,7 @@ func TestAddRemoveNode(t *testing.T) {
 	}
 	generateKey := "expected key"
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			return "{\"key\": \"" + generateKey + "\"}", nil
 		},
 	}
@@ -158,7 +176,7 @@ func TestAddRemoveNode(t *testing.T) {
 
 	// mock the ceph calls that will be called during remove node
 	mockExec := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command, outputFile string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			if args[0] == "status" {
 				return `{"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
@@ -284,6 +302,55 @@ func TestAddNodeFailure(t *testing.T) {
 	assert.NotNil(t, startErr)
 }
 
+func TestGetPVCHostName(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	c := &Cluster{context: &clusterd.Context{Clientset: clientset}, Namespace: "ns"}
+	pvcName := "test-pvc"
+
+	// fail to get the host name when there is no pod or deployment
+	name, err := c.getPVCHostName(pvcName)
+	assert.Error(t, err)
+	assert.Equal(t, "", name)
+
+	// Create a sample osd deployment
+	osdDeployment := &apps.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "osd-23",
+			Namespace: c.Namespace,
+			Labels:    c.getOSDLabels(23, "", true),
+		},
+	}
+	k8sutil.AddLabelToDeployment(OSDOverPVCLabelKey, pvcName, osdDeployment)
+	osdDeployment.Spec.Template.Spec.NodeSelector = map[string]string{v1.LabelHostname: "testnode"}
+
+	_, err = clientset.AppsV1().Deployments(c.Namespace).Create(osdDeployment)
+	assert.NoError(t, err)
+
+	// get the host name based on the deployment
+	name, err = c.getPVCHostName(pvcName)
+	assert.NoError(t, err)
+	assert.Equal(t, "testnode", name)
+
+	// delete the deployment and get the host name based on the pod
+	err = clientset.AppsV1().Deployments(c.Namespace).Delete(osdDeployment.Name, &metav1.DeleteOptions{})
+	assert.NoError(t, err)
+	osdPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "osd-23",
+			Namespace: c.Namespace,
+			Labels:    c.getOSDLabels(23, "", true),
+		},
+	}
+	osdPod.Labels = map[string]string{OSDOverPVCLabelKey: pvcName}
+	osdPod.Spec.NodeName = "testnode"
+	_, err = clientset.CoreV1().Pods(c.Namespace).Create(osdPod)
+	assert.NoError(t, err)
+
+	name, err = c.getPVCHostName(pvcName)
+	assert.NoError(t, err)
+	assert.Equal(t, "testnode", name)
+}
+
 func TestGetOSDInfo(t *testing.T) {
 	c := New(&cephconfig.ClusterInfo{}, &clusterd.Context{}, "ns", "myversion", cephv1.CephVersionSpec{},
 		rookv1.StorageScopeSpec{}, "", rookv1.Placement{}, rookv1.Annotations{}, cephv1.NetworkSpec{},
@@ -291,8 +358,9 @@ func TestGetOSDInfo(t *testing.T) {
 
 	node := "n1"
 	location := "root=default host=myhost zone=myzone"
-	osd1 := OSDInfo{ID: 3, UUID: "osd-uuid", BlockPath: "dev/logical-volume-path", Location: location}
-	osd2 := OSDInfo{ID: 3, UUID: "osd-uuid", BlockPath: ""}
+	osd1 := OSDInfo{ID: 3, UUID: "osd-uuid", BlockPath: "dev/logical-volume-path", CVMode: "raw", Location: location}
+	osd2 := OSDInfo{ID: 3, UUID: "osd-uuid", BlockPath: "vg1/lv1", CVMode: "lvm", LVBackedPV: true}
+	osd3 := OSDInfo{ID: 3, UUID: "osd-uuid", BlockPath: ""}
 	osdProp := osdProperties{
 		crushHostname: node,
 		pvc:           v1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
@@ -308,10 +376,19 @@ func TestGetOSDInfo(t *testing.T) {
 	assert.Equal(t, 1, len(osds1))
 	assert.Equal(t, osd1.ID, osds1[0].ID)
 	assert.Equal(t, osd1.BlockPath, osds1[0].BlockPath)
+	assert.Equal(t, osd1.CVMode, osds1[0].CVMode)
 	assert.Equal(t, location, osds1[0].Location)
 
 	d2, _ := c.makeDeployment(osdProp, osd2, dataPathMap)
-	osds2, err := c.getOSDInfo(d2)
-	assert.Equal(t, 0, len(osds2))
+	osds2, _ := c.getOSDInfo(d2)
+	assert.Equal(t, 1, len(osds2))
+	assert.Equal(t, osd2.ID, osds2[0].ID)
+	assert.Equal(t, osd2.BlockPath, osds2[0].BlockPath)
+	assert.Equal(t, osd2.CVMode, osds2[0].CVMode)
+	assert.Equal(t, osd2.LVBackedPV, osds2[0].LVBackedPV)
+
+	d3, _ := c.makeDeployment(osdProp, osd3, dataPathMap)
+	osds3, err := c.getOSDInfo(d3)
+	assert.Equal(t, 0, len(osds3))
 	assert.NotNil(t, err)
 }

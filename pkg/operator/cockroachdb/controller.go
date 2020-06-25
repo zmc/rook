@@ -123,7 +123,11 @@ func (c *ClusterController) StartWatch(namespace string, stopCh chan struct{}) {
 }
 
 func (c *ClusterController) onAdd(obj interface{}) {
-	clusterObj := obj.(*cockroachdbv1alpha1.Cluster).DeepCopy()
+	clusterObj, ok := obj.(*cockroachdbv1alpha1.Cluster)
+	if !ok {
+		return
+	}
+	clusterObj = clusterObj.DeepCopy()
 	logger.Infof("new cluster %s added to namespace %s", clusterObj.Name, clusterObj.Namespace)
 
 	cluster := newCluster(clusterObj, c.context)
@@ -176,8 +180,16 @@ func (c *ClusterController) onAdd(obj interface{}) {
 }
 
 func (c *ClusterController) onUpdate(oldObj, newObj interface{}) {
-	_ = oldObj.(*cockroachdbv1alpha1.Cluster).DeepCopy()
-	newCluster := newObj.(*cockroachdbv1alpha1.Cluster).DeepCopy()
+	oldCluster, ok := oldObj.(*cockroachdbv1alpha1.Cluster)
+	if !ok {
+		return
+	}
+	_ = oldCluster.DeepCopy()
+	newCluster, ok := newObj.(*cockroachdbv1alpha1.Cluster)
+	if !ok {
+		return
+	}
+	newCluster = newCluster.DeepCopy()
 	logger.Infof("cluster %s updated in namespace %s", newCluster.Name, newCluster.Namespace)
 }
 
@@ -486,8 +498,7 @@ func (c *ClusterController) initCluster(cluster *cluster) error {
 	}
 
 	hostFlag := fmt.Sprintf("--host=%s", createQualifiedReplicaServiceName(0, cluster.namespace))
-	out, err := c.context.Executor.ExecuteCommandWithCombinedOutput(false, "cockroachdb init",
-		"/cockroach/cockroach", "init", "--insecure", hostFlag)
+	out, err := c.context.Executor.ExecuteCommandWithCombinedOutput("/cockroach/cockroach", "init", "--insecure", hostFlag)
 	if err != nil {
 		return fmt.Errorf("cluster init failed for namespace %s: %+v. %s", cluster.namespace, err, out)
 	}

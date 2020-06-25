@@ -19,6 +19,7 @@ package clients
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
@@ -105,19 +106,39 @@ func (p *PoolOperation) CephPoolExists(namespace, name string) (bool, error) {
 	return false, nil
 }
 
+// DeletePool deletes a pool after deleting all the block images contained by the pool
 func (p *PoolOperation) DeletePool(blockClient *BlockOperation, namespace, poolName string) error {
 	// Delete all the images in a pool
-	blockImagesList, _ := blockClient.List(namespace)
+	logger.Infof("listing images in pool %q", poolName)
+	blockImagesList, _ := blockClient.ListImagesInPool(namespace, poolName)
 	for _, blockImage := range blockImagesList {
-		if poolName == blockImage.PoolName {
-			logger.Infof("force deleting block image %q in pool %q", blockImage, poolName)
+		logger.Infof("force deleting block image %q in pool %q", blockImage, poolName)
+		// Wait and retry up to 10 times/seconds to delete RBD images
+		for i := 0; i < 10; i++ {
 			err := blockClient.DeleteBlockImage(blockImage, namespace)
 			if err != nil {
 				logger.Infof("failed deleting image %q from %q. %v", blockImage, poolName, err)
+				time.Sleep(2 * time.Second)
+			} else {
+				break
 			}
+			return fmt.Errorf("gave up waiting for image %q from %q to be deleted. %v", blockImage, poolName, err)
 		}
 	}
 
-	logger.Infof("deleting pool %q", poolName)
-	return p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Delete(poolName, &metav1.DeleteOptions{})
+	logger.Infof("deleting pool CR %q", poolName)
+	err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Delete(poolName, &metav1.DeleteOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete pool CR. %v", err)
+	}
+
+	crdCheckerFunc := func() error {
+		_, err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Get(poolName, metav1.GetOptions{})
+		return err
+	}
+
+	return p.k8sh.WaitForCustomResourceDeletion(namespace, crdCheckerFunc)
 }

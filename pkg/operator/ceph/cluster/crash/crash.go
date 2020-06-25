@@ -75,8 +75,9 @@ func (r *ReconcileNode) createOrUpdateCephCrash(node corev1.Node, tolerations []
 			k8sutil.AppAttr:      AppName,
 			NodeNameLabel:        node.GetName(),
 		}
-		deploymentLabels[string(config.CrashType)] = "crash"
+		deploymentLabels[config.CrashType] = "crash"
 		deploymentLabels["ceph_daemon_id"] = "crash"
+		deploymentLabels[k8sutil.ClusterAttr] = cephCluster.GetNamespace()
 
 		selectorLabels := map[string]string{
 			corev1.LabelHostname: nodeHostnameLabel,
@@ -171,10 +172,11 @@ func getCrashDaemonContainer(cephCluster cephv1.CephCluster, cephVersion version
 		Command: []string{
 			"ceph-crash",
 		},
-		Image:        cephImage,
-		Env:          envVars,
-		VolumeMounts: volumeMounts,
-		Resources:    cephv1.GetCrashCollectorResources(cephCluster.Spec.Resources),
+		Image:           cephImage,
+		Env:             envVars,
+		VolumeMounts:    volumeMounts,
+		Resources:       cephv1.GetCrashCollectorResources(cephCluster.Spec.Resources),
+		SecurityContext: mon.PodSecurityContext(),
 	}
 
 	return container

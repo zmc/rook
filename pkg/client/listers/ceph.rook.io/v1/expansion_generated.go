@@ -58,6 +58,14 @@ type CephNFSListerExpansion interface{}
 // CephNFSNamespaceLister.
 type CephNFSNamespaceListerExpansion interface{}
 
+// CephObjectRealmListerExpansion allows custom methods to be added to
+// CephObjectRealmLister.
+type CephObjectRealmListerExpansion interface{}
+
+// CephObjectRealmNamespaceListerExpansion allows custom methods to be added to
+// CephObjectRealmNamespaceLister.
+type CephObjectRealmNamespaceListerExpansion interface{}
+
 // CephObjectStoreListerExpansion allows custom methods to be added to
 // CephObjectStoreLister.
 type CephObjectStoreListerExpansion interface{}
@@ -73,3 +81,27 @@ type CephObjectStoreUserListerExpansion interface{}
 // CephObjectStoreUserNamespaceListerExpansion allows custom methods to be added to
 // CephObjectStoreUserNamespaceLister.
 type CephObjectStoreUserNamespaceListerExpansion interface{}
+
+// CephObjectZoneListerExpansion allows custom methods to be added to
+// CephObjectZoneLister.
+type CephObjectZoneListerExpansion interface{}
+
+// CephObjectZoneNamespaceListerExpansion allows custom methods to be added to
+// CephObjectZoneNamespaceLister.
+type CephObjectZoneNamespaceListerExpansion interface{}
+
+// CephObjectZoneGroupListerExpansion allows custom methods to be added to
+// CephObjectZoneGroupLister.
+type CephObjectZoneGroupListerExpansion interface{}
+
+// CephObjectZoneGroupNamespaceListerExpansion allows custom methods to be added to
+// CephObjectZoneGroupNamespaceLister.
+type CephObjectZoneGroupNamespaceListerExpansion interface{}
+
+// CephRBDMirrorListerExpansion allows custom methods to be added to
+// CephRBDMirrorLister.
+type CephRBDMirrorListerExpansion interface{}
+
+// CephRBDMirrorNamespaceListerExpansion allows custom methods to be added to
+// CephRBDMirrorNamespaceLister.
+type CephRBDMirrorNamespaceListerExpansion interface{}

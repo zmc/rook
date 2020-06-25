@@ -19,7 +19,6 @@ package osd
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -29,7 +28,6 @@ import (
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"github.com/rook/rook/pkg/util/exec"
 )
 
 const (
@@ -101,24 +99,6 @@ func (m *DeviceOsdMapping) String() string {
 	return string(b)
 }
 
-func waitForPath(path string, executor exec.Executor) error {
-	retryCount := 0
-	retryMax := 25
-	sleepTime := 250
-	for {
-		_, err := executor.ExecuteStat(path)
-		if err == nil {
-			return nil
-		}
-
-		retryCount++
-		if retryCount > retryMax {
-			return err
-		}
-		<-time.After(time.Duration(sleepTime) * time.Millisecond)
-	}
-}
-
 func initializeOSD(config *osdConfig, context *clusterd.Context, cluster *cephconfig.ClusterInfo) error {
 	// add auth privileges for the OSD, the bootstrap-osd privileges were very limited
 	if err := addOSDAuth(context, cluster.Name, config.id, config.rootPath); err != nil {
@@ -134,7 +114,7 @@ func getMonMap(context *clusterd.Context, clusterName string) ([]byte, error) {
 	args := []string{"mon", "getmap"}
 	buf, err := client.NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get mon map")
+		return nil, errors.Wrap(err, "failed to get mon map")
 	}
 	return buf, nil
 }

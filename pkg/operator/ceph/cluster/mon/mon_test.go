@@ -84,14 +84,14 @@ func newTestStartClusterWithQuorumResponse(t *testing.T, namespace string, monRe
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutput: func(debug bool, actionName string, command string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if strings.Contains(command, "ceph-authtool") {
 				err := cephtest.CreateConfigDir(path.Join(configDir, namespace))
-				return "", errors.Wrapf(err, "failed testing of start cluster without quorum response")
+				return "", errors.Wrap(err, "failed testing of start cluster without quorum response")
 			}
 			return "", nil
 		},
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			// mock quorum health check because a second `Start()` triggers a health check
 			return monResponse()
 		},
@@ -174,7 +174,7 @@ func TestOperatorRestart(t *testing.T) {
 	// start a basic cluster
 	info, err := c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
 	assert.Nil(t, err)
-	assert.True(t, info.IsInitialized())
+	assert.True(t, info.IsInitialized(true))
 
 	validateStart(t, c)
 
@@ -183,7 +183,7 @@ func TestOperatorRestart(t *testing.T) {
 	// starting again should be a no-op, but will not result in an error
 	info, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
 	assert.Nil(t, err)
-	assert.True(t, info.IsInitialized())
+	assert.True(t, info.IsInitialized(true))
 
 	validateStart(t, c)
 }
@@ -202,7 +202,7 @@ func TestOperatorRestartHostNetwork(t *testing.T) {
 	// start a basic cluster
 	info, err := c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
 	assert.Nil(t, err)
-	assert.True(t, info.IsInitialized())
+	assert.True(t, info.IsInitialized(true))
 
 	validateStart(t, c)
 
@@ -212,7 +212,7 @@ func TestOperatorRestartHostNetwork(t *testing.T) {
 	// starting again should be a no-op, but still results in an error
 	info, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
 	assert.Nil(t, err)
-	assert.True(t, info.IsInitialized(), info)
+	assert.True(t, info.IsInitialized(true), info)
 
 	validateStart(t, c)
 }
@@ -281,23 +281,23 @@ func TestMonInQuorum(t *testing.T) {
 
 func TestNameToIndex(t *testing.T) {
 	// invalid
-	id, err := fullNameToIndex("m")
+	id, err := fullNameToIndex("rook-ceph-monitor0")
 	assert.NotNil(t, err)
 	assert.Equal(t, -1, id)
-	id, err = fullNameToIndex("mon")
-	assert.NotNil(t, err)
-	assert.Equal(t, -1, id)
-	id, err = fullNameToIndex("rook-ceph-monitor0")
+	id, err = fullNameToIndex("rook-ceph-mon123")
 	assert.NotNil(t, err)
 	assert.Equal(t, -1, id)
 
 	// valid
+	id, err = fullNameToIndex("b")
+	assert.Nil(t, err)
+	assert.Equal(t, 1, id)
+	id, err = fullNameToIndex("m")
+	assert.Nil(t, err)
+	assert.Equal(t, 12, id)
 	id, err = fullNameToIndex("rook-ceph-mon-a")
 	assert.Nil(t, err)
 	assert.Equal(t, 0, id)
-	id, err = fullNameToIndex("rook-ceph-mon123")
-	assert.Nil(t, err)
-	assert.Equal(t, 123, id)
 }
 
 func TestWaitForQuorum(t *testing.T) {

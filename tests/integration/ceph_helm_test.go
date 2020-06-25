@@ -36,9 +36,9 @@ var (
 // Monitors
 // - One mon
 // OSDs
-// - Bluestore running on a directory
+// - Bluestore running on a raw block device
 // Block
-// - Create a pool in each cluster
+// - Create a pool in the cluster
 // - Mount/unmount a block device through the dynamic provisioner
 // File system
 // - Create a file system via the CRD
@@ -59,17 +59,31 @@ func TestCephHelmSuite(t *testing.T) {
 
 type HelmSuite struct {
 	suite.Suite
-	helper    *clients.TestClient
-	kh        *utils.K8sHelper
-	op        *TestCluster
-	namespace string
+	helper          *clients.TestClient
+	kh              *utils.K8sHelper
+	op              *TestCluster
+	namespace       string
+	rookCephCleanup bool
 }
 
 func (hs *HelmSuite) SetupSuite() {
 	hs.namespace = "helm-ns"
-	mons := 1
-	rbdMirrorWorkers := 1
-	hs.op, hs.kh = StartTestCluster(hs.T, helmMinimalTestVersion, hs.namespace, "bluestore", true, false, "", mons, rbdMirrorWorkers, installer.VersionMaster, installer.NautilusVersion)
+	helmTestCluster := TestCluster{
+		namespace:               hs.namespace,
+		storeType:               "bluestore",
+		storageClassName:        "",
+		useHelm:                 true,
+		usePVC:                  false,
+		mons:                    1,
+		rbdMirrorWorkers:        1,
+		rookCephCleanup:         true,
+		skipOSDCreation:         false,
+		minimalMatrixK8sVersion: helmMinimalTestVersion,
+		rookVersion:             installer.VersionMaster,
+		cephVersion:             installer.NautilusVersion,
+	}
+
+	hs.op, hs.kh = StartTestCluster(hs.T, &helmTestCluster)
 	hs.helper = clients.CreateTestClient(hs.kh, hs.op.installer.Manifests)
 }
 
@@ -98,5 +112,5 @@ func (hs *HelmSuite) TestFileStoreOnRookInstalledViaHelm() {
 
 // Test Object StoreCreation on Rook that was installed via helm
 func (hs *HelmSuite) TestObjectStoreOnRookInstalledViaHelm() {
-	runObjectE2ETestLite(hs.helper, hs.kh, hs.Suite, hs.namespace, "default", 3)
+	runObjectE2ETestLite(hs.helper, hs.kh, hs.Suite, hs.namespace, "default", 3, true)
 }

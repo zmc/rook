@@ -107,7 +107,7 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 			lvPath = getDeviceLVPath(context, fmt.Sprintf("/mnt/%s", a.nodeName))
 
 			// List THE existing OSD configured with ceph-volume lvm mode
-			lvmOsds, err = getCephVolumeLVMOSDs(context, a.cluster.Name, a.cluster.FSID, lvPath, skipLVRelease, lvBackedPV)
+			lvmOsds, err = GetCephVolumeLVMOSDs(context, a.cluster.Name, a.cluster.FSID, lvPath, skipLVRelease, lvBackedPV)
 			if err != nil {
 				logger.Infof("failed to get device already provisioned by ceph-volume lvm. %v", err)
 			}
@@ -127,7 +127,7 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 				// I'm leaving this code with an empty metadata device for now
 				metadataBlock = ""
 
-				rawOsds, err = getCephVolumeRawOSDs(context, a.cluster.Name, a.cluster.FSID, block, metadataBlock, lvBackedPV)
+				rawOsds, err = GetCephVolumeRawOSDs(context, a.cluster.Name, a.cluster.FSID, block, metadataBlock, lvBackedPV)
 				if err != nil {
 					logger.Infof("failed to get device already provisioned by ceph-volume raw. %v", err)
 				}
@@ -138,7 +138,7 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 		}
 
 		// List existing OSD(s) configured with ceph-volume lvm mode
-		lvmOsds, err = getCephVolumeLVMOSDs(context, a.cluster.Name, a.cluster.FSID, lvPath, false, lvBackedPV)
+		lvmOsds, err = GetCephVolumeLVMOSDs(context, a.cluster.Name, a.cluster.FSID, lvPath, false, lvBackedPV)
 		if err != nil {
 			logger.Infof("failed to get devices already provisioned by ceph-volume. %v", err)
 		}
@@ -150,7 +150,7 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 	// Create OSD bootstrap keyring
 	err = createOSDBootstrapKeyring(context, a.cluster.Name, cephConfigDir)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to generate osd keyring")
+		return nil, errors.Wrap(err, "failed to generate osd keyring")
 	}
 
 	// Check if the PVC is an LVM block device (certain StorageClass do this)
@@ -167,7 +167,7 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 			}
 			lvBackedPV, err = sys.IsLV(dev, context.Executor)
 			if err != nil {
-				return nil, errors.Wrapf(err, "failed to check device type")
+				return nil, errors.Wrap(err, "failed to check device type")
 			}
 			break
 		}
@@ -186,16 +186,16 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 	// If running on OSD on PVC
 	if a.pvcBacked {
 		if block, metadataBlock, err = a.initializeBlockPVC(context, devices, lvBackedPV); err != nil {
-			return nil, errors.Wrapf(err, "failed to initialize devices")
+			return nil, errors.Wrap(err, "failed to initialize devices on PVC")
 		}
 	} else {
 		if err = a.initializeDevices(context, devices); err != nil {
-			return nil, errors.Wrapf(err, "failed to initialize devices")
+			return nil, errors.Wrap(err, "failed to initialize devices")
 		}
 	}
 
 	// List OSD configured with ceph-volume lvm mode
-	lvmOsds, err = getCephVolumeLVMOSDs(context, a.cluster.Name, a.cluster.FSID, block, false, lvBackedPV)
+	lvmOsds, err = GetCephVolumeLVMOSDs(context, a.cluster.Name, a.cluster.FSID, block, false, lvBackedPV)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get devices already provisioned by ceph-volume lvm")
 	}
@@ -204,7 +204,7 @@ func (a *OsdAgent) configureCVDevices(context *clusterd.Context, devices *Device
 	// List THE configured OSD with ceph-volume raw mode
 	if a.cluster.CephVersion.IsAtLeast(cephVolumeRawModeMinCephVersion) && !lvBackedPV {
 		block = fmt.Sprintf("/mnt/%s", a.nodeName)
-		rawOsds, err = getCephVolumeRawOSDs(context, a.cluster.Name, a.cluster.FSID, block, metadataBlock, lvBackedPV)
+		rawOsds, err = GetCephVolumeRawOSDs(context, a.cluster.Name, a.cluster.FSID, block, metadataBlock, lvBackedPV)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to get devices already provisioned by ceph-volume raw")
 		}
@@ -262,10 +262,6 @@ func (a *OsdAgent) initializeBlockPVC(context *clusterd.Context, devices *Device
 				devices.Entries["metadata"].Config.Name,
 			}...)
 
-			crushDeviceClass := os.Getenv(oposd.CrushDeviceClassVarName)
-			if crushDeviceClass != "" {
-				metadataArg = append(metadataArg, []string{crushDeviceClassFlag, crushDeviceClass}...)
-			}
 			metadataBlockPath = devices.Entries["metadata"].Config.Name
 		}
 
@@ -273,9 +269,10 @@ func (a *OsdAgent) initializeBlockPVC(context *clusterd.Context, devices *Device
 			logger.Infof("configuring new device %q", device.Config.Name)
 			var err error
 			var deviceArg string
+
 			if lvBackedPV {
 				// pass 'vg/lv' to ceph-volume
-				deviceArg, err = getLVNameFromDevicePath(context, device.Config.Name)
+				deviceArg, err = sys.GetLVName(context.Executor, device.Config.Name)
 				if err != nil {
 					return "", "", errors.Wrapf(err, "failed to get lv name from device path %q", device.Config.Name)
 				}
@@ -288,13 +285,18 @@ func (a *OsdAgent) initializeBlockPVC(context *clusterd.Context, devices *Device
 				deviceArg,
 			}...)
 
+			crushDeviceClass := os.Getenv(oposd.CrushDeviceClassVarName)
+			if crushDeviceClass != "" {
+				immediateExecuteArgs = append(immediateExecuteArgs, []string{crushDeviceClassFlag, crushDeviceClass}...)
+			}
+
 			// Add the cli argument for the metadata device
 			if metadataDev {
 				immediateExecuteArgs = append(immediateExecuteArgs, metadataArg...)
 			}
 
 			// execute ceph-volume with the device
-			op, err := context.Executor.ExecuteCommandWithCombinedOutput(false, "", baseCommand, immediateExecuteArgs...)
+			op, err := context.Executor.ExecuteCommandWithCombinedOutput(baseCommand, immediateExecuteArgs...)
 			if err != nil {
 				cvLogFilePath := path.Join(cvLogDir, "ceph-volume.log")
 
@@ -305,7 +307,7 @@ func (a *OsdAgent) initializeBlockPVC(context *clusterd.Context, devices *Device
 				}
 
 				// Return failure
-				return "", "", errors.Wrapf(err, "failed ceph-volume") // fail return here as validation provided by ceph-volume
+				return "", "", errors.Wrap(err, "failed ceph-volume") // fail return here as validation provided by ceph-volume
 			}
 			logger.Infof("%v", op)
 			// if raw mode is used or PV on LV, let's return the path of the device
@@ -338,23 +340,6 @@ func getLVPath(op string) string {
 		}
 	}
 	return ""
-}
-
-func getLVNameFromDevicePath(context *clusterd.Context, devicePath string) (string, error) {
-	devInfo, err := context.Executor.ExecuteCommandWithOutput(true, "",
-		"dmsetup", "info", "-c", "--noheadings", "-o", "name", devicePath)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed dmsetup info. output: %q", devInfo)
-	}
-	out, err := context.Executor.ExecuteCommandWithOutput(true, "", "dmsetup", "splitname", devInfo, "--noheadings")
-	if err != nil {
-		return "", errors.Wrapf(err, "failed dmsetup splitname %q", devInfo)
-	}
-	split := strings.Split(out, ":")
-	if len(split) < 2 {
-		return "", errors.Wrapf(err, "dmsetup splitname returned unexpected result for %q. output: %q", devInfo, out)
-	}
-	return fmt.Sprintf("%s/%s", split[0], split[1]), nil
 }
 
 func updateLVMConfig(context *clusterd.Context, onPVC, lvBackedPV bool) error {
@@ -413,6 +398,11 @@ func (a *OsdAgent) initializeDevices(context *clusterd.Context, devices *DeviceO
 	metadataDevices := make(map[string]map[string]string)
 	for name, device := range devices.Entries {
 		if device.Data == -1 {
+			if device.Metadata != nil {
+				logger.Infof("skipping metadata device %s config since it will be configured with a data device", name)
+				continue
+			}
+
 			logger.Infof("configuring new device %s", name)
 			deviceArg := path.Join("/dev", name)
 			// ceph-volume prefers to use /dev/mapper/<name> if the device has this kind of alias
@@ -487,13 +477,13 @@ func (a *OsdAgent) initializeDevices(context *clusterd.Context, devices *DeviceO
 				logger.Infof("Base command - %+v", baseCommand)
 				logger.Infof("immediateReportArgs - %+v", baseCommand)
 				logger.Infof("immediateExecuteArgs - %+v", immediateExecuteArgs)
-				if err := context.Executor.ExecuteCommand(false, "", baseCommand, immediateReportArgs...); err != nil {
-					return errors.Wrapf(err, "failed ceph-volume report") // fail return here as validation provided by ceph-volume
+				if err := context.Executor.ExecuteCommand(baseCommand, immediateReportArgs...); err != nil {
+					return errors.Wrap(err, "failed ceph-volume report") // fail return here as validation provided by ceph-volume
 				}
 
 				// execute ceph-volume immediately with the device-specific setting instead of batching up multiple devices together
-				if err := context.Executor.ExecuteCommand(false, "", baseCommand, immediateExecuteArgs...); err != nil {
-					return errors.Wrapf(err, "failed ceph-volume")
+				if err := context.Executor.ExecuteCommand(baseCommand, immediateExecuteArgs...); err != nil {
+					return errors.Wrap(err, "failed ceph-volume")
 				}
 
 			}
@@ -535,8 +525,8 @@ func (a *OsdAgent) initializeDevices(context *clusterd.Context, devices *DeviceO
 			"--report",
 		}...)
 
-		if err := context.Executor.ExecuteCommand(false, "", baseCommand, reportArgs...); err != nil {
-			return errors.Wrapf(err, "failed ceph-volume report") // fail return here as validation provided by ceph-volume
+		if err := context.Executor.ExecuteCommand(baseCommand, reportArgs...); err != nil {
+			return errors.Wrap(err, "failed ceph-volume report") // fail return here as validation provided by ceph-volume
 		}
 
 		reportArgs = append(reportArgs, []string{
@@ -544,7 +534,7 @@ func (a *OsdAgent) initializeDevices(context *clusterd.Context, devices *DeviceO
 			"json",
 		}...)
 
-		cvOut, err := context.Executor.ExecuteCommandWithCombinedOutput(false, "", baseCommand, reportArgs...)
+		cvOut, err := context.Executor.ExecuteCommandWithCombinedOutput(baseCommand, reportArgs...)
 		if err != nil {
 			return errors.Wrapf(err, "failed ceph-volume json report: %s", cvOut) // fail return here as validation provided by ceph-volume
 		}
@@ -553,7 +543,7 @@ func (a *OsdAgent) initializeDevices(context *clusterd.Context, devices *DeviceO
 
 		var cvReport cephVolReport
 		if err = json.Unmarshal([]byte(cvOut), &cvReport); err != nil {
-			return errors.Wrapf(err, "failed to unmarshal ceph-volume report json")
+			return errors.Wrap(err, "failed to unmarshal ceph-volume report json")
 		}
 
 		if path.Join("/dev", md) != cvReport.Vg.Devices {
@@ -561,8 +551,8 @@ func (a *OsdAgent) initializeDevices(context *clusterd.Context, devices *DeviceO
 		}
 
 		// execute ceph-volume batching up multiple devices
-		if err := context.Executor.ExecuteCommand(false, "", baseCommand, mdArgs...); err != nil {
-			return errors.Wrapf(err, "failed ceph-volume") // fail return here as validation provided by ceph-volume
+		if err := context.Executor.ExecuteCommand(baseCommand, mdArgs...); err != nil {
+			return errors.Wrap(err, "failed ceph-volume") // fail return here as validation provided by ceph-volume
 		}
 	}
 
@@ -583,15 +573,17 @@ func sanitizeOSDsPerDevice(count int) string {
 	return strconv.Itoa(count)
 }
 
-func getCephVolumeLVMOSDs(context *clusterd.Context, clusterName string, cephfsid, lv string, skipLVRelease, lvBackedPV bool) ([]oposd.OSDInfo, error) {
+// GetCephVolumeLVMOSDs list OSD prepared with lvm mode
+func GetCephVolumeLVMOSDs(context *clusterd.Context, clusterName string, cephfsid, lv string, skipLVRelease, lvBackedPV bool) ([]oposd.OSDInfo, error) {
 	// lv can be a block device if raw mode is used
 	cvMode := "lvm"
 
-	result, err := context.Executor.ExecuteCommandWithOutput(false, "", cephVolumeCmd, cvMode, "list", lv, "--format", "json")
+	var lvPath string
+
+	result, err := context.Executor.ExecuteCommandWithOutput(cephVolumeCmd, cvMode, "list", lv, "--format", "json")
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to retrieve ceph-volume %s list results", cvMode)
 	}
-	logger.Debugf("%v", result)
 
 	var osds []oposd.OSDInfo
 	var cephVolumeResult map[string][]osdInfo
@@ -617,18 +609,30 @@ func getCephVolumeLVMOSDs(context *clusterd.Context, clusterName string, cephfsi
 			if osd.Type == "journal" {
 				store = "filestore"
 			}
+
+			// If no lv is specified let's take the one we discovered
+			if lv == "" {
+				lvPath = osd.Path
+			}
+
 		}
+
 		if len(osdFSID) == 0 {
 			logger.Infof("Skipping osd%d as no instances are running on ceph cluster %q", id, cephfsid)
 			continue
 		}
 		logger.Infof("osdInfo has %d elements. %+v", len(osdInfo), osdInfo)
 
+		// If lv was passed as an arg let's use it in osdInfo
+		if lv != "" {
+			lvPath = lv
+		}
+
 		osd := oposd.OSDInfo{
 			ID:            id,
 			Cluster:       "ceph",
 			UUID:          osdFSID,
-			BlockPath:     lv,
+			BlockPath:     lvPath,
 			SkipLVRelease: skipLVRelease,
 			LVBackedPV:    lvBackedPV,
 			CVMode:        cvMode,
@@ -660,15 +664,15 @@ func readCVLogContent(cvLogFilePath string) string {
 	return string(b)
 }
 
-func getCephVolumeRawOSDs(context *clusterd.Context, clusterName string, cephfsid, block, metadataBlock string, lvBackedPV bool) ([]oposd.OSDInfo, error) {
+// GetCephVolumeRawOSDs list OSD prepared with raw mode
+func GetCephVolumeRawOSDs(context *clusterd.Context, clusterName string, cephfsid, block, metadataBlock string, lvBackedPV bool) ([]oposd.OSDInfo, error) {
 	// lv can be a block device if raw mode is used
 	cvMode := "raw"
 
-	result, err := context.Executor.ExecuteCommandWithOutput(false, "", cephVolumeCmd, cvMode, "list", block, "--format", "json")
+	result, err := context.Executor.ExecuteCommandWithOutput(cephVolumeCmd, cvMode, "list", block, "--format", "json")
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to retrieve ceph-volume %s list results", cvMode)
 	}
-	logger.Debugf("%v", result)
 
 	var osds []oposd.OSDInfo
 	var cephVolumeResult map[string]osdInfoBlock
@@ -690,6 +694,11 @@ func getCephVolumeRawOSDs(context *clusterd.Context, clusterName string, cephfsi
 		if len(osdFSID) == 0 {
 			logger.Infof("Skipping osd.%d as no instances are running on ceph cluster %q", osdID, cephfsid)
 			continue
+		}
+
+		// If no block is specified let's take the one we discovered
+		if block == "" {
+			block = osdInfo.Device
 		}
 
 		osd := oposd.OSDInfo{

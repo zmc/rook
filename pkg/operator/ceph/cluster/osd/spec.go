@@ -37,27 +37,26 @@ import (
 )
 
 const (
-	osdStoreEnvVarName                          = "ROOK_OSD_STORE"
-	osdDatabaseSizeEnvVarName                   = "ROOK_OSD_DATABASE_SIZE"
-	osdWalSizeEnvVarName                        = "ROOK_OSD_WAL_SIZE"
-	osdJournalSizeEnvVarName                    = "ROOK_OSD_JOURNAL_SIZE"
-	osdsPerDeviceEnvVarName                     = "ROOK_OSDS_PER_DEVICE"
-	encryptedDeviceEnvVarName                   = "ROOK_ENCRYPTED_DEVICE"
-	osdMetadataDeviceEnvVarName                 = "ROOK_METADATA_DEVICE"
-	pvcBackedOSDVarName                         = "ROOK_PVC_BACKED_OSD"
-	blockPathVarName                            = "ROOK_BLOCK_PATH"
-	cvModeVarName                               = "ROOK_CV_MODE"
-	lvBackedPVVarName                           = "ROOK_LV_BACKED_PV"
-	CrushDeviceClassVarName                     = "ROOK_OSD_CRUSH_DEVICE_CLASS"
-	rookBinariesMountPath                       = "/rook"
-	rookBinariesVolumeName                      = "rook-binaries"
-	activateOSDVolumeName                       = "activate-osd"
-	activateOSDMountPath                        = "/var/lib/ceph/osd/ceph-"
-	blockPVCMapperInitContainer                 = "blkdevmapper"
-	blockPVCMetadataMapperInitContainer         = "blkdevmapper-metadata"
-	activatePVCOSDInitContainer                 = "activate"
-	expandPVCOSDInitContainer                   = "expand-bluefs"
-	osdMemoryTargetSafetyFactor         float32 = 0.8
+	osdStoreEnvVarName                  = "ROOK_OSD_STORE"
+	osdDatabaseSizeEnvVarName           = "ROOK_OSD_DATABASE_SIZE"
+	osdWalSizeEnvVarName                = "ROOK_OSD_WAL_SIZE"
+	osdJournalSizeEnvVarName            = "ROOK_OSD_JOURNAL_SIZE"
+	osdsPerDeviceEnvVarName             = "ROOK_OSDS_PER_DEVICE"
+	encryptedDeviceEnvVarName           = "ROOK_ENCRYPTED_DEVICE"
+	osdMetadataDeviceEnvVarName         = "ROOK_METADATA_DEVICE"
+	pvcBackedOSDVarName                 = "ROOK_PVC_BACKED_OSD"
+	blockPathVarName                    = "ROOK_BLOCK_PATH"
+	cvModeVarName                       = "ROOK_CV_MODE"
+	lvBackedPVVarName                   = "ROOK_LV_BACKED_PV"
+	CrushDeviceClassVarName             = "ROOK_OSD_CRUSH_DEVICE_CLASS"
+	rookBinariesMountPath               = "/rook"
+	rookBinariesVolumeName              = "rook-binaries"
+	activateOSDVolumeName               = "activate-osd"
+	activateOSDMountPath                = "/var/lib/ceph/osd/ceph-"
+	blockPVCMapperInitContainer         = "blkdevmapper"
+	blockPVCMetadataMapperInitContainer = "blkdevmapper-metadata"
+	activatePVCOSDInitContainer         = "activate"
+	expandPVCOSDInitContainer           = "expand-bluefs"
 	// CephDeviceSetLabelKey is the Rook device set label key
 	CephDeviceSetLabelKey = "ceph.rook.io/DeviceSet"
 	// CephSetIndexLabelKey is the Rook label key index
@@ -66,6 +65,8 @@ const (
 	CephDeviceSetPVCIDLabelKey = "ceph.rook.io/DeviceSetPVCId"
 	// OSDOverPVCLabelKey is the Rook PVC label key
 	OSDOverPVCLabelKey = "ceph.rook.io/pvc"
+	udevPath           = "/run/udev"
+	udevVolName        = "run-udev"
 )
 
 const (
@@ -123,21 +124,18 @@ const (
 )
 
 func (c *Cluster) makeJob(osdProps osdProperties, provisionConfig *provisionConfig) (*batch.Job, error) {
-	osdOnPVC := osdProps.pvc.ClaimName != ""
-	osdOnPVCMetadata := osdProps.metadataPVC.ClaimName != ""
-
 	podSpec, err := c.provisionPodTemplateSpec(osdProps, v1.RestartPolicyOnFailure, provisionConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	if !osdOnPVC {
+	if !osdProps.onPVC() {
 		podSpec.Spec.NodeSelector = map[string]string{v1.LabelHostname: osdProps.crushHostname}
 	} else {
 		// This is not needed in raw mode and 14.2.8 brings it
 		// but we still want to do this not to lose backward compatibility with lvm based OSDs...
 		podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, c.getPVCInitContainer(osdProps))
-		if osdOnPVCMetadata {
+		if osdProps.onPVCWithMetadata() {
 			podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, c.getPVCMetadataInitContainer("/srv", osdProps))
 		}
 	}
@@ -156,7 +154,7 @@ func (c *Cluster) makeJob(osdProps osdProperties, provisionConfig *provisionConf
 		},
 	}
 
-	if osdOnPVC {
+	if osdProps.onPVC() {
 		k8sutil.AddLabelToJob(OSDOverPVCLabelKey, osdProps.pvc.ClaimName, job)
 	}
 
@@ -167,14 +165,14 @@ func (c *Cluster) makeJob(osdProps osdProperties, provisionConfig *provisionConf
 }
 
 func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionConfig *provisionConfig) (*apps.Deployment, error) {
+	// If running on Octopus, we don't need to use the host PID namespace
+	var hostPID = !c.clusterInfo.CephVersion.IsAtLeastOctopus()
 	deploymentName := fmt.Sprintf(osdAppNameFmt, osd.ID)
 	replicaCount := int32(1)
 	volumeMounts := controller.CephVolumeMounts(provisionConfig.DataPathMap, false)
 	configVolumeMounts := controller.RookVolumeMounts(provisionConfig.DataPathMap, false)
-	osdOnPVC := osdProps.pvc.ClaimName != ""
-	osdOnPVCMetadata := osdProps.metadataPVC.ClaimName != ""
 	// When running on PVC, OSDs don't need a bindmount on dataDirHostPath, only the monitors do
-	if osdOnPVC {
+	if osdProps.onPVC() {
 		c.dataDirHostPath = ""
 	}
 	volumes := controller.PodVolumes(provisionConfig.DataPathMap, c.dataDirHostPath, false)
@@ -201,7 +199,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 
 	// If the OSD runs on PVC
-	if osdOnPVC {
+	if osdProps.onPVC() {
 		// Create volume config for PVCs
 		volumes = append(volumes, getPVCOSDVolumes(&osdProps)...)
 	}
@@ -238,18 +236,17 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	var commonArgs []string
 
 	// If the OSD runs on PVC
-	if osdOnPVC && osdProps.tuneSlowDeviceClass {
-		// Append tuning flag if necessary
-		err := c.osdRunFlagTuningOnPVC(osd.ID)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to apply tuning on osd %q", strconv.Itoa(osd.ID))
-		}
-	}
+	if osdProps.onPVC() {
+		// add the PVC size to the pod spec so that if the size changes the OSD will be restarted and pick up the change
+		envVars = append(envVars, v1.EnvVar{Name: "ROOK_OSD_PVC_SIZE", Value: osdProps.pvcSize})
 
-	// As of Nautilus Ceph auto-tunes its osd_memory_target on the fly so we don't need to force it
-	if !c.resources.Limits.Memory().IsZero() {
-		osdMemoryTargetValue := float32(c.resources.Limits.Memory().Value()) * osdMemoryTargetSafetyFactor
-		commonArgs = append(commonArgs, fmt.Sprintf("--osd-memory-target=%d", int(osdMemoryTargetValue)))
+		// Append tuning flag if necessary
+		if osdProps.tuneSlowDeviceClass {
+			err := c.osdRunFlagTuningOnPVC(osd.ID)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to apply tuning on osd %q", strconv.Itoa(osd.ID))
+			}
+		}
 	}
 
 	commonArgs = append(commonArgs, "--default-log-to-file", "false")
@@ -258,7 +255,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	var command []string
 	var args []string
 	// If the OSD was prepared with ceph-volume and running on PVC and using the LVM mode
-	if osdOnPVC && osd.CVMode == "lvm" {
+	if osdProps.onPVC() && osd.CVMode == "lvm" {
 		// if the osd was provisioned by ceph-volume, we need to launch it with rook as the parent process
 		command = []string{path.Join(rookBinariesMountPath, "tini")}
 		args = []string{
@@ -273,19 +270,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 			"--setgroup", "ceph",
 			fmt.Sprintf("--crush-location=%s", osd.Location),
 		}
-
-		// mount /run/udev in the container so ceph-volume (via `lvs`)
-		// can access the udev database
-		volumes = append(volumes, v1.Volume{
-			Name: "run-udev",
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{Path: "/run/udev"}}})
-
-		volumeMounts = append(volumeMounts, v1.VolumeMount{
-			Name:      "run-udev",
-			MountPath: "/run/udev"})
-
-	} else if osdOnPVC && osd.CVMode == "raw" {
+	} else if osdProps.onPVC() && osd.CVMode == "raw" {
 		doBinaryCopyInit = false
 		doConfigInit = false
 		command = []string{"ceph-osd"}
@@ -312,6 +297,11 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		}
 	}
 
+	// The osd itself needs to talk to udev to report information about the device (vendor/serial etc)
+	udevVolume, udevVolumeMount := getUdevVolume()
+	volumes = append(volumes, udevVolume)
+	volumeMounts = append(volumeMounts, udevVolumeMount)
+
 	// Add the volume to the spec and the mount to the daemon container
 	copyBinariesVolume, copyBinariesContainer := c.getCopyBinariesContainer()
 	if doBinaryCopyInit {
@@ -332,7 +322,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	args = append(args, commonArgs...)
 
 	osdDataDirPath := activateOSDMountPath + osdID
-	if osdOnPVC && osd.CVMode == "lvm" {
+	if osdProps.onPVC() && osd.CVMode == "lvm" {
 		// Let's use the old bridge for these lvm based pvc osds
 		volumeMounts = append(volumeMounts, getPvcOSDBridgeMount(osdProps.pvc.ClaimName))
 		envVars = append(envVars, pvcBackedOSDEnvVar("true"))
@@ -341,7 +331,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		envVars = append(envVars, lvBackedPVEnvVar(strconv.FormatBool(osd.LVBackedPV)))
 	}
 
-	if osdOnPVC && osd.CVMode == "raw" {
+	if osdProps.onPVC() && osd.CVMode == "raw" {
 		volumeMounts = append(volumeMounts, getPvcOSDBridgeMountActivate(osdDataDirPath, osdProps.pvc.ClaimName))
 		envVars = append(envVars, pvcBackedOSDEnvVar("true"))
 		envVars = append(envVars, blockPathEnvVariable(osd.BlockPath))
@@ -364,11 +354,6 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	// needed for luksOpen synchronization when devices are encrypted and the osd is prepared with LVM
 	hostIPC := osdProps.storeConfig.EncryptedDevice
 
-	DNSPolicy := v1.DNSClusterFirst
-	if c.Network.IsHost() {
-		DNSPolicy = v1.DNSClusterFirstWithHostNet
-	}
-
 	initContainers := make([]v1.Container, 0, 4)
 	if doConfigInit {
 		initContainers = append(initContainers,
@@ -384,13 +369,13 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	if doBinaryCopyInit {
 		initContainers = append(initContainers, *copyBinariesContainer)
 	}
-	if osdOnPVC && osd.CVMode == "lvm" {
+	if osdProps.onPVC() && osd.CVMode == "lvm" {
 		initContainers = append(initContainers, c.getPVCInitContainer(osdProps))
 	}
 
-	if osdOnPVC && osd.CVMode == "raw" {
+	if osdProps.onPVC() && osd.CVMode == "raw" {
 		initContainers = append(initContainers, c.getPVCInitContainerActivate(osdDataDirPath, osdProps))
-		if osdOnPVCMetadata {
+		if osdProps.onPVCWithMetadata() {
 			initContainers = append(initContainers, c.getPVCMetadataInitContainerActivate(osdDataDirPath, osdProps))
 		}
 		initContainers = append(initContainers, c.getActivatePVCInitContainer(osdProps, osdID))
@@ -408,7 +393,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	dataPath := ""
 
 	// Raw mode on PVC needs this path so that OSD's metadata files can be chown after 'ceph-bluestore-tool' ran
-	if osd.CVMode == "raw" && osdOnPVC {
+	if osd.CVMode == "raw" && osdProps.onPVC() {
 		dataPath = activateOSDMountPath + osdID
 	}
 
@@ -425,6 +410,43 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 			osdProps.resources,
 			securityContext,
 		))
+
+	podTemplateSpec := v1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   AppName,
+			Labels: c.getOSDLabels(osd.ID, failureDomainValue, osdProps.portable),
+		},
+		Spec: v1.PodSpec{
+			RestartPolicy:      v1.RestartPolicyAlways,
+			ServiceAccountName: serviceAccountName,
+			HostNetwork:        c.Network.IsHost(),
+			HostPID:            hostPID,
+			HostIPC:            hostIPC,
+			PriorityClassName:  c.priorityClassName,
+			InitContainers:     initContainers,
+			Containers: []v1.Container{
+				{
+					Command:         command,
+					Args:            args,
+					Name:            "osd",
+					Image:           c.cephVersion.Image,
+					VolumeMounts:    volumeMounts,
+					Env:             envVars,
+					Resources:       osdProps.resources,
+					SecurityContext: securityContext,
+					LivenessProbe:   controller.GenerateLivenessProbeExecDaemon(opconfig.OsdType, osdID),
+				},
+			},
+			Volumes:       volumes,
+			SchedulerName: osdProps.schedulerName,
+		},
+	}
+
+	if c.Network.IsHost() {
+		podTemplateSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
+	} else if c.Network.NetworkSpec.IsMultus() {
+		k8sutil.ApplyMultus(c.Network.NetworkSpec, &podTemplateSpec.ObjectMeta)
+	}
 
 	deployment := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -443,47 +465,19 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 			Strategy: apps.DeploymentStrategy{
 				Type: apps.RecreateDeploymentStrategyType,
 			},
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   AppName,
-					Labels: c.getOSDLabels(osd.ID, failureDomainValue, osdProps.portable),
-				},
-				Spec: v1.PodSpec{
-					RestartPolicy:      v1.RestartPolicyAlways,
-					ServiceAccountName: serviceAccountName,
-					HostNetwork:        c.Network.IsHost(),
-					HostPID:            true,
-					HostIPC:            hostIPC,
-					DNSPolicy:          DNSPolicy,
-					PriorityClassName:  c.priorityClassName,
-					InitContainers:     initContainers,
-					Containers: []v1.Container{
-						{
-							Command:         command,
-							Args:            args,
-							Name:            "osd",
-							Image:           c.cephVersion.Image,
-							VolumeMounts:    volumeMounts,
-							Env:             envVars,
-							Resources:       osdProps.resources,
-							SecurityContext: securityContext,
-						},
-					},
-					Volumes: volumes,
-				},
-			},
+			Template: podTemplateSpec,
 			Replicas: &replicaCount,
 		},
 	}
-	if osdOnPVC {
-		k8sutil.AddLabelToDeployement(OSDOverPVCLabelKey, osdProps.pvc.ClaimName, deployment)
+	if osdProps.onPVC() {
+		k8sutil.AddLabelToDeployment(OSDOverPVCLabelKey, osdProps.pvc.ClaimName, deployment)
 		k8sutil.AddLabelToPod(OSDOverPVCLabelKey, osdProps.pvc.ClaimName, &deployment.Spec.Template)
 	}
 	if !osdProps.portable {
 		deployment.Spec.Template.Spec.NodeSelector = map[string]string{v1.LabelHostname: osdProps.crushHostname}
 	}
 	// Replace default unreachable node toleration if the osd pod is portable and based in PVC
-	if osdOnPVC && osdProps.portable {
+	if osdProps.onPVC() && osdProps.portable {
 		k8sutil.AddUnreachableNodeToleration(&deployment.Spec.Template.Spec)
 	}
 
@@ -493,7 +487,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	controller.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, deployment)
 	controller.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, deployment)
 	k8sutil.SetOwnerRef(&deployment.ObjectMeta, &c.ownerRef)
-	if !osdOnPVC {
+	if !osdProps.onPVC() {
 		c.placement.ApplyToPodSpec(&deployment.Spec.Template.Spec)
 	} else {
 		osdProps.placement.ApplyToPodSpec(&deployment.Spec.Template.Spec)
@@ -521,7 +515,6 @@ func (c *Cluster) getCopyBinariesContainer() (v1.Volume, *v1.Container) {
 
 // This container runs all the actions needed to activate an OSD before we can run the OSD process
 func (c *Cluster) getActivateOSDInitContainer(osdID string, osdInfo OSDInfo, osdProps osdProperties) (v1.Volume, *v1.Container) {
-	osdOnPVC := osdProps.pvc.ClaimName != ""
 	volume := v1.Volume{Name: activateOSDVolumeName, VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}}
 	envVars := osdActivateEnvVar()
 	osdStore := "--bluestore"
@@ -535,13 +528,8 @@ func (c *Cluster) getActivateOSDInitContainer(osdID string, osdInfo OSDInfo, osd
 		{Name: k8sutil.ConfigOverrideName, ReadOnly: true, MountPath: opconfig.EtcCephDir},
 	}
 
-	if osdOnPVC {
+	if osdProps.onPVC() {
 		volMounts = append(volMounts, getPvcOSDBridgeMount(osdProps.pvc.ClaimName))
-	}
-
-	privileged := true
-	securityContext := &v1.SecurityContext{
-		Privileged: &privileged,
 	}
 
 	container := &v1.Container{
@@ -553,7 +541,7 @@ func (c *Cluster) getActivateOSDInitContainer(osdID string, osdInfo OSDInfo, osd
 		Name:            "activate",
 		Image:           c.cephVersion.Image,
 		VolumeMounts:    volMounts,
-		SecurityContext: securityContext,
+		SecurityContext: PrivilegedContext(),
 		Env:             envVars,
 		Resources:       osdProps.resources,
 	}
@@ -562,7 +550,6 @@ func (c *Cluster) getActivateOSDInitContainer(osdID string, osdInfo OSDInfo, osd
 }
 
 func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.RestartPolicy, provisionConfig *provisionConfig) (*v1.PodTemplateSpec, error) {
-	osdOnPVC := osdProps.pvc.ClaimName != ""
 	copyBinariesVolume, copyBinariesContainer := c.getCopyBinariesContainer()
 
 	// ceph-volume is currently set up to use /etc/ceph/ceph.conf; this means no user config
@@ -575,7 +562,7 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 	udevVolume := v1.Volume{Name: "udev", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: "/run/udev"}}}
 	volumes = append(volumes, udevVolume)
 
-	if osdOnPVC {
+	if osdProps.onPVC() {
 		// Create volume config for PVCs
 		volumes = append(volumes, getPVCOSDVolumes(&osdProps)...)
 	}
@@ -596,11 +583,12 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 		Volumes:           volumes,
 		HostNetwork:       c.Network.IsHost(),
 		PriorityClassName: c.priorityClassName,
+		SchedulerName:     osdProps.schedulerName,
 	}
 	if c.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
-	if !osdOnPVC {
+	if !osdProps.onPVC() {
 		c.placement.ApplyToPodSpec(&podSpec)
 	} else {
 		osdProps.placement.ApplyToPodSpec(&podSpec)
@@ -752,7 +740,7 @@ func (c *Cluster) getActivatePVCInitContainer(osdProps osdProperties, osdID stri
 			},
 		},
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(osdDataPath, osdProps.pvc.ClaimName)},
-		SecurityContext: opmon.PodSecurityContext(),
+		SecurityContext: PrivilegedContext(),
 		Resources:       osdProps.resources,
 	}
 
@@ -770,14 +758,13 @@ func (c *Cluster) getExpandPVCInitContainer(osdProps osdProperties, osdID string
 		},
 		Args:            []string{"bluefs-bdev-expand", "--path", osdDataPath},
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(osdDataPath, osdProps.pvc.ClaimName)},
-		SecurityContext: opmon.PodSecurityContext(),
+		SecurityContext: PrivilegedContext(),
 		Resources:       osdProps.resources,
 	}
 
 	return container
 }
 func (c *Cluster) getConfigEnvVars(osdProps osdProperties, dataDir string) []v1.EnvVar {
-	osdOnPVC := osdProps.pvc.ClaimName != ""
 	envVars := []v1.EnvVar{
 		nodeNameEnvVar(osdProps.crushHostname),
 		{Name: "ROOK_CLUSTER_ID", Value: string(c.ownerRef.UID)},
@@ -800,7 +787,7 @@ func (c *Cluster) getConfigEnvVars(osdProps osdProperties, dataDir string) []v1.
 
 	// Give a hint to the prepare pod for what the host in the CRUSH map should be
 	crushmapHostname := osdProps.crushHostname
-	if !osdProps.portable && osdOnPVC {
+	if !osdProps.portable && osdProps.onPVC() {
 		// If it's a pvc that's not portable we only know what the host name should be when inside the osd prepare pod
 		crushmapHostname = ""
 	}
@@ -829,9 +816,10 @@ func (c *Cluster) getConfigEnvVars(osdProps osdProperties, dataDir string) []v1.
 }
 
 func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMount v1.VolumeMount, provisionConfig *provisionConfig) v1.Container {
-	osdOnPVC := osdProps.pvc.ClaimName != ""
-	osdOnPVCMetadata := osdProps.metadataPVC.ClaimName != ""
 	envVars := c.getConfigEnvVars(osdProps, k8sutil.DataDir)
+
+	// enable debug logging in the prepare job
+	envVars = append(envVars, setDebugLogLevelEnvVar(true))
 
 	// only 1 of device list, device filter, device path filter and use all devices can be specified.  We prioritize in that order.
 	if len(osdProps.devices) > 0 {
@@ -889,11 +877,11 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 	}...)
 
 	// If the OSD runs on PVC
-	if osdOnPVC {
+	if osdProps.onPVC() {
 		volumeMounts = append(volumeMounts, getPvcOSDBridgeMount(osdProps.pvc.ClaimName))
 		// The device list is read by the Rook CLI via environment variables so let's add them
 		dev := []string{fmt.Sprintf("/mnt/%s", osdProps.pvc.ClaimName)}
-		if osdOnPVCMetadata {
+		if osdProps.onPVCWithMetadata() {
 			volumeMounts = append(volumeMounts, getPvcMetadataOSDBridgeMount(osdProps.metadataPVC.ClaimName))
 			dev = append(dev, fmt.Sprintf("/srv/%s", osdProps.metadataPVC.ClaimName))
 		}
@@ -967,7 +955,7 @@ func getPVCOSDVolumes(osdProps *osdProperties) []v1.Volume {
 	}
 
 	// If we have a metadata PVC let's add it
-	if osdProps.metadataPVC.ClaimName != "" {
+	if osdProps.onPVCWithMetadata() {
 		metadataPVCVolume := []v1.Volume{
 			{
 				Name: osdProps.metadataPVC.ClaimName,
@@ -1018,6 +1006,14 @@ func metadataDeviceEnvVar(metadataDevice string) v1.EnvVar {
 
 func pvcBackedOSDEnvVar(pvcBacked string) v1.EnvVar {
 	return v1.EnvVar{Name: pvcBackedOSDVarName, Value: pvcBacked}
+}
+
+func setDebugLogLevelEnvVar(debug bool) v1.EnvVar {
+	level := "INFO"
+	if debug {
+		level = "DEBUG"
+	}
+	return v1.EnvVar{Name: "ROOK_LOG_LEVEL", Value: level}
 }
 
 func blockPathEnvVariable(lvPath string) v1.EnvVar {
@@ -1121,4 +1117,29 @@ func (c *Cluster) osdRunFlagTuningOnPVC(osdID int) error {
 	}
 
 	return nil
+}
+
+func getUdevVolume() (v1.Volume, v1.VolumeMount) {
+	volume := v1.Volume{
+		Name: udevVolName,
+		VolumeSource: v1.VolumeSource{
+			HostPath: &v1.HostPathVolumeSource{Path: udevPath},
+		},
+	}
+
+	volumeMounts := v1.VolumeMount{
+		Name:      udevVolName,
+		MountPath: udevPath,
+	}
+
+	return volume, volumeMounts
+}
+
+// PrivilegedContext returns a privileged Pod security context
+func PrivilegedContext() *v1.SecurityContext {
+	privileged := true
+
+	return &v1.SecurityContext{
+		Privileged: &privileged,
+	}
 }

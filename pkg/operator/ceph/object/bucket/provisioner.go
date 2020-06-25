@@ -28,6 +28,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
+	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	cephObject "github.com/rook/rook/pkg/operator/ceph/object"
 )
 
@@ -46,18 +47,23 @@ type Provisioner struct {
 	accessKeyID     string
 	secretAccessKey string
 
+	// RunAsUser cephx user to use on radosgw-admin to create s3 users
+	RunRgwCmdAsUser string
+
 	s3Svc *s3.S3
 
 	objectStoreName      string
 	objectStoreNamespace string
+	endpoint             string
 	secretName           string
 	secretNamespace      string
+	additionalConfigData map[string]string
 }
 
 var _ apibkt.Provisioner = &Provisioner{}
 
-func NewProvisioner(context *clusterd.Context, namespace string) *Provisioner {
-	return &Provisioner{context: context, namespace: namespace}
+func NewProvisioner(context *clusterd.Context, namespace, runRgwCmdAsUser string) *Provisioner {
+	return &Provisioner{context: context, namespace: namespace, RunRgwCmdAsUser: runRgwCmdAsUser}
 }
 
 const maxBuckets = 1
@@ -75,11 +81,10 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 	// dynamically create a new ceph user
 	p.accessKeyID, p.secretAccessKey, err = p.createCephUser("")
 	if err != nil {
-		return nil, errors.Wrapf(err, "Provision: can't create ceph user")
+		return nil, errors.Wrap(err, "Provision: can't create ceph user")
 	}
 
 	s3svc, err := NewS3Agent(p.accessKeyID, p.secretAccessKey, p.getObjectStoreEndpoint())
-
 	if err != nil {
 		return nil, err
 	}
@@ -89,11 +94,13 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 	if err != nil {
 		err = errors.Wrapf(err, "error creating bucket %q", p.bucketName)
 		logger.Errorf(err.Error())
+		p.deleteOBCResource("")
 		return nil, err
 	}
 
 	_, errCode, err := cephObject.SetQuotaUserBucketMax(p.objectContext, p.cephUserName, maxBuckets)
 	if errCode > 0 {
+		p.deleteOBCResource(p.bucketName)
 		return nil, err
 	}
 	logger.Infof("set user %q bucket max to %d", p.cephUserName, maxBuckets)
@@ -126,21 +133,25 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 	// need to quota into -1 for restricting creation of new buckets in rgw
 	_, _, err = cephObject.SetQuotaUserBucketMax(p.objectContext, p.cephUserName, -1)
 	if err != nil {
+		p.deleteOBCResource("")
 		return nil, err
 	}
 
 	// get the bucket's owner via the bucket metadata
 	stats, _, err := cephObject.GetBucket(p.objectContext, p.bucketName)
 	if err != nil {
+		p.deleteOBCResource("")
 		return nil, errors.Wrapf(err, "could not get bucket stats (bucket: %s)", p.bucketName)
 	}
 	objectUser, _, err := cephObject.GetUser(p.objectContext, stats.Owner)
 	if err != nil {
+		p.deleteOBCResource("")
 		return nil, errors.Wrapf(err, "could not get user (user: %s)", stats.Owner)
 	}
 
 	s3svc, err := NewS3Agent(*objectUser.AccessKey, *objectUser.SecretKey, p.getObjectStoreEndpoint())
 	if err != nil {
+		p.deleteOBCResource("")
 		return nil, err
 	}
 
@@ -149,6 +160,7 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
 			if aerr.Code() != "NoSuchBucketPolicy" {
+				p.deleteOBCResource("")
 				return nil, err
 			}
 		}
@@ -170,6 +182,7 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 
 	logger.Infof("PutBucketPolicy output: %v", out)
 	if err != nil {
+		p.deleteOBCResource("")
 		return nil, err
 	}
 	// returned ob with connection info
@@ -192,11 +205,7 @@ func (p Provisioner) Delete(ob *bktv1alpha1.ObjectBucket) error {
 		return err
 	}
 
-	err = p.deleteCephUser(p.cephUserName)
-	if err != nil {
-		return err
-	}
-	err = p.deleteBucket(p.bucketName)
+	err = p.deleteOBCResource(p.bucketName)
 	if err != nil {
 		return err
 	}
@@ -215,55 +224,76 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 
 	bucket, _, err := cephObject.GetBucket(p.objectContext, p.bucketName)
 	if err != nil {
-		return err
-	}
-	if bucket.Owner == "" {
-		return errors.New("cannot find bucket owner")
-	}
-
-	user, code, err := cephObject.GetUser(p.objectContext, bucket.Owner)
-	// The user may not exist.  Ignore this in order to ensure the PolicyStatement does not contain the
-	// stale user.
-	if err != nil && code != cephObject.RGWErrorNotFound {
-		return err
-	} else if user == nil {
-		return errors.Errorf("querying user %q returned nil", p.cephUserName)
-	}
-
-	s3svc, err := NewS3Agent(*user.AccessKey, *user.SecretKey, p.getObjectStoreEndpoint())
-	if err != nil {
-		return err
-	}
-
-	// Ignore cases where there is no bucket policy. This may have occurred if an error ended a Grant()
-	// call before the policy was attached to the bucket
-	policy, err := s3svc.GetBucketPolicy(p.bucketName)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "NoSuchBucketPolicy" {
-			policy = nil
-			logger.Errorf("no bucket policy for bucket %q, so no need to drop policy", p.bucketName)
-
-		} else {
-			logger.Errorf("error getting policy for bucket %q. %v", p.bucketName, err)
-			return err
+		logger.Errorf("%v", err)
+	} else {
+		if bucket.Owner == "" {
+			return errors.New("cannot find bucket owner")
 		}
-	}
 
-	// drop policy if present
-	if policy != nil {
-		policy = policy.DropPolicyStatements(p.cephUserName)
-		output, err := s3svc.PutBucketPolicy(p.bucketName, *policy)
+		user, code, err := cephObject.GetUser(p.objectContext, bucket.Owner)
+		// The user may not exist.  Ignore this in order to ensure the PolicyStatement does not contain the
+		// stale user.
+		if err != nil && code != cephObject.RGWErrorNotFound {
+			return err
+		} else if user == nil {
+			logger.Errorf("querying user %q returned nil", p.cephUserName)
+			return nil
+		}
+
+		s3svc, err := NewS3Agent(*user.AccessKey, *user.SecretKey, p.getObjectStoreEndpoint())
 		if err != nil {
 			return err
 		}
-		logger.Infof("principal %q ejected from bucket %q policy. Output: %v", p.cephUserName, p.bucketName, output)
+
+		// Ignore cases where there is no bucket policy. This may have occurred if an error ended a Grant()
+		// call before the policy was attached to the bucket
+		policy, err := s3svc.GetBucketPolicy(p.bucketName)
+		if err != nil {
+			if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "NoSuchBucketPolicy" {
+				policy = nil
+				logger.Errorf("no bucket policy for bucket %q, so no need to drop policy", p.bucketName)
+
+			} else {
+				logger.Errorf("error getting policy for bucket %q. %v", p.bucketName, err)
+				return err
+			}
+		}
+
+		if bucket.Owner == p.cephUserName {
+			statement := NewPolicyStatement().
+				WithSID(p.cephUserName).
+				ForPrincipals(p.cephUserName).
+				ForResources(p.bucketName).
+				ForSubResources(p.bucketName).
+				Denies().
+				Actions(AllowedActions...)
+			if policy == nil {
+				policy = NewBucketPolicy(*statement)
+			} else {
+				policy = policy.ModifyBucketPolicy(*statement)
+			}
+			out, err := s3svc.PutBucketPolicy(p.bucketName, *policy)
+			logger.Infof("PutBucketPolicy output: %v", out)
+			if err != nil {
+				return errors.Wrap(err, "failed to update policy")
+			} else {
+				return nil
+			}
+		}
+
+		// drop policy if present
+		if policy != nil {
+			policy = policy.DropPolicyStatements(p.cephUserName)
+			output, err := s3svc.PutBucketPolicy(p.bucketName, *policy)
+			if err != nil {
+				return err
+			}
+			logger.Infof("principal %q ejected from bucket %q policy. Output: %v", p.cephUserName, p.bucketName, output)
+		}
 	}
 
-	// finally, delete unlinked user
-	err = p.deleteCephUser(p.cephUserName)
-	if err != nil {
-		return err
-	}
+	// finally, delete the user
+	p.deleteOBCResource("")
 	return nil
 }
 
@@ -294,15 +324,17 @@ func (p *Provisioner) initializeCreateOrGrant(options *apibkt.BucketOptions) err
 	p.setObjectStoreName(sc)
 	p.setObjectStoreNamespace(sc)
 	p.setRegion(sc)
+	p.setAdditionalConfigData(obc.Spec.AdditionalConfig)
+	p.setEndpoint(sc)
 	err = p.setObjectContext()
 	if err != nil {
 		return err
 	}
-	if err = p.setObjectStoreDomainName(sc); err != nil {
-		return err
-	}
-	if err = p.setObjectStorePort(sc); err != nil {
-		return err
+
+	// If an endpoint is declared let's use it
+	err = p.populateDomainAndPort(sc)
+	if err != nil {
+		return errors.Wrap(err, "failed to set domain and port")
 	}
 
 	return nil
@@ -320,11 +352,14 @@ func (p *Provisioner) initializeDeleteOrRevoke(ob *bktv1alpha1.ObjectBucket) err
 	p.cephUserName = getCephUser(ob)
 	p.objectStoreName = getObjectStoreName(sc)
 	p.objectStoreNamespace = getObjectStoreNameSpace(sc)
+	p.setEndpoint(sc)
 	err = p.setObjectContext()
 	if err != nil {
 		return err
 	}
-	if err = p.setObjectStoreDomainName(sc); err != nil {
+
+	err = p.populateDomainAndPort(sc)
+	if err != nil {
 		return err
 	}
 
@@ -336,11 +371,11 @@ func (p *Provisioner) composeObjectBucket() *bktv1alpha1.ObjectBucket {
 
 	conn := &bktv1alpha1.Connection{
 		Endpoint: &bktv1alpha1.Endpoint{
-			BucketHost: p.storeDomainName,
-			BucketPort: int(p.storePort),
-			BucketName: p.bucketName,
-			Region:     p.region,
-			SSL:        false,
+			BucketHost:           p.storeDomainName,
+			BucketPort:           int(p.storePort),
+			BucketName:           p.bucketName,
+			Region:               p.region,
+			AdditionalConfigData: p.additionalConfigData,
 		},
 		Authentication: &bktv1alpha1.Authentication{
 			AccessKeys: &bktv1alpha1.AccessKeys{
@@ -362,12 +397,15 @@ func (p *Provisioner) composeObjectBucket() *bktv1alpha1.ObjectBucket {
 
 func (p *Provisioner) setObjectContext() error {
 	msg := "error building object.Context: store %s cannot be empty"
-	if p.objectStoreName == "" {
+	// p.endpoint means we point to an external cluster
+	if p.objectStoreName == "" && p.endpoint == "" {
 		return errors.Errorf(msg, "name")
 	} else if p.objectStoreNamespace == "" {
 		return errors.Errorf(msg, "namespace")
 	}
 	p.objectContext = cephObject.NewContext(p.context, p.objectStoreName, p.objectStoreNamespace)
+	p.objectContext.RunAsUser = p.RunRgwCmdAsUser
+
 	return nil
 }
 
@@ -411,6 +449,17 @@ func (p *Provisioner) setBucketName(name string) {
 	p.bucketName = name
 }
 
+func (p *Provisioner) setAdditionalConfigData(additionalConfigData map[string]string) {
+	if len(additionalConfigData) == 0 {
+		additionalConfigData = make(map[string]string)
+	}
+	p.additionalConfigData = additionalConfigData
+}
+
+func (p *Provisioner) setEndpoint(sc *storagev1.StorageClass) {
+	p.endpoint = sc.Parameters[objectStoreEndpoint]
+}
+
 func (p *Provisioner) setRegion(sc *storagev1.StorageClass) {
 	const key = "region"
 	p.region = sc.Parameters[key]
@@ -418,4 +467,29 @@ func (p *Provisioner) setRegion(sc *storagev1.StorageClass) {
 
 func (p Provisioner) getObjectStoreEndpoint() string {
 	return fmt.Sprintf("%s:%d", p.storeDomainName, p.storePort)
+}
+
+func (p *Provisioner) populateDomainAndPort(sc *storagev1.StorageClass) error {
+	endpoint := getObjectStoreEndpoint(sc)
+	// if endpoint is present, let's introspect it
+	if endpoint != "" {
+		p.storeDomainName = cephutil.GetIPFromEndpoint(endpoint)
+		if p.storeDomainName == "" {
+			return errors.New("failed to discover endpoint IP (is empty)")
+		}
+		p.storePort = cephutil.GetPortFromEndpoint(endpoint)
+		if p.storePort == 0 {
+			return errors.New("failed to discover endpoint port (is empty)")
+		}
+		// If no endpoint exists let's see if CephObjectStore exists
+	} else {
+		if err := p.setObjectStoreDomainName(sc); err != nil {
+			return errors.Wrap(err, "failed to set object store domain name")
+		}
+		if err := p.setObjectStorePort(sc); err != nil {
+			return errors.Wrap(err, "failed to set object store port")
+		}
+	}
+
+	return nil
 }

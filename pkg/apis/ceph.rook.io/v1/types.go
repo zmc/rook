@@ -86,9 +86,6 @@ type ClusterSpec struct {
 	// A spec for mon related options
 	Mon MonSpec `json:"mon,omitempty"`
 
-	// A spec for rbd mirroring
-	RBDMirroring RBDMirroringSpec `json:"rbdMirroring"`
-
 	// A spec for the crash controller
 	CrashCollector CrashCollectorSpec `json:"crashCollector"`
 
@@ -107,6 +104,10 @@ type ClusterSpec struct {
 
 	// Remove the OSD that is out and safe to remove only if this option is true
 	RemoveOSDsIfOutAndSafeToRemove bool `json:"removeOSDsIfOutAndSafeToRemove"`
+
+	// Indicates user intent when deleting a cluster; blocks orchestration and should not be set if cluster
+	// deletion is not imminent.
+	CleanupPolicy CleanupPolicySpec `json:"cleanupPolicy,omitempty"`
 }
 
 // VersionSpec represents the settings for the Ceph version that Rook is orchestrating.
@@ -226,10 +227,6 @@ type ExternalSpec struct {
 	Enable bool `json:"enable"`
 }
 
-type RBDMirroringSpec struct {
-	Workers int `json:"workers"`
-}
-
 // CrashCollectorSpec represents options to configure the crash controller
 type CrashCollectorSpec struct {
 	Disable bool `json:"disable"`
@@ -264,11 +261,17 @@ type PoolSpec struct {
 	// The device class the OSD should set to (options are: hdd, ssd, or nvme)
 	DeviceClass string `json:"deviceClass"`
 
+	// The inline compression mode in Bluestore OSD to set to (options are: none, passive, aggressive, force)
+	CompressionMode string `json:"compressionMode"`
+
 	// The replication settings
 	Replicated ReplicatedSpec `json:"replicated"`
 
 	// The erasure code settings
 	ErasureCoded ErasureCodedSpec `json:"erasureCoded"`
+
+	// Parameters is a list of properties to enable on a given pool
+	Parameters map[string]string `json:"parameters,omitempty"`
 }
 
 type Status struct {
@@ -386,33 +389,9 @@ type ObjectStoreSpec struct {
 
 	// The rgw pod info
 	Gateway GatewaySpec `json:"gateway"`
-}
 
-// +genclient
-// +genclient:noStatus
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-type CephObjectStoreUser struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata"`
-	Spec              ObjectStoreUserSpec `json:"spec"`
-	Status            *Status             `json:"status"`
-}
-
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-type CephObjectStoreUserList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata"`
-	Items           []CephObjectStoreUser `json:"items"`
-}
-
-// ObjectStoreUserSpec represent the spec of an Objectstoreuser
-type ObjectStoreUserSpec struct {
-	//The store the user will be created in
-	Store string `json:"store,omitempty"`
-	//The display name for the ceph users
-	DisplayName string `json:"displayName,omitempty"`
+	// The multisite info
+	Zone ZoneSpec `json:"zone"`
 }
 
 type GatewaySpec struct {
@@ -442,6 +421,111 @@ type GatewaySpec struct {
 
 	// PriorityClassName sets priority classes on the rgw pods
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
+type ZoneSpec struct {
+	// RGW Zone the Object Store is in
+	Name string `json:"name"`
+}
+
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectStoreUser struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              ObjectStoreUserSpec `json:"spec"`
+	Status            *Status             `json:"status"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectStoreUserList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephObjectStoreUser `json:"items"`
+}
+
+// ObjectStoreUserSpec represent the spec of an Objectstoreuser
+type ObjectStoreUserSpec struct {
+	//The store the user will be created in
+	Store string `json:"store,omitempty"`
+	//The display name for the ceph users
+	DisplayName string `json:"displayName,omitempty"`
+}
+
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectRealm struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              ObjectRealmSpec `json:"spec"`
+	Status            *Status         `json:"status"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectRealmList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephObjectRealm `json:"items"`
+}
+
+// ObjectRealmSpec represent the spec of an ObjectRealm
+type ObjectRealmSpec struct {
+}
+
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectZoneGroup struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              ObjectZoneGroupSpec `json:"spec"`
+	Status            *Status             `json:"status"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectZoneGroupList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephObjectZoneGroup `json:"items"`
+}
+
+// ObjectZoneGroupSpec represent the spec of an ObjecZoneGroup
+type ObjectZoneGroupSpec struct {
+	//The display name for the ceph users
+	Realm string `json:"realm"`
+}
+
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectZone struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              ObjectZoneSpec `json:"spec"`
+	Status            *Status        `json:"status"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephObjectZoneList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephObjectZone `json:"items"`
+}
+
+// ObjectZoneSpec represent the spec of an ObjectZone
+type ObjectZoneSpec struct {
+	//The display name for the ceph users
+	ZoneGroup string `json:"zoneGroup"`
 }
 
 // +genclient
@@ -542,4 +626,46 @@ type CephClientList struct {
 type ClientSpec struct {
 	Name string            `json:"name"`
 	Caps map[string]string `json:"caps"`
+}
+
+type CleanupPolicySpec struct {
+	Confirmation CleanupConfirmationProperty `json:"confirmation,omitempty"`
+}
+
+type CleanupConfirmationProperty string
+
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephRBDMirror struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              RBDMirroringSpec `json:"spec"`
+	Status            *Status          `json:"status"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephRBDMirrorList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephRBDMirror `json:"items"`
+}
+
+type RBDMirroringSpec struct {
+	// Count represents the number of rbd mirror instance to run
+	Count int `json:"count"`
+
+	// The affinity to place the rgw pods (default is to place on any available node)
+	Placement rookv1.Placement `json:"placement"`
+
+	// The annotations-related configuration to add/set on each Pod related object.
+	Annotations rookv1.Annotations `json:"annotations,omitempty"`
+
+	// The resource requirements for the rgw pods
+	Resources v1.ResourceRequirements `json:"resources"`
+
+	// PriorityClassName sets priority classes on the rgw pods
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 }

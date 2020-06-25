@@ -119,10 +119,6 @@ func (c *Cluster) completeProvision(config *provisionConfig) bool {
 	return c.completeOSDsForAllNodes(config, true, completeProvisionTimeout)
 }
 
-func (c *Cluster) completeProvisionSkipOSDStart(config *provisionConfig) bool {
-	return c.completeOSDsForAllNodes(config, false, completeProvisionSkipOSDTimeout)
-}
-
 func (c *Cluster) checkNodesCompleted(selector string, config *provisionConfig, configOSDs bool) (int, *util.Set, bool, *v1.ConfigMapList, error) {
 	opts := metav1.ListOptions{
 		LabelSelector: selector,
@@ -209,7 +205,11 @@ func (c *Cluster) completeOSDsForAllNodes(config *provisionConfig, configOSDs bo
 					break ResultLoop
 				}
 				if e.Type == watch.Modified {
-					configMap := e.Object.(*v1.ConfigMap)
+					configMap, ok := e.Object.(*v1.ConfigMap)
+					if !ok {
+						logger.Errorf("expected type ConfigMap but found %T", configMap)
+						continue
+					}
 					node, ok := configMap.Labels[nodeLabelKey]
 					if !ok {
 						logger.Infof("missing node label on configmap %s", configMap.Name)

@@ -19,7 +19,6 @@ package csi
 import (
 	"bytes"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,6 +30,7 @@ import (
 	k8sutil "github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -54,12 +54,12 @@ func templateToService(name, templatePath string, p templateParam) (*corev1.Serv
 	var svc corev1.Service
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load service template")
+		return nil, errors.Wrap(err, "failed to load service template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &svc)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal service template")
+		return nil, errors.Wrap(err, "failed to unmarshal service template")
 	}
 	return &svc, nil
 }
@@ -68,12 +68,12 @@ func templateToStatefulSet(name, templatePath string, p templateParam) (*apps.St
 	var ss apps.StatefulSet
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load statefulset template")
+		return nil, errors.Wrap(err, "failed to load statefulset template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ss)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal statefulset template")
+		return nil, errors.Wrap(err, "failed to unmarshal statefulset template")
 	}
 	return &ss, nil
 }
@@ -82,12 +82,12 @@ func templateToDaemonSet(name, templatePath string, p templateParam) (*apps.Daem
 	var ds apps.DaemonSet
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load daemonset template")
+		return nil, errors.Wrap(err, "failed to load daemonset template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ds)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal daemonset template")
+		return nil, errors.Wrap(err, "failed to unmarshal daemonset template")
 	}
 	return &ds, nil
 }
@@ -96,7 +96,7 @@ func templateToDeployment(name, templatePath string, p templateParam) (*apps.Dep
 	var ds apps.Deployment
 	t, err := loadTemplate(name, templatePath, p)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to load deployment template")
+		return nil, errors.Wrap(err, "failed to load deployment template")
 	}
 
 	err = yaml.Unmarshal([]byte(t), &ds)
@@ -104,6 +104,40 @@ func templateToDeployment(name, templatePath string, p templateParam) (*apps.Dep
 		return nil, errors.Wrapf(err, "failed to unmarshal deployment template")
 	}
 	return &ds, nil
+}
+
+func applyResourcesToContainers(clientset kubernetes.Interface, key string, podspec *corev1.PodSpec) {
+	resource := getComputeResource(clientset, key)
+	if len(resource) > 0 {
+		for i, c := range podspec.Containers {
+			for _, r := range resource {
+				if c.Name == r.Name {
+					podspec.Containers[i].Resources = r.Resource
+				}
+			}
+		}
+	}
+}
+
+func getComputeResource(clientset kubernetes.Interface, key string) []k8sutil.ContainerResource {
+	// Add Resource list if any
+	resource := []k8sutil.ContainerResource{}
+	resourceRaw := ""
+	var err error
+
+	resourceRaw, err = k8sutil.GetOperatorSetting(clientset, controller.OperatorSettingConfigMapName, key, "")
+
+	if err != nil {
+		logger.Warningf("resource requirement for %q will not be applied. %v", key, err)
+	}
+
+	if resourceRaw != "" {
+		resource, err = k8sutil.YamlToContainerResource(resourceRaw)
+		if err != nil {
+			logger.Warningf("failed to parse %q. %v", resourceRaw, err)
+		}
+	}
+	return resource
 }
 
 func getToleration(clientset kubernetes.Interface, provisioner bool) []corev1.Toleration {
@@ -169,19 +203,40 @@ func applyToPodSpec(pod *corev1.PodSpec, n *corev1.NodeAffinity, t []corev1.Tole
 	}
 }
 
-func getPortFromENV(env string, defaultPort uint16) uint16 {
-	port := os.Getenv(env)
+func getPortFromConfig(clientset kubernetes.Interface, env string, defaultPort uint16) (uint16, error) {
+	port, err := k8sutil.GetOperatorSetting(clientset, controller.OperatorSettingConfigMapName, env, strconv.Itoa(int(defaultPort)))
+	if err != nil {
+		return defaultPort, errors.Wrapf(err, "failed to load value for %q.", env)
+	}
 	if strings.TrimSpace(port) == "" {
-		return defaultPort
+		return defaultPort, nil
 	}
 	p, err := strconv.ParseUint(port, 10, 64)
 	if err != nil {
-		logger.Debugf("failed to parse port value for env %q. using default port %d. %v", env, defaultPort, err)
-		return defaultPort
+		return defaultPort, errors.Wrapf(err, "failed to parse port value for %q.", env)
 	}
 	if p > 65535 {
-		logger.Debugf("%s port value is greater than 65535. using default port %d for %s", port, defaultPort, env)
-		return defaultPort
+		return defaultPort, errors.Errorf("%s port value is greater than 65535 for %s.", port, env)
 	}
-	return uint16(p)
+	return uint16(p), nil
+}
+
+func getPodAntiAffinity(key, value string) corev1.PodAntiAffinity {
+	return corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+			{
+				LabelSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{
+							Key:      key,
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{value},
+						},
+					},
+				},
+				TopologyKey: corev1.LabelHostname,
+			},
+		},
+	}
+
 }

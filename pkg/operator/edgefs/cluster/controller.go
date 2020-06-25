@@ -32,6 +32,7 @@ import (
 	"github.com/rook/rook/pkg/operator/edgefs/nfs"
 	"github.com/rook/rook/pkg/operator/edgefs/s3"
 	"github.com/rook/rook/pkg/operator/edgefs/s3x"
+	"github.com/rook/rook/pkg/operator/edgefs/smb"
 	"github.com/rook/rook/pkg/operator/edgefs/swift"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -112,7 +113,11 @@ func (c *ClusterController) StopWatch() {
 }
 
 func (c *ClusterController) onAdd(obj interface{}) {
-	clusterObj := obj.(*edgefsv1.Cluster).DeepCopy()
+	clusterObj, ok := obj.(*edgefsv1.Cluster)
+	if !ok {
+		return
+	}
+	clusterObj = clusterObj.DeepCopy()
 	logger.Infof("new cluster %s added to namespace %s", clusterObj.Name, clusterObj.Namespace)
 
 	cluster := newCluster(clusterObj, c.context)
@@ -169,6 +174,19 @@ func (c *ClusterController) onAdd(obj interface{}) {
 		cluster.ownerRef,
 		cluster.Spec.UseHostLocalTime)
 	NFSController.StartWatch(cluster.stopCh)
+
+	// Start SMB service CRD watcher
+	SMBController := smb.NewSMBController(c.context,
+		cluster.Namespace,
+		c.containerImage,
+		cluster.Spec.Network,
+		cluster.Spec.DataDirHostPath, cluster.Spec.DataVolumeSize,
+		edgefsv1.GetTargetPlacement(cluster.Spec.Placement),
+		cluster.Spec.Resources,
+		cluster.Spec.ResourceProfile,
+		cluster.ownerRef,
+		cluster.Spec.UseHostLocalTime)
+	SMBController.StartWatch(cluster.stopCh)
 
 	// Start S3 service CRD watcher
 	S3Controller := s3.NewS3Controller(c.context,
@@ -236,7 +254,7 @@ func (c *ClusterController) onAdd(obj interface{}) {
 	ISGWController.StartWatch(cluster.stopCh)
 
 	cluster.childControllers = []childController{
-		NFSController, S3Controller, S3XController, SWIFTController, ISCSIController, ISGWController,
+		NFSController, SMBController, S3Controller, S3XController, SWIFTController, ISCSIController, ISGWController,
 	}
 
 	// add the finalizer to the crd
@@ -247,8 +265,18 @@ func (c *ClusterController) onAdd(obj interface{}) {
 }
 
 func (c *ClusterController) onUpdate(oldObj, newObj interface{}) {
-	oldCluster := oldObj.(*edgefsv1.Cluster).DeepCopy()
-	newCluster := newObj.(*edgefsv1.Cluster).DeepCopy()
+	oldCluster, ok := oldObj.(*edgefsv1.Cluster)
+	if !ok {
+		return
+	}
+	oldCluster = oldCluster.DeepCopy()
+
+	newCluster, ok := newObj.(*edgefsv1.Cluster)
+	if !ok {
+		return
+	}
+	newCluster = newCluster.DeepCopy()
+
 	logger.Infof("update event for cluster %q", newCluster.Namespace)
 
 	// Check if the cluster is being deleted. This code path is called when a finalizer is specified in the crd.

@@ -50,6 +50,11 @@ func TestCephUpgradeSuite(t *testing.T) {
 		t.Skip()
 	}
 
+	// Skip the suite if CSI is not supported
+	kh, err := utils.CreateK8sHelper(func() *testing.T { return t })
+	require.NoError(t, err)
+	checkSkipCSITest(t, kh)
+
 	s := new(UpgradeSuite)
 	defer func(s *UpgradeSuite) {
 		HandlePanics(recover(), s.op, s.T)
@@ -67,20 +72,23 @@ type UpgradeSuite struct {
 
 func (s *UpgradeSuite) SetupSuite() {
 	s.namespace = "upgrade-ns"
-	mons := 1
-	rbdMirrorWorkers := 0
-	s.op, s.k8sh = StartTestCluster(s.T,
-		upgradeMinimalTestVersion,
-		s.namespace,
-		"",
-		false,
-		false,
-		"",
-		mons,
-		rbdMirrorWorkers,
-		installer.Version1_1,
-		installer.MimicVersion,
-	)
+	upgradeTestCluster := TestCluster{
+		clusterName:             s.namespace,
+		namespace:               s.namespace,
+		storeType:               "",
+		storageClassName:        "",
+		useHelm:                 false,
+		usePVC:                  false,
+		mons:                    1,
+		rbdMirrorWorkers:        0,
+		rookCephCleanup:         false,
+		skipOSDCreation:         false,
+		minimalMatrixK8sVersion: upgradeMinimalTestVersion,
+		rookVersion:             installer.Version1_2,
+		cephVersion:             installer.NautilusVersion,
+	}
+
+	s.op, s.k8sh = StartTestCluster(s.T, &upgradeTestCluster)
 	s.helper = clients.CreateTestClient(s.k8sh, s.op.installer.Manifests)
 }
 
@@ -89,8 +97,6 @@ func (s *UpgradeSuite) TearDownSuite() {
 }
 
 func (s *UpgradeSuite) TestUpgradeToMaster() {
-	checkSkipCSITest(s.Suite, s.k8sh)
-
 	systemNamespace := installer.SystemNamespace(s.namespace)
 
 	//
@@ -117,10 +123,10 @@ func (s *UpgradeSuite) TestUpgradeToMaster() {
 
 	logger.Infof("Initializing object before the upgrade")
 	objectStoreName := "upgraded-object"
-	runObjectE2ETestLite(s.helper, s.k8sh, s.Suite, s.namespace, objectStoreName, 1)
+	runObjectE2ETestLite(s.helper, s.k8sh, s.Suite, s.namespace, objectStoreName, 1, false)
 
 	// verify that we're actually running the right pre-upgrade image
-	s.verifyOperatorImage(installer.Version1_1)
+	s.verifyOperatorImage(installer.Version1_2)
 
 	message := "my simple message"
 	preFilename := "pre-upgrade-file"
@@ -139,27 +145,15 @@ func (s *UpgradeSuite) TestUpgradeToMaster() {
 	require.NotEqual(s.T(), 0, numOSDs)
 
 	//
-	// Upgrade Rook from v1.1 to v1.2
+	// Upgrade Rook from v1.2 to v1.3
 	//
-	logger.Infof("*** UPGRADING ROOK FROM v1.1 to v1.2 ***")
-	s.gatherLogs(systemNamespace, "_before_1.2_upgrade")
-	s.upgradeToV1_2()
+	logger.Infof("*** UPGRADING ROOK FROM v1.2 to v1.3 ***")
+	s.gatherLogs(systemNamespace, "_before_1.3_upgrade")
+	s.upgradeToV1_3()
 
-	s.verifyOperatorImage(installer.Version1_2)
+	s.verifyOperatorImage(installer.Version1_3)
 	s.verifyRookUpgrade(numOSDs)
-	logger.Infof("Done with automatic upgrade from v1.1 to v1.2")
-	newFile := "post-upgrade-1_1-to-1_2-file"
-	s.verifyFilesAfterUpgrade("", newFile, message, rbdFilesToRead, cephfsFilesToRead)
-	rbdFilesToRead = append(rbdFilesToRead, newFile)
-	logger.Infof("Verified upgrade from v1.1 to v1.2")
-
-	//
-	// Upgrade from mimic to nautilus
-	//
-	logger.Infof("*** UPGRADING CEPH FROM Mimic TO Nautilus ***")
-	s.gatherLogs(systemNamespace, "_before_ceph_upgrade")
-	s.upgradeCephVersion(installer.NautilusVersion.Image, numOSDs)
-
+	logger.Infof("Done with automatic upgrade from v1.2 to v1.3")
 	// Start the file test client now that the CSI driver is supported on nautilus
 	fsStorageClass := "file-upgrade"
 	assert.NoError(s.T(), s.helper.FSClient.CreateStorageClass(filesystemName, s.namespace, fsStorageClass))
@@ -169,34 +163,41 @@ func (s *UpgradeSuite) TestUpgradeToMaster() {
 		cleanupFilesystemConsumer(s.helper, s.k8sh, s.Suite, s.namespace, filePodName)
 		cleanupFilesystem(s.helper, s.k8sh, s.Suite, s.namespace, filesystemName)
 	}()
-
-	// Verify reading and writing to the test clients
-	newFile = "post-ceph-upgrade-file"
-	s.verifyFilesAfterUpgrade(filesystemName, newFile, message, rbdFilesToRead, cephfsFilesToRead)
-	rbdFilesToRead = append(rbdFilesToRead, newFile)
-	cephfsFilesToRead = append(cephfsFilesToRead, newFile)
-	logger.Infof("Verified upgrade from mimic to nautilus")
+	logger.Infof("Verified upgrade from v1.2 to v1.3")
 
 	//
-	// Upgrade Rook from v1.2 to master
+	// Upgrade Rook from v1.3 to master
 	//
-	logger.Infof("*** UPGRADING ROOK FROM v1.2 to master ***")
+	logger.Infof("*** UPGRADING ROOK FROM v1.3 to master ***")
 	s.gatherLogs(systemNamespace, "_before_master_upgrade")
 	s.upgradeToMaster()
 
 	s.verifyOperatorImage(installer.VersionMaster)
 	s.verifyRookUpgrade(numOSDs)
-	logger.Infof("Done with automatic upgrade from v1.2 to master")
-	newFile = "post-upgrade-1_2-to-master-file"
+	logger.Infof("Done with automatic upgrade from v1.3 to master")
+	newFile := "post-upgrade-1_3-to-master-file"
 	s.verifyFilesAfterUpgrade(filesystemName, newFile, message, rbdFilesToRead, cephfsFilesToRead)
 	rbdFilesToRead = append(rbdFilesToRead, newFile)
 	cephfsFilesToRead = append(cephfsFilesToRead, newFile)
-	logger.Infof("Verified upgrade from v1.2 to master")
+	logger.Infof("Verified upgrade from v1.3 to master")
+
+	//
+	// Upgrade from nautilus to octopus
+	//
+	logger.Infof("*** UPGRADING CEPH FROM Nautilus TO Octopus ***")
+	s.gatherLogs(systemNamespace, "_before_octopus_upgrade")
+	s.upgradeCephVersion(installer.OctopusVersion.Image, numOSDs)
+	// Verify reading and writing to the test clients
+	newFile = "post-octopus-upgrade-file"
+	s.verifyFilesAfterUpgrade(filesystemName, newFile, message, rbdFilesToRead, cephfsFilesToRead)
+	rbdFilesToRead = append(rbdFilesToRead, newFile)
+	cephfsFilesToRead = append(cephfsFilesToRead, newFile)
+	logger.Infof("Verified upgrade from nautilus to octopus")
 }
 
 func (s *UpgradeSuite) gatherLogs(systemNamespace, testSuffix string) {
 	// Gather logs before Ceph upgrade to help with debugging
-	if installer.Env.Logs == "all" {
+	if installer.TestLogCollectionLevel() == "all" {
 		s.k8sh.PrintPodDescribe(s.namespace)
 	}
 	n := strings.Replace(s.T().Name(), "/", "_", -1) + testSuffix
@@ -321,17 +322,184 @@ func (s *UpgradeSuite) verifyFilesAfterUpgrade(fsName, newFileToWrite, messageFo
 	}
 }
 
-// UpgradeToV1_2 performs the steps necessary to upgrade a Rook v1.1 cluster to v1.2. It does not
+// UpgradeToV1_3 performs the steps necessary to upgrade a Rook v1.2 cluster to v1.3. It does not
 // verify the upgrade but merely starts the upgrade process.
-func (s *UpgradeSuite) upgradeToV1_2() {
-	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", upgradeManifestTo1_2(s.namespace)))
+func (s *UpgradeSuite) upgradeToV1_3() {
+	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", upgradeManifestTo1_3(s.namespace)))
 
 	require.NoError(s.T(),
-		s.k8sh.SetDeploymentVersion(installer.SystemNamespace(s.namespace), operatorContainer, operatorContainer, installer.Version1_2))
+		s.k8sh.SetDeploymentVersion(installer.SystemNamespace(s.namespace), operatorContainer, operatorContainer, installer.Version1_3))
 }
 
-func upgradeManifestTo1_2(namespace string) string {
+// UpgradeToMaster performs the steps necessary to upgrade a Rook v1.2 cluster to master. It does not
+// verify the upgrade but merely starts the upgrade process.
+func (s *UpgradeSuite) upgradeToMaster() {
+	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", upgradeManifestToMaster(s.namespace)))
+
+	require.NoError(s.T(),
+		s.k8sh.SetDeploymentVersion(installer.SystemNamespace(s.namespace), operatorContainer, operatorContainer, installer.VersionMaster))
+}
+
+func upgradeManifestToMaster(namespace string) string {
 	return `
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: cephrbdmirrors.ceph.rook.io
+spec:
+  group: ceph.rook.io
+  names:
+    kind: CephRBDMirror
+    listKind: CephRBDMirrorList
+    plural: cephrbdmirrors
+    singular: cephrbdmirror
+  scope: Namespaced
+  version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            count:
+              type: integer
+              minimum: 1
+              maximum: 100
+  subresources:
+    status: {}
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: cephobjectrealms.ceph.rook.io
+spec:
+  group: ceph.rook.io
+  names:
+    kind: CephObjectRealm
+    listKind: CephObjectRealmList
+    plural: cephobjectrealms
+    singular: cephobjectrealm
+    shortNames:
+    - realm
+    - realms
+  scope: Namespaced
+  version: v1
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: cephobjectzonegroups.ceph.rook.io
+spec:
+  group: ceph.rook.io
+  names:
+    kind: CephObjectZoneGroup
+    listKind: CephObjectZoneGroupList
+    plural: cephobjectzonegroups
+    singular: cephobjectzonegroup
+    shortNames:
+    - zonegroup
+    - zonegroups
+  scope: Namespaced
+  version: v1
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: cephobjectzones.ceph.rook.io
+spec:
+  group: ceph.rook.io
+  names:
+    kind: CephObjectZone
+    listKind: CephObjectZoneList
+    plural: cephobjectzones
+    singular: cephobjectzone
+    shortNames:
+    - zone
+    - zones
+  scope: Namespaced
+  version: v1`
+}
+
+func upgradeManifestTo1_3(namespace string) string {
+	return `
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+   name: cephfs-external-provisioner-runner-rules
+   labels:
+      rbac.ceph.rook.io/aggregate-to-cephfs-external-provisioner-runner: "true"
+rules:
+   - apiGroups: [""]
+     resources: ["secrets"]
+     verbs: ["get", "list"]
+   - apiGroups: [""]
+     resources: ["persistentvolumes"]
+     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+   - apiGroups: [""]
+     resources: ["persistentvolumeclaims"]
+     verbs: ["get", "list", "watch", "update"]
+   - apiGroups: ["storage.k8s.io"]
+     resources: ["storageclasses"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: [""]
+     resources: ["events"]
+     verbs: ["list", "watch", "create", "update", "patch"]
+   - apiGroups: ["storage.k8s.io"]
+     resources: ["volumeattachments"]
+     verbs: ["get", "list", "watch", "update", "patch"]
+   - apiGroups: [""]
+     resources: ["nodes"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: [""]
+     resources: ["persistentvolumeclaims/status"]
+     verbs: ["update", "patch"]
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+   name: rbd-external-provisioner-runner-rules
+   labels:
+      rbac.ceph.rook.io/aggregate-to-rbd-external-provisioner-runner: "true"
+rules:
+   - apiGroups: [""]
+     resources: ["secrets"]
+     verbs: ["get", "list"]
+   - apiGroups: [""]
+     resources: ["persistentvolumes"]
+     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+   - apiGroups: [""]
+     resources: ["persistentvolumeclaims"]
+     verbs: ["get", "list", "watch", "update"]
+   - apiGroups: ["storage.k8s.io"]
+     resources: ["volumeattachments"]
+     verbs: ["get", "list", "watch", "update", "patch"]
+   - apiGroups: [""]
+     resources: ["nodes"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: ["storage.k8s.io"]
+     resources: ["storageclasses"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: [""]
+     resources: ["events"]
+     verbs: ["list", "watch", "create", "update", "patch"]
+   - apiGroups: ["snapshot.storage.k8s.io"]
+     resources: ["volumesnapshots"]
+     verbs: ["get", "list", "watch", "update"]
+   - apiGroups: ["snapshot.storage.k8s.io"]
+     resources: ["volumesnapshotcontents"]
+     verbs: ["create", "get", "list", "watch", "update", "delete"]
+   - apiGroups: ["snapshot.storage.k8s.io"]
+     resources: ["volumesnapshotclasses"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: ["apiextensions.k8s.io"]
+     resources: ["customresourcedefinitions"]
+     verbs: ["create", "list", "watch", "delete", "get", "update"]
+   - apiGroups: ["snapshot.storage.k8s.io"]
+     resources: ["volumesnapshots/status"]
+     verbs: ["update"]
+   - apiGroups: [""]
+     resources: ["persistentvolumeclaims/status"]
+     verbs: ["update", "patch"]
+---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRole
 metadata:
@@ -349,6 +517,7 @@ rules:
   # Node access is needed for determining nodes where mons should run
   - nodes
   - nodes/proxy
+  - services
   verbs:
   - get
   - list
@@ -438,147 +607,5 @@ rules:
   resources:
   - csidrivers
   verbs:
-  - create
----
-apiVersion: apiextensions.k8s.io/v1beta1
-kind: CustomResourceDefinition
-metadata:
-  name: cephclients.ceph.rook.io
-spec:
-  group: ceph.rook.io
-  names:
-    kind: CephClient
-    listKind: CephClientList
-    plural: cephclients
-    singular: cephclient
-  scope: Namespaced
-  version: v1
-  validation:
-    openAPIV3Schema:
-      properties:
-        spec:
-          properties:
-            caps:
-              type: object
----
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1beta1
-metadata:
-  name: rook-ceph-osd
-  namespace: ` + namespace + `
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  verbs:
-  - get
-  - list
----
-# Allow the ceph osd to access cluster-wide resources necessary for determining their topology location
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1beta1
-metadata:
-  name: rook-ceph-osd
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: rook-ceph-osd
-subjects:
-- kind: ServiceAccount
-  name: rook-ceph-osd
-  namespace: ` + namespace + `
-`
-}
-
-// UpgradeToMaster performs the steps necessary to upgrade a Rook v1.2 cluster to master. It does not
-// verify the upgrade but merely starts the upgrade process.
-func (s *UpgradeSuite) upgradeToMaster() {
-	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", upgradeManifestToMaster(s.namespace)))
-
-	require.NoError(s.T(),
-		s.k8sh.SetDeploymentVersion(installer.SystemNamespace(s.namespace), operatorContainer, operatorContainer, installer.VersionMaster))
-}
-
-func upgradeManifestToMaster(namespace string) string {
-	return `
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-   name: cephfs-external-provisioner-runner-rules
-   labels:
-      rbac.ceph.rook.io/aggregate-to-cephfs-external-provisioner-runner: "true"
-rules:
-   - apiGroups: [""]
-     resources: ["secrets"]
-     verbs: ["get", "list"]
-   - apiGroups: [""]
-     resources: ["persistentvolumes"]
-     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
-   - apiGroups: [""]
-     resources: ["persistentvolumeclaims"]
-     verbs: ["get", "list", "watch", "update"]
-   - apiGroups: ["storage.k8s.io"]
-     resources: ["storageclasses"]
-     verbs: ["get", "list", "watch"]
-   - apiGroups: [""]
-     resources: ["events"]
-     verbs: ["list", "watch", "create", "update", "patch"]
-   - apiGroups: ["storage.k8s.io"]
-     resources: ["volumeattachments"]
-     verbs: ["get", "list", "watch", "update", "patch"]
-   - apiGroups: [""]
-     resources: ["nodes"]
-     verbs: ["get", "list", "watch"]
-   - apiGroups: [""]
-     resources: ["persistentvolumeclaims/status"]
-     verbs: ["update", "patch"]
----
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-   name: rbd-external-provisioner-runner-rules
-   labels:
-      rbac.ceph.rook.io/aggregate-to-rbd-external-provisioner-runner: "true"
-rules:
-   - apiGroups: [""]
-     resources: ["secrets"]
-     verbs: ["get", "list"]
-   - apiGroups: [""]
-     resources: ["persistentvolumes"]
-     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
-   - apiGroups: [""]
-     resources: ["persistentvolumeclaims"]
-     verbs: ["get", "list", "watch", "update"]
-   - apiGroups: ["storage.k8s.io"]
-     resources: ["volumeattachments"]
-     verbs: ["get", "list", "watch", "update", "patch"]
-   - apiGroups: [""]
-     resources: ["nodes"]
-     verbs: ["get", "list", "watch"]
-   - apiGroups: ["storage.k8s.io"]
-     resources: ["storageclasses"]
-     verbs: ["get", "list", "watch"]
-   - apiGroups: [""]
-     resources: ["events"]
-     verbs: ["list", "watch", "create", "update", "patch"]
-   - apiGroups: ["snapshot.storage.k8s.io"]
-     resources: ["volumesnapshots"]
-     verbs: ["get", "list", "watch", "update"]
-   - apiGroups: ["snapshot.storage.k8s.io"]
-     resources: ["volumesnapshotcontents"]
-     verbs: ["create", "get", "list", "watch", "update", "delete"]
-   - apiGroups: ["snapshot.storage.k8s.io"]
-     resources: ["volumesnapshotclasses"]
-     verbs: ["get", "list", "watch"]
-   - apiGroups: ["apiextensions.k8s.io"]
-     resources: ["customresourcedefinitions"]
-     verbs: ["create", "list", "watch", "delete", "get", "update"]
-   - apiGroups: ["snapshot.storage.k8s.io"]
-     resources: ["volumesnapshots/status"]
-     verbs: ["update"]
-   - apiGroups: [""]
-     resources: ["persistentvolumeclaims/status"]
-     verbs: ["update", "patch"]
-`
+  - create`
 }

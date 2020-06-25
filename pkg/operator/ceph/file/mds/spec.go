@@ -22,6 +22,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
@@ -59,9 +60,6 @@ func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) *apps.Deployment {
 	// Replace default unreachable node toleration
 	k8sutil.AddUnreachableNodeToleration(&podSpec.Spec)
 
-	if c.clusterSpec.Network.IsHost() {
-		podSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	}
 	c.fs.Spec.MetadataServer.Annotations.ApplyToObjectMeta(&podSpec.ObjectMeta)
 	c.fs.Spec.MetadataServer.Placement.ApplyToPodSpec(&podSpec.Spec)
 
@@ -83,10 +81,17 @@ func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) *apps.Deployment {
 			},
 		},
 	}
+
+	if c.clusterSpec.Network.IsHost() {
+		d.Spec.Template.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
+	} else if c.clusterSpec.Network.NetworkSpec.IsMultus() {
+		k8sutil.ApplyMultus(c.clusterSpec.Network.NetworkSpec, &podSpec.ObjectMeta)
+	}
+
 	k8sutil.AddRookVersionLabelToDeployment(d)
 	c.fs.Spec.MetadataServer.Annotations.ApplyToObjectMeta(&d.ObjectMeta)
 	controller.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, d)
-	k8sutil.SetOwnerRef(&d.ObjectMeta, &c.ownerRef)
+
 	return d
 }
 
@@ -119,6 +124,7 @@ func (c *Cluster) makeMdsDaemonContainer(mdsConfig *mdsConfig) v1.Container {
 		),
 		Resources:       c.fs.Spec.MetadataServer.Resources,
 		SecurityContext: mon.PodSecurityContext(),
+		LivenessProbe:   controller.GenerateLivenessProbeExecDaemon(config.MdsType, mdsConfig.DaemonID),
 	}
 
 	return container

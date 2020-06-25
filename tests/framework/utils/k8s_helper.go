@@ -117,7 +117,7 @@ func (k8sh *K8sHelper) GetDockerImage(image string) error {
 	if dockercmd == "" {
 		dockercmd = "docker"
 	}
-	return k8sh.executor.ExecuteCommand(false, "", dockercmd, "pull", image)
+	return k8sh.executor.ExecuteCommand(dockercmd, "pull", image)
 }
 
 // SetDeploymentVersion sets the container version on the deployment. It is assumed to be the rook/ceph image.
@@ -128,7 +128,7 @@ func (k8sh *K8sHelper) SetDeploymentVersion(namespace, deploymentName, container
 
 // Kubectl is wrapper for executing kubectl commands
 func (k8sh *K8sHelper) Kubectl(args ...string) (string, error) {
-	result, err := k8sh.executor.ExecuteCommandWithTimeout(false, 15*time.Second, "kubectl", "kubectl", args...)
+	result, err := k8sh.executor.ExecuteCommandWithTimeout(15*time.Second, "kubectl", args...)
 	if err != nil {
 		k8slogger.Errorf("Failed to execute: kubectl %+v : %+v. %s", args, err, result)
 		if args[0] == "delete" {
@@ -162,9 +162,9 @@ func (k8sh *K8sHelper) KubectlWithStdin(stdin string, args ...string) (string, e
 }
 
 func getKubeConfig(executor exec.Executor) (*rest.Config, error) {
-	context, err := executor.ExecuteCommandWithOutput(false, "", "kubectl", "config", "view", "-o", "json")
+	context, err := executor.ExecuteCommandWithOutput("kubectl", "config", "view", "-o", "json")
 	if err != nil {
-		k8slogger.Errorf("Errors Encountered while executing kubectl command : %v", err)
+		k8slogger.Errorf("failed to execute kubectl command. %v", err)
 	}
 
 	// Parse the kubectl context to get the settings for client connections
@@ -350,7 +350,7 @@ func (k8sh *K8sHelper) DeleteResource(args ...string) error {
 func (k8sh *K8sHelper) WaitForCustomResourceDeletion(namespace string, checkerFunc func() error) error {
 
 	// wait for the operator to finalize and delete the CRD
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 30; i++ {
 		err := checkerFunc()
 		if err == nil {
 			logger.Infof("custom resource %s still exists", namespace)
@@ -992,13 +992,13 @@ func (k8sh *K8sHelper) GetServiceNodePort(serviceName string, namespace string) 
 }
 
 // IsStorageClassPresent returns true if storageClass is present, if not false
-func (k8sh *K8sHelper) IsStorageClassPresent(name string) error {
+func (k8sh *K8sHelper) IsStorageClassPresent(name string) (bool, error) {
 	args := []string{"get", "storageclass", "-o", "jsonpath='{.items[*].metadata.name}'"}
 	result, err := k8sh.Kubectl(args...)
 	if strings.Contains(result, name) {
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("Storageclass %s not found, err ->%v", name, err)
+	return false, fmt.Errorf("Storageclass %s not found, err ->%v", name, err)
 }
 
 func (k8sh *K8sHelper) IsDefaultStorageClassPresent() (bool, error) {

@@ -17,7 +17,12 @@
 
 override GOOS=linux
 
-DOCKERCMD := docker
+ifeq ($(origin DOCKERCMD),undefined)
+DOCKERCMD?=$(shell docker version >/dev/null 2>&1 && echo docker)
+ifeq ($(DOCKERCMD),)
+DOCKERCMD=$(shell podman version >/dev/null 2>&1 && echo podman)
+endif
+endif
 
 # include the common make file
 SELF_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
@@ -75,12 +80,12 @@ BUILD_BASE_ARGS += $(BUILD_ARGS)
 .PHONY: all build publish clean
 all: build
 
-build: do.build
+build: do.build ## Build images for the host platform.
 	@$(MAKE) cache.images
 
-clean: clean.build
+clean: clean.build ## Remove all images created from the current build.
 
-prune: cache.prune
+prune: cache.prune ## Prunes orphaned and cached images at the host level.
 
 clean.images:
 	@for i in $(CLEAN_IMAGES); do \

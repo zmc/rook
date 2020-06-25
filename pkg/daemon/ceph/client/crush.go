@@ -91,7 +91,7 @@ func GetCrushMap(context *clusterd.Context, clusterName string) (CrushMap, error
 
 	err = json.Unmarshal(buf, &c)
 	if err != nil {
-		return c, errors.Wrapf(err, "failed to unmarshal crush map")
+		return c, errors.Wrap(err, "failed to unmarshal crush map")
 	}
 
 	return c, nil
@@ -172,4 +172,15 @@ func isCrushFieldSet(fieldName string, pairs []string) bool {
 
 func formatProperty(name, value string) string {
 	return fmt.Sprintf("%s=%s", name, value)
+}
+
+// GetOSDOnHost returns the list of osds running on a given host
+func GetOSDOnHost(context *clusterd.Context, clusterName, node string) (string, error) {
+	args := []string{"osd", "crush", "ls", node}
+	buf, err := NewCephCommand(context, clusterName, args).Run()
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to get osd list on host. %s", string(buf))
+	}
+
+	return string(buf), nil
 }

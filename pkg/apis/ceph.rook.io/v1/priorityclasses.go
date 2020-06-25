@@ -44,10 +44,10 @@ func GetOSDPriorityClassName(p rook.PriorityClassNamesSpec) string {
 	return p[KeyOSD]
 }
 
-// GetRBDMirrorPriorityClassName returns the priority class name for the RBD Mirrors
-func GetRBDMirrorPriorityClassName(p rook.PriorityClassNamesSpec) string {
-	if _, ok := p[KeyRBDMirror]; !ok {
+// GetCleanupPriorityClassName returns the priority class name for the cleanup job
+func GetCleanupPriorityClassName(p rook.PriorityClassNamesSpec) string {
+	if _, ok := p[KeyCleanup]; !ok {
 		return p.All()
 	}
-	return p[KeyRBDMirror]
+	return p[KeyCleanup]
 }

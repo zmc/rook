@@ -25,11 +25,13 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/operator/test"
 
 	"github.com/rook/rook/pkg/clusterd"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -116,27 +118,23 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	}
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName, command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
 			if args[0] == "status" {
-				return `{"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
-			}
-			return "", nil
-		},
-		MockExecuteCommandWithOutput: func(debug bool, actionName, command string, args ...string) (string, error) {
-			if args[0] == "user" {
-				return userCreateJSON, nil
+				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
 			return "", nil
 		},
 	}
+	clientset := test.New(t, 3)
 	c := &clusterd.Context{
 		Executor:      executor,
-		RookClientset: rookclient.NewSimpleClientset()}
+		RookClientset: rookclient.NewSimpleClientset(),
+		Clientset:     clientset,
+	}
 
 	// Register operator types with the runtime scheme.
 	s := scheme.Scheme
-	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStoreUser{})
-	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{})
+	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStoreUser{}, &cephv1.CephCluster{}, &cephv1.CephClusterList{})
 
 	// Create a fake client to mock API calls.
 	cl := fake.NewFakeClientWithScheme(s, object...)
@@ -169,6 +167,9 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		},
 		Status: cephv1.ClusterStatus{
 			Phase: "",
+			CephStatus: &cephv1.CephStatus{
+				Health: "",
+			},
 		},
 	}
 	object = append(object, cephCluster)
@@ -187,9 +188,48 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	//
 	// FAILURE! The CephCluster is ready but NO rgw object
 	//
+
+	// Mock clusterInfo
+	secrets := map[string][]byte{
+		"cluster-name": []byte("foo-cluster"),
+		"fsid":         []byte(name),
+		"mon-secret":   []byte("monsecret"),
+		"admin-secret": []byte("adminsecret"),
+	}
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rook-ceph-mon",
+			Namespace: namespace,
+		},
+		Data: secrets,
+		Type: k8sutil.RookType,
+	}
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	assert.NoError(t, err)
+
+	// Add ready status to the CephCluster
 	cephCluster.Status.Phase = k8sutil.ReadyStatus
+	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
+
 	// Create a fake client to mock API calls.
 	cl = fake.NewFakeClientWithScheme(s, object...)
+
+	executor = &exectest.MockExecutor{
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			if args[0] == "status" {
+				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+			}
+			return "", nil
+		},
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			if args[0] == "user" {
+				return userCreateJSON, nil
+			}
+			return "", nil
+		},
+	}
+	c.Executor = executor
+
 	// Create a ReconcileObjectStoreUser object with the scheme and fake client.
 	r = &ReconcileObjectStoreUser{client: cl, scheme: s, context: c}
 

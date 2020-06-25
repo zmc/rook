@@ -27,7 +27,6 @@ import (
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -155,9 +154,7 @@ func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool, PVCName string) 
 		HostNetwork:       c.Network.IsHost(),
 		PriorityClassName: cephv1.GetMonPriorityClassName(c.spec.PriorityClassNames),
 	}
-	if c.Network.IsHost() {
-		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	}
+
 	// Replace default unreachable node toleration
 	if c.spec.Mon.VolumeClaimTemplate != nil {
 		k8sutil.AddUnreachableNodeToleration(&podSpec)
@@ -172,6 +169,12 @@ func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool, PVCName string) 
 		Spec: podSpec,
 	}
 	cephv1.GetMonAnnotations(c.spec.Annotations).ApplyToObjectMeta(&pod.ObjectMeta)
+
+	if c.Network.IsHost() {
+		pod.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
+	} else if c.Network.NetworkSpec.IsMultus() {
+		k8sutil.ApplyMultus(c.Network.NetworkSpec, &pod.ObjectMeta)
+	}
 
 	return pod
 }
@@ -262,7 +265,7 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 		SecurityContext: PodSecurityContext(),
 		Ports: []v1.ContainerPort{
 			{
-				Name:          "client",
+				Name:          "tcp-msgr1",
 				ContainerPort: monConfig.Port,
 				Protocol:      v1.ProtocolTCP,
 			},
@@ -271,7 +274,8 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 			controller.DaemonEnvVars(c.spec.CephVersion.Image),
 			k8sutil.PodIPEnvVar(podIPEnvVar),
 		),
-		Resources: cephv1.GetMonResources(c.spec.Resources),
+		Resources:     cephv1.GetMonResources(c.spec.Resources),
+		LivenessProbe: controller.GenerateLivenessProbeExecDaemon(config.MonType, monConfig.DaemonName),
 	}
 
 	// If host networking is enabled, we don't need a bind addr that is different from the public addr
@@ -283,13 +287,13 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 	}
 
 	// Add messenger 2 port
-	addContainerPort(container, "msgr2", 3300)
+	addContainerPort(container, "tcp-msgr2", 3300)
 
 	return container
 }
 
 // UpdateCephDeploymentAndWait verifies a deployment can be stopped or continued
-func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Deployment, namespace, daemonType, daemonName string, cephVersion cephver.CephVersion, skipUpgradeChecks, continueUpgradeAfterChecksEvenIfNotHealthy bool) error {
+func UpdateCephDeploymentAndWait(context *clusterd.Context, deployment *apps.Deployment, namespace, daemonType, daemonName string, skipUpgradeChecks, continueUpgradeAfterChecksEvenIfNotHealthy bool) error {
 
 	callback := func(action string) error {
 		// At this point, we are in an upgrade

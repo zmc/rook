@@ -15,6 +15,9 @@ apiVersion: policy/v1beta1
 kind: PodSecurityPolicy
 metadata:
   name: 00-rook-ceph-operator
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'runtime/default'
+    seccomp.security.alpha.kubernetes.io/defaultProfileName:  'runtime/default'
 spec:
   privileged: true
   allowedCapabilities:
@@ -44,7 +47,6 @@ spec:
     - hostPath
     - flexVolume
   # allowedHostPaths can be set to Rook's known host volume mount points when they are fully-known
-  # directory-based OSDs make this hard to nail down
   # allowedHostPaths:
   #   - pathPrefix: "/run/udev"  # for OSD prep
   #     readOnly: false

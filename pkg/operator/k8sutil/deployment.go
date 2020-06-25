@@ -74,6 +74,8 @@ func UpdateDeploymentAndWait(context *clusterd.Context, modifiedDeployment *apps
 
 	// If deployments are different, let's update!
 	if !patchResult.IsEmpty() {
+		logger.Infof("updating deployment %q after verifying it is safe to stop", modifiedDeployment.Name)
+
 		// Let's verify the deployment can be stopped
 		// retry for 5 times, every minute
 		err = util.Retry(5, 60*time.Second, func() error {
@@ -89,7 +91,6 @@ func UpdateDeploymentAndWait(context *clusterd.Context, modifiedDeployment *apps
 			return nil, fmt.Errorf("failed to set hash annotation on deployment %q. %v", modifiedDeployment.Name, err)
 		}
 
-		logger.Infof("updating deployment %q", modifiedDeployment.Name)
 		if _, err := context.Clientset.AppsV1().Deployments(namespace).Update(modifiedDeployment); err != nil {
 			return nil, fmt.Errorf("failed to update deployment %q. %v", modifiedDeployment.Name, err)
 		}
@@ -118,6 +119,15 @@ func UpdateDeploymentAndWait(context *clusterd.Context, modifiedDeployment *apps
 
 				return d, nil
 			}
+
+			// If ProgressDeadlineExceeded is reached let's fail earlier
+			// This can happen if one of the deployment cannot be scheduled on a node and stays in "pending" state
+			for _, condition := range d.Status.Conditions {
+				if condition.Type == v1.DeploymentProgressing && condition.Reason == "ProgressDeadlineExceeded" {
+					return nil, fmt.Errorf("gave up waiting for deployment %q to update because %q", modifiedDeployment.Name, condition.Reason)
+				}
+			}
+
 			logger.Debugf("deployment %q status=%+v", d.Name, d.Status)
 			time.Sleep(time.Duration(sleepTime) * time.Second)
 		}
@@ -211,7 +221,7 @@ func AddRookVersionLabelToObjectMeta(meta *metav1.ObjectMeta) {
 	addRookVersionLabel(meta.Labels)
 }
 
-func AddLabelToDeployement(key, value string, d *v1.Deployment) {
+func AddLabelToDeployment(key, value string, d *v1.Deployment) {
 	if d == nil {
 		return
 	}
@@ -245,7 +255,7 @@ func addLabel(key, value string, labels map[string]string) {
 	labels[key] = value
 }
 
-func CreateDeployment(name, namespace string, clientset kubernetes.Interface, dep *apps.Deployment) error {
+func CreateDeployment(clientset kubernetes.Interface, name, namespace string, dep *apps.Deployment) error {
 	_, err := clientset.AppsV1().Deployments(namespace).Create(dep)
 	if err != nil {
 		if k8serrors.IsAlreadyExists(err) {

@@ -18,14 +18,14 @@ package controller
 
 import (
 	"context"
-	"strings"
+	"fmt"
+	"reflect"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -37,52 +37,69 @@ const OperatorSettingConfigMapName string = "rook-ceph-operator-config"
 var (
 	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
 	ImmediateRetryResult = reconcile.Result{Requeue: true}
-	// WaitForRequeueIfCephClusterNotReadyAfter requeue after 10sec if the operator is not ready
-	WaitForRequeueIfCephClusterNotReadyAfter = 10 * time.Second
+
 	// WaitForRequeueIfCephClusterNotReady waits for the CephCluster to be ready
-	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: WaitForRequeueIfCephClusterNotReadyAfter}
+	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
+
+	// WaitForRequeueIfFinalizerBlocked waits for resources to be cleaned up before the finalizer can be removed
+	WaitForRequeueIfFinalizerBlocked = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
+
+	// OperatorCephBaseImageVersion is the ceph version in the operator image
+	OperatorCephBaseImageVersion string
 )
 
 // IsReadyToReconcile determines if a controller is ready to reconcile or not
-func IsReadyToReconcile(client client.Client, clustercontext *clusterd.Context, namespacedName types.NamespacedName) (cephv1.ClusterSpec, bool, bool, reconcile.Result) {
-	namespacedName.Name = namespacedName.Namespace
-	cephClusterExists := true
+func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, namespacedName types.NamespacedName, controllerName string) (cephv1.CephCluster, bool, bool, reconcile.Result) {
+	cephClusterExists := false
 
 	// Running ceph commands won't work and the controller will keep re-queuing so I believe it's fine not to check
 	// Make sure a CephCluster exists before doing anything
-	cephCluster := &cephv1.CephCluster{}
-	err := client.Get(context.TODO(), namespacedName, cephCluster)
+	var cephCluster cephv1.CephCluster
+	clusterList := &cephv1.CephClusterList{}
+	err := c.List(context.TODO(), clusterList, client.InNamespace(namespacedName.Namespace))
 	if err != nil {
-		if kerrors.IsNotFound(err) {
-			cephClusterExists = false
-			logger.Errorf("CephCluster resource %q not found in namespace %q", namespacedName.Name, namespacedName.Namespace)
-			return cephv1.ClusterSpec{}, false, cephClusterExists, ImmediateRetryResult
-		} else if err != nil {
-			logger.Errorf("failed to fetch CephCluster %v", err)
-			return cephv1.ClusterSpec{}, false, cephClusterExists, ImmediateRetryResult
+		logger.Errorf("%q:failed to fetch CephCluster %v", controllerName, err)
+		return cephCluster, false, cephClusterExists, ImmediateRetryResult
+	}
+	if len(clusterList.Items) == 0 {
+		logger.Errorf("%q: no CephCluster resource found in namespace %q", controllerName, namespacedName.Namespace)
+		return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
+	}
+	cephClusterExists = true
+	cephCluster = clusterList.Items[0]
+
+	logger.Debugf("%q: CephCluster resource %q found in namespace %q", controllerName, cephCluster.Name, namespacedName.Namespace)
+
+	// read the CR status of the cluster
+	if cephCluster.Status.CephStatus != nil {
+		if cephCluster.Status.CephStatus.Health == "HEALTH_OK" || cephCluster.Status.CephStatus.Health == "HEALTH_WARN" {
+			logger.Debugf("%q: ceph status is %q, operator is ready to run ceph command, reconciling", controllerName, cephCluster.Status.CephStatus.Health)
+			return cephCluster, true, cephClusterExists, WaitForRequeueIfCephClusterNotReady
 		}
+		logger.Infof("%s: CephCluster %q found but skipping reconcile since ceph health is %q", controllerName, cephCluster.Name, cephCluster.Status.CephStatus)
 	}
 
-	logger.Debugf("CephCluster resource %q found in namespace %q", namespacedName.Name, namespacedName.Namespace)
+	return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
+}
 
-	// If the cluster is ready
-	if cephCluster.Status.Phase == k8sutil.ReadyStatus {
-		// Test a Ceph command to verify the Operator is ready
-		// This is done to silence errors when the operator just started and cannot reconcile yet
-		_, err = cephclient.Status(clustercontext, namespacedName.Namespace, true)
-		if err != nil {
-			if strings.Contains(err.Error(), "error calling conf_read_file") {
-				logger.Info("operator is not ready to run ceph command, cannot reconcile yet.")
-				return cephCluster.Spec, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
-			}
-			// We should not arrive there
-			logger.Errorf("ceph command error %v", err)
-			return cephCluster.Spec, false, cephClusterExists, ImmediateRetryResult
-		}
-		logger.Debugf("operator is ready to run ceph command, reconciling")
-		return cephCluster.Spec, true, cephClusterExists, reconcile.Result{}
+// ClusterOwnerRef represents the owner reference of the CephCluster CR
+func ClusterOwnerRef(clusterName, clusterID string) metav1.OwnerReference {
+	blockOwner := true
+	return metav1.OwnerReference{
+		APIVersion:         fmt.Sprintf("%s/%s", ClusterResource.Group, ClusterResource.Version),
+		Kind:               ClusterResource.Kind,
+		Name:               clusterName,
+		UID:                types.UID(clusterID),
+		BlockOwnerDeletion: &blockOwner,
 	}
+}
 
-	logger.Debugf("CephCluster resource %q found in namespace %q but not ready yet", namespacedName.Name, namespacedName.Namespace)
-	return cephCluster.Spec, false, cephClusterExists, ImmediateRetryResult
+// ClusterResource operator-kit Custom Resource Definition
+var ClusterResource = k8sutil.CustomResource{
+	Name:       "cephcluster",
+	Plural:     "cephclusters",
+	Group:      cephv1.CustomResourceGroup,
+	Version:    cephv1.Version,
+	Kind:       reflect.TypeOf(cephv1.CephCluster{}).Name(),
+	APIVersion: fmt.Sprintf("%s/%s", cephv1.CustomResourceGroup, cephv1.Version),
 }

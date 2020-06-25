@@ -13,6 +13,19 @@ else
     skippreflightcheck=--skip-preflight-checks
 fi
 
+case "$(arch)" in
+        "x86_64" | "amd64")
+            arch="amd64"
+            ;;
+        "aarch64")
+            arch="arm64"
+            ;;
+        *)
+            echo "Couldn't translate 'arch' output to an available arch."
+            exit 1
+            ;;
+esac
+
 usage(){
     echo "usage:" >&2
     echo "  $0 up " >&2
@@ -107,13 +120,14 @@ kubeadm_reset() {
     sudo apt-get -y remove kubelet
     sudo apt-get -y remove kubeadm
     sudo swapon -a
+    which systemctl >/dev/null && sudo systemctl start swap.target
 }
 
 case "${1:-}" in
     up)
         sudo sh -c "${scriptdir}/kubeadm-install.sh ${KUBE_VERSION}" root
         install_master
-        ${scriptdir}/makeTestImages.sh tag amd64 || true
+        ${scriptdir}/makeTestImages.sh tag ${arch} || true
         ;;
     clean)
         kubeadm_reset

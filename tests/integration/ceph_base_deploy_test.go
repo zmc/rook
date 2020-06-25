@@ -40,11 +40,12 @@ const (
 	// These versions are for running a minimal test suite for more efficient tests across different versions of K8s
 	// instead of running all suites on all versions
 	// To run on multiple versions, add a comma separate list such as 1.16.0,1.17.0
-	flexDriverMinimalTestVersion   = "1.13.0"
-	multiClusterMinimalTestVersion = "1.14.0"
-	helmMinimalTestVersion         = "1.15.0"
-	upgradeMinimalTestVersion      = "1.16.0"
-	smokeSuiteMinimalTestVersion   = "1.17.0"
+	flexDriverMinimalTestVersion      = "1.14.0"
+	cephMasterSuiteMinimalTestVersion = "1.15.0"
+	multiClusterMinimalTestVersion    = "1.15.0"
+	helmMinimalTestVersion            = "1.16.0"
+	upgradeMinimalTestVersion         = "1.17.0"
+	smokeSuiteMinimalTestVersion      = "1.18.0"
 )
 
 var (
@@ -72,8 +73,8 @@ func checkIfRookClusterIsHealthy(s suite.Suite, testClient *clients.TestClient, 
 
 	retryCount := 0
 	for retryCount < utils.RetryLoop {
-		err = clients.IsClusterHealthy(testClient, clusterNamespace)
-		if err == nil {
+		healthy, err := clients.IsClusterHealthy(testClient, clusterNamespace)
+		if healthy {
 			logger.Infof("cluster %s is healthy", clusterNamespace)
 			return
 		}
@@ -97,16 +98,23 @@ func HandlePanics(r interface{}, op installer.TestSuite, t func() *testing.T) {
 
 // TestCluster struct for handling panic and test suite tear down
 type TestCluster struct {
-	installer        *installer.CephInstaller
-	kh               *utils.K8sHelper
-	helper           *clients.TestClient
-	T                func() *testing.T
-	namespace        string
-	storeType        string
-	storageClassName string
-	usePVC           bool
-	mons             int
-	rbdMirrorWorkers int
+	installer               *installer.CephInstaller
+	kh                      *utils.K8sHelper
+	helper                  *clients.TestClient
+	T                       func() *testing.T
+	clusterName             string
+	namespace               string
+	storeType               string
+	storageClassName        string
+	useHelm                 bool
+	usePVC                  bool
+	mons                    int
+	rbdMirrorWorkers        int
+	rookCephCleanup         bool
+	skipOSDCreation         bool
+	minimalMatrixK8sVersion string
+	rookVersion             string
+	cephVersion             cephv1.CephVersionSpec
 }
 
 func checkIfShouldRunForMinimalTestMatrix(t func() *testing.T, k8sh *utils.K8sHelper, version string) {
@@ -133,32 +141,34 @@ func checkIfShouldRunForMinimalTestMatrix(t func() *testing.T, k8sh *utils.K8sHe
 }
 
 // StartTestCluster creates new instance of TestCluster struct
-func StartTestCluster(t func() *testing.T, minimalMatrixK8sVersion, namespace, storeType string, useHelm bool, usePVC bool, storageClassName string, mons,
-	rbdMirrorWorkers int, rookVersion string, cephVersion cephv1.CephVersionSpec) (*TestCluster, *utils.K8sHelper) {
-
+func StartTestCluster(t func() *testing.T, cluster *TestCluster) (*TestCluster, *utils.K8sHelper) {
 	kh, err := utils.CreateK8sHelper(t)
 	require.NoError(t(), err)
-	checkIfShouldRunForMinimalTestMatrix(t, kh, minimalMatrixK8sVersion)
+	checkIfShouldRunForMinimalTestMatrix(t, kh, cluster.minimalMatrixK8sVersion)
 
-	i := installer.NewCephInstaller(t, kh.Clientset, useHelm, rookVersion, cephVersion)
+	cluster.installer = installer.NewCephInstaller(t, kh.Clientset, cluster.useHelm, cluster.clusterName, cluster.rookVersion, cluster.cephVersion, cluster.rookCephCleanup)
+	cluster.kh = kh
+	cluster.helper = nil
+	cluster.T = t
 
-	op := &TestCluster{i, kh, nil, t, namespace, storeType, storageClassName, usePVC, mons, rbdMirrorWorkers}
-
-	if rookVersion != installer.VersionMaster {
+	if cluster.rookVersion != installer.VersionMaster {
 		// make sure we have the images from a previous release locally so the test doesn't hit a timeout
-		assert.NoError(t(), kh.GetDockerImage("rook/ceph:"+rookVersion))
+		assert.NoError(t(), kh.GetDockerImage("rook/ceph:"+cluster.rookVersion))
 	}
 
-	assert.NoError(t(), kh.GetDockerImage(cephVersion.Image))
+	assert.NoError(t(), kh.GetDockerImage(cluster.cephVersion.Image))
 
-	op.Setup()
-	return op, kh
+	cluster.Setup()
+	return cluster, kh
 }
 
 // SetUpRook is a wrapper for setting up rook
 func (op *TestCluster) Setup() {
+	// Turn on DEBUG logging
+	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
+
 	isRookInstalled, err := op.installer.InstallRook(op.namespace, op.storeType, op.usePVC, op.storageClassName,
-		cephv1.MonSpec{Count: op.mons, AllowMultiplePerNode: true}, false /* startWithAllNodes */, op.rbdMirrorWorkers)
+		cephv1.MonSpec{Count: op.mons, AllowMultiplePerNode: true}, false /* startWithAllNodes */, op.rbdMirrorWorkers, op.skipOSDCreation)
 
 	if !isRookInstalled || err != nil {
 		logger.Errorf("Rook was not installed successfully: %v", err)

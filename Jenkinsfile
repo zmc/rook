@@ -8,6 +8,7 @@ pipeline {
 
     options {
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '200'))
         timeout(time: 2, unit: 'HOURS')
         timestamps()
     }
@@ -17,19 +18,26 @@ pipeline {
             when { branch "PR-*" }
             steps {
                 script {
-                    pr_number = sh (script: "echo ${env.BRANCH_NAME} | grep -o -E '[0-9]+' ",returnStdout: true)
-                    def json = sh (script: "curl -s https://api.github.com/repos/rook/rook/pulls/${pr_number}", returnStdout: true).trim()
+                    def json = sh (script: "curl -s https://api.github.com/repos/rook/rook/pulls/${env.CHANGE_ID}", returnStdout: true).trim()
+                    def draft = evaluateJson(json,'${json.draft}')
+                    if (draft.contains("true")) {
+                        echo ("This is a draft PR. Aborting")
+                        env.shouldBuild = "false"
+                    }
                     def body = evaluateJson(json,'${json.body}')
                     if (body.contains("[skip ci]")) {
-                         echo ("'[skip ci]' spotted in PR body text. Aborting.")
-                         env.shouldBuild = "false"
+                        echo ("'[skip ci]' spotted in PR body text. Aborting.")
+                        env.shouldBuild = "false"
                     }
                     if (body.contains("[skip tests]")) {
-                         env.shouldTest = "false"
+                        env.shouldTest = "false"
                     }
                     if (body.contains("[all logs]")) {
-                          env.getLogs = "all"
+                        env.getLogs = "all"
                     }
+
+                    // When running in a PR we assuming it's not an official build
+                    env.isOfficialBuild = "false"
 
                     if (!body.contains("[test full]")) {
                         // By default run the min test matrix (all tests run, but will be distributed on different versions of K8s).
@@ -37,20 +45,47 @@ pipeline {
                         env.testArgs = "min-test-matrix"
                     }
 
+                    // Get changed files
+                    def json_changed_files = sh (script: "curl -s https://api.github.com/repos/rook/rook/pulls/${env.CHANGE_ID}/files", returnStdout: true).trim()
+                    def list = new groovy.json.JsonSlurper().parseText(json_changed_files)
+                    def changed_files = list.filename.join(",")
+                     echo ("changed files are: ${changed_files}")
+
+                    // Get PR title
+                    def title = evaluateJson(json,'${json.title}')
+
                     // extract which specific storage provider to test
-                    if (body.contains("[test cassandra]")) {
+                    if (body.contains("[test cassandra]") || title.contains("cassandra:")) {
                         env.testProvider = "cassandra"
-                    } else if (body.contains("[test ceph]")) {
+                    } else if (body.contains("[test ceph]") || title.contains("ceph:")) {
                         env.testProvider = "ceph"
-                    } else if (body.contains("[test cockroachdb]")) {
+                    } else if (body.contains("[test cockroachdb]") || title.contains("cockroachdb:")) {
                         env.testProvider = "cockroachdb"
-                    } else if (body.contains("[test edgefs]")) {
+                    } else if (body.contains("[test edgefs]") || title.contains("edgefs:")) {
                         env.testProvider = "edgefs"
-                    } else if (body.contains("[test nfs]")) {
+                    } else if (body.contains("[test nfs]") || title.contains("nfs:")) {
                         env.testProvider = "nfs"
-                    } else if (body.contains("[test yugabytedb]")) {
+                    } else if (body.contains("[test yugabytedb]") || title.contains("yugabytedb:")) {
                         env.testProvider = "yugabytedb"
+                    } else if (body.contains("[test]")) {
+                        env.shouldBuild = "true"
+                    } else if (!changed_files.contains(".go")) {
+                        echo ("No golang changes detected! Looking for .md, .yaml and .txt now.")
+                        if (changed_files.contains(".md")) {
+                            echo ("Documentation changes detected! Aborting.")
+                            env.shouldBuild = "false"
+                        } else if (changed_files.contains(".yaml")) {
+                            echo ("YAML changes detected! Aborting.")
+                            env.shouldBuild = "false"
+                        } else if (changed_files.contains(".txt")) {
+                            echo ("Text changes detected! Aborting.")
+                            env.shouldBuild = "false"
+                        }
+                    } else if (!changed_files.contains(".go")) {
+                        echo ("No code changes detected! Just building.")
+                        env.shouldTest = "false"
                     }
+
                     echo ("integration test provider: ${env.testProvider}")
                 }
             }
@@ -62,8 +97,12 @@ pipeline {
                 }
             }
             steps {
-                sh 'build/run make -j\$(nproc) vendor.check'
+                // quick check that no files are modified for the go modules
+                sh 'build/run make -j\$(nproc) mod.check'
+                sh 'git diff-index --quiet HEAD || { echo "CHANGES FOUND. You may need to run make clean"; git status -s; exit 1; }'
+                // run the build
                 sh 'build/run make -j\$(nproc) build.all'
+                sh 'git status'
             }
         }
         stage('Unit Tests') {
@@ -90,7 +129,11 @@ pipeline {
             }
             steps {
                 sh 'docker login -u="${DOCKER_USR}" -p="${DOCKER_PSW}"'
+                // quick check that go modules are tidied
+                sh 'build/run make -j\$(nproc) mod.check'
                 sh 'build/run make -j\$(nproc) -C build/release build BRANCH_NAME=${BRANCH_NAME} GIT_API_TOKEN=${GIT_PSW}'
+                sh 'git status'
+                sh 'git diff'
                 sh 'build/run make -j\$(nproc) -C build/release publish BRANCH_NAME=${BRANCH_NAME} AWS_ACCESS_KEY_ID=${AWS_USR} AWS_SECRET_ACCESS_KEY=${AWS_PSW} GIT_API_TOKEN=${GIT_PSW}'
                 // automatically promote the master builds
                 sh 'build/run make -j\$(nproc) -C build/release promote BRANCH_NAME=master CHANNEL=master AWS_ACCESS_KEY_ID=${AWS_USR} AWS_SECRET_ACCESS_KEY=${AWS_PSW}'
@@ -103,16 +146,22 @@ pipeline {
                     return env.shouldBuild != "false" && env.shouldTest != "false" && !params.skipIntegrationTests
                 }
             }
-            steps{
+            steps {
+                // If it's not a PR assume it is an "official" master or release build
+                script {
+                    if (env.isOfficialBuild == "") {
+                        env.isOfficialBuild = "true"
+                    }
+                }
                 sh 'cat _output/version | xargs tests/scripts/makeTestImages.sh  save amd64'
                 stash name: 'repo-amd64',includes: 'ceph-amd64.tar,cockroachdb-amd64.tar,cassandra-amd64.tar,nfs-amd64.tar,yugabytedb-amd64.tar,build/common.sh,_output/tests/linux_amd64/,_output/charts/,tests/scripts/'
-                script{
+                script {
                     def data = [
-                        "aws_1.13.x": "v1.13.12",
                         "aws_1.14.x": "v1.14.10",
-                        "aws_1.15.x": "v1.15.9",
-                        "aws_1.16.x": "v1.16.6",
-                        "aws_1.17.x": "v1.17.2"
+                        "aws_1.15.x": "v1.15.11",
+                        "aws_1.16.x": "v1.16.8",
+                        "aws_1.17.x": "v1.17.4",
+                        "aws_1.18.x": "v1.18.0"
                     ]
                     testruns = [:]
                     for (kv in mapToList(data)) {
@@ -146,7 +195,11 @@ pipeline {
             }
             steps {
                 sh 'docker login -u="${DOCKER_USR}" -p="${DOCKER_PSW}"'
+                // quick check that go modules are tidied
+                sh 'build/run make -j\$(nproc) mod.check'
                 sh 'build/run make -j\$(nproc) -C build/release build BRANCH_NAME=${BRANCH_NAME} TAG_WITH_SUFFIX=true GIT_API_TOKEN=${GIT_PSW}'
+                sh 'git status'
+                sh 'git diff'
                 sh 'build/run make -j\$(nproc) -C build/release publish BRANCH_NAME=${BRANCH_NAME} TAG_WITH_SUFFIX=true AWS_ACCESS_KEY_ID=${AWS_USR} AWS_SECRET_ACCESS_KEY=${AWS_PSW} GIT_API_TOKEN=${GIT_PSW}'
             }
         }
@@ -177,18 +230,23 @@ def RunIntegrationTest(k, v) {
                     sh "tests/scripts/kubeadm.sh up"
                     sh '''#!/bin/bash
                           export KUBECONFIG=$HOME/admin.conf
-                          tests/scripts/helm.sh up
-                          tests/scripts/localPathPV.sh'''
+                          tests/scripts/helm.sh up'''
                     try{
                         echo "Running full regression"
                         sh '''#!/bin/bash
                               set -o pipefail
                               export PATH="/tmp/rook-tests-scripts-helm/linux-amd64:$PATH" \
                                   KUBECONFIG=$HOME/admin.conf \
+                                  TEST_HELM_PATH=/tmp/rook-tests-scripts-helm/linux-amd64/helm \
+                                  TEST_ENV_NAME='''+"${k}"+''' \
+                                  TEST_BASE_DIR="WORKING_DIR" \
+                                  TEST_LOG_COLLECTION_LEVEL='''+"${env.getLogs}"+''' \
                                   STORAGE_PROVIDER_TESTS='''+"${env.testProvider}"+''' \
-                                  TEST_ARGUMENTS='''+"${env.testArgs}"+'''
+                                  TEST_ARGUMENTS='''+"${env.testArgs}"+''' \
+                                  TEST_IS_OFFICIAL_BUILD='''+"${env.isOfficialBuild}"+''' \
+                                  TEST_SCRATCH_DEVICE=/dev/xvdc
                               kubectl config view
-                              _output/tests/linux_amd64/integration -test.v -test.timeout 7200s --base_test_dir "" --host_type '''+"${k}"+''' --logs '''+"${env.getLogs}"+''' --helm /tmp/rook-tests-scripts-helm/linux-amd64/helm 2>&1 | tee _output/tests/integrationTests.log'''
+                              _output/tests/linux_amd64/integration -test.v -test.timeout 7200s 2>&1 | tee _output/tests/integrationTests.log'''
                     }
                     finally{
                         sh "journalctl -u kubelet > _output/tests/kubelet_${v}.log"

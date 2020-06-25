@@ -22,6 +22,7 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestPlacement_spec(t *testing.T) {
@@ -36,8 +37,14 @@ nodeAffinity:
           - bar
 tolerations:
   - key: foo
-    operator: Exists`)
-
+    operator: Exists
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        foo: bar`)
 	// convert the raw spec yaml into JSON
 	rawJSON, err := yaml.YAMLToJSON(specYaml)
 	assert.Nil(t, err)
@@ -70,46 +77,88 @@ tolerations:
 				Operator: v1.TolerationOpExists,
 			},
 		},
+		TopologySpreadConstraints: []v1.TopologySpreadConstraint{
+			{
+				MaxSkew:           1,
+				TopologyKey:       "zone",
+				WhenUnsatisfiable: "DoNotSchedule",
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+			},
+		},
 	}
 	assert.Equal(t, expected, placement)
 }
 
-func TestPlacement_ApplyToPodSpec(t *testing.T) {
+func TestPlacementApplyToPodSpec(t *testing.T) {
 	to := placementTestGetTolerations("foo", "bar")
 	na := placementTestGenerateNodeAffinity()
-	expected := &v1.PodSpec{Affinity: &v1.Affinity{NodeAffinity: na}, Tolerations: to}
+	antiaffinity := placementAntiAffinity("v1")
+	tc := placementTestGetTopologySpreadConstraints("zone")
+	expected := &v1.PodSpec{
+		Affinity:                  &v1.Affinity{NodeAffinity: na, PodAntiAffinity: antiaffinity},
+		Tolerations:               to,
+		TopologySpreadConstraints: tc,
+	}
 
 	var p Placement
 	var ps *v1.PodSpec
 
-	p = Placement{NodeAffinity: na, Tolerations: to}
+	p = Placement{
+		NodeAffinity:              na,
+		Tolerations:               to,
+		PodAntiAffinity:           antiaffinity,
+		TopologySpreadConstraints: tc,
+	}
 	ps = &v1.PodSpec{}
 	p.ApplyToPodSpec(ps)
 	assert.Equal(t, expected, ps)
+	assert.Equal(t, 1, len(ps.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution))
+
+	// Appending some other antiaffinity to the pod spec should not alter the original placement antiaffinity
+	otherAntiAffinity := placementAntiAffinity("v2")
+	ps.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+		ps.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+		otherAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution...)
+	assert.Equal(t, 1, len(antiaffinity.PreferredDuringSchedulingIgnoredDuringExecution))
 
 	// partial update
-	p = Placement{NodeAffinity: na}
-	ps = &v1.PodSpec{Tolerations: to}
+	p = Placement{NodeAffinity: na, PodAntiAffinity: antiaffinity}
+	ps = &v1.PodSpec{Tolerations: to, TopologySpreadConstraints: tc}
 	p.ApplyToPodSpec(ps)
 	assert.Equal(t, expected, ps)
 
 	// overridden attributes
-	p = Placement{NodeAffinity: na, Tolerations: to}
-	ps = &v1.PodSpec{Tolerations: placementTestGetTolerations("bar", "baz")}
+	p = Placement{
+		NodeAffinity:              na,
+		PodAntiAffinity:           antiaffinity,
+		Tolerations:               to,
+		TopologySpreadConstraints: tc,
+	}
+	ps = &v1.PodSpec{
+		Tolerations:               placementTestGetTolerations("bar", "baz"),
+		TopologySpreadConstraints: placementTestGetTopologySpreadConstraints("rack"),
+	}
 	p.ApplyToPodSpec(ps)
 	assert.Equal(t, expected, ps)
 
-	p = Placement{NodeAffinity: na}
+	p = Placement{NodeAffinity: na, PodAntiAffinity: antiaffinity}
 	nap := placementTestGenerateNodeAffinity()
 	nap.PreferredDuringSchedulingIgnoredDuringExecution[0].Weight = 5
-	ps = &v1.PodSpec{Affinity: &v1.Affinity{NodeAffinity: nap}, Tolerations: to}
+	ps = &v1.PodSpec{
+		Affinity:                  &v1.Affinity{NodeAffinity: nap},
+		Tolerations:               to,
+		TopologySpreadConstraints: tc,
+	}
 	p.ApplyToPodSpec(ps)
 	assert.Equal(t, expected, ps)
 }
 
-func TestPlacement_Merge(t *testing.T) {
+func TestPlacementMerge(t *testing.T) {
 	to := placementTestGetTolerations("foo", "bar")
 	na := placementTestGenerateNodeAffinity()
+	tc := placementTestGetTopologySpreadConstraints("zone")
 
 	var original, with, expected, merged Placement
 
@@ -125,9 +174,26 @@ func TestPlacement_Merge(t *testing.T) {
 	merged = original.Merge(with)
 	assert.Equal(t, expected, merged)
 
-	original = Placement{Tolerations: placementTestGetTolerations("bar", "baz")}
-	with = Placement{NodeAffinity: na, Tolerations: to}
-	expected = Placement{NodeAffinity: na, Tolerations: to}
+	original = Placement{}
+	with = Placement{TopologySpreadConstraints: tc}
+	expected = Placement{TopologySpreadConstraints: tc}
+	merged = original.Merge(with)
+	assert.Equal(t, expected, merged)
+
+	original = Placement{
+		Tolerations:               placementTestGetTolerations("bar", "baz"),
+		TopologySpreadConstraints: placementTestGetTopologySpreadConstraints("rack"),
+	}
+	with = Placement{
+		NodeAffinity:              na,
+		Tolerations:               to,
+		TopologySpreadConstraints: tc,
+	}
+	expected = Placement{
+		NodeAffinity:              na,
+		Tolerations:               to,
+		TopologySpreadConstraints: tc,
+	}
 	merged = original.Merge(with)
 	assert.Equal(t, expected, merged)
 }
@@ -141,6 +207,37 @@ func placementTestGetTolerations(key, value string) []v1.Toleration {
 			Value:             value,
 			Effect:            v1.TaintEffectNoSchedule,
 			TolerationSeconds: &ts,
+		},
+	}
+}
+
+func placementTestGetTopologySpreadConstraints(topologyKey string) []v1.TopologySpreadConstraint {
+	return []v1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       topologyKey,
+			WhenUnsatisfiable: "DoNotScheudule",
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"foo": "bar"},
+			},
+		},
+	}
+}
+
+func placementAntiAffinity(value string) *v1.PodAntiAffinity {
+	return &v1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []v1.WeightedPodAffinityTerm{
+			{
+				Weight: 50,
+				PodAffinityTerm: v1.PodAffinityTerm{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"app": value,
+						},
+					},
+					TopologyKey: v1.LabelHostname,
+				},
+			},
 		},
 	}
 }

@@ -21,7 +21,6 @@ package v1
 import (
 	v1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	rest "k8s.io/client-go/rest"
 )
 
@@ -32,8 +31,12 @@ type CephV1Interface interface {
 	CephClustersGetter
 	CephFilesystemsGetter
 	CephNFSesGetter
+	CephObjectRealmsGetter
 	CephObjectStoresGetter
 	CephObjectStoreUsersGetter
+	CephObjectZonesGetter
+	CephObjectZoneGroupsGetter
+	CephRBDMirrorsGetter
 }
 
 // CephV1Client is used to interact with features provided by the ceph.rook.io group.
@@ -61,12 +64,28 @@ func (c *CephV1Client) CephNFSes(namespace string) CephNFSInterface {
 	return newCephNFSes(c, namespace)
 }
 
+func (c *CephV1Client) CephObjectRealms(namespace string) CephObjectRealmInterface {
+	return newCephObjectRealms(c, namespace)
+}
+
 func (c *CephV1Client) CephObjectStores(namespace string) CephObjectStoreInterface {
 	return newCephObjectStores(c, namespace)
 }
 
 func (c *CephV1Client) CephObjectStoreUsers(namespace string) CephObjectStoreUserInterface {
 	return newCephObjectStoreUsers(c, namespace)
+}
+
+func (c *CephV1Client) CephObjectZones(namespace string) CephObjectZoneInterface {
+	return newCephObjectZones(c, namespace)
+}
+
+func (c *CephV1Client) CephObjectZoneGroups(namespace string) CephObjectZoneGroupInterface {
+	return newCephObjectZoneGroups(c, namespace)
+}
+
+func (c *CephV1Client) CephRBDMirrors(namespace string) CephRBDMirrorInterface {
+	return newCephRBDMirrors(c, namespace)
 }
 
 // NewForConfig creates a new CephV1Client for the given config.
@@ -101,7 +120,7 @@ func setConfigDefaults(config *rest.Config) error {
 	gv := v1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
-	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()

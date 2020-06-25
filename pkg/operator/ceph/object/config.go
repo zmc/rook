@@ -25,7 +25,6 @@ import (
 	"github.com/pkg/errors"
 	cephconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -36,10 +35,11 @@ caps mon = "allow rw"
 caps osd = "allow rwx"
 `
 
-	certVolumeName = "rook-ceph-rgw-cert"
-	certDir        = "/etc/ceph/private"
-	certKeyName    = "cert"
-	certFilename   = "rgw-cert.pem"
+	certVolumeName            = "rook-ceph-rgw-cert"
+	certDir                   = "/etc/ceph/private"
+	certKeyName               = "cert"
+	certFilename              = "rgw-cert.pem"
+	rgwPortInternalPort int32 = 8080
 )
 
 var (
@@ -51,6 +51,9 @@ func (c *clusterConfig) portString() string {
 
 	port := c.store.Spec.Gateway.Port
 	if port != 0 {
+		if !c.clusterSpec.Network.IsHost() {
+			port = rgwPortInternalPort
+		}
 		portString = fmt.Sprintf("port=%s", strconv.Itoa(int(port)))
 	}
 	if c.store.Spec.Gateway.SecurePort != 0 && c.store.Spec.Gateway.SSLCertificateRef != "" {
@@ -77,7 +80,7 @@ func (c *clusterConfig) generateKeyring(rgwConfig *rgwConfig) (string, error) {
 	user := generateCephXUser(rgwConfig.ResourceName)
 	/* TODO: this says `osd allow rwx` while template says `osd allow *`; which is correct? */
 	access := []string{"osd", "allow rwx", "mon", "allow rw"}
-	s := keyring.GetSecretStore(c.context, c.store.Namespace, &c.ownerRef)
+	s := keyring.GetSecretStore(c.context, c.store.Namespace, c.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {
@@ -86,14 +89,6 @@ func (c *clusterConfig) generateKeyring(rgwConfig *rgwConfig) (string, error) {
 
 	keyring := fmt.Sprintf(keyringTemplate, user, key)
 	return keyring, s.CreateOrUpdate(rgwConfig.ResourceName, keyring)
-}
-
-func (c *clusterConfig) associateKeyring(existingKeyring string, ownerRef *metav1.OwnerReference) error {
-	resourceName := ownerRef.Name
-
-	s := keyring.GetSecretStore(c.context, c.store.Namespace, ownerRef)
-
-	return s.CreateOrUpdate(resourceName, existingKeyring)
 }
 
 func (c *clusterConfig) setDefaultFlagsMonConfigStore(rgwName string) error {
@@ -114,5 +109,17 @@ func (c *clusterConfig) setDefaultFlagsMonConfigStore(rgwName string) error {
 		}
 	}
 
+	return nil
+}
+
+func (c *clusterConfig) deleteFlagsMonConfigStore(rgwName string) error {
+	monStore := cephconfig.GetMonStore(c.context, c.store.Namespace)
+	who := generateCephXUser(rgwName)
+	err := monStore.DeleteDaemon(who)
+	if err != nil {
+		return errors.Wrapf(err, "failed to delete rgw config for %q in mon configuration database", who)
+	}
+
+	logger.Infof("successfully deleted rgw config for %q in mon configuration database", who)
 	return nil
 }

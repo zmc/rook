@@ -29,6 +29,10 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
+const (
+	localPathPVCmd = "tests/scripts/localPathPV.sh"
+)
+
 // *************************************************************
 // *** Major scenarios tested by the MultiClusterDeploySuite ***
 // Setup
@@ -36,7 +40,7 @@ import (
 // Monitors
 // - One mon in each cluster
 // OSDs
-// - Bluestore running on a directory
+// - Bluestore running on a raw block device
 // Block
 // - Create a pool in each cluster
 // - Mount/unmount a block device through the dynamic provisioner
@@ -134,11 +138,11 @@ func NewMCTestOperations(t func() *testing.T, namespace1 string, namespace2 stri
 	require.NoError(t(), err)
 	checkIfShouldRunForMinimalTestMatrix(t, kh, multiClusterMinimalTestVersion)
 
-	i := installer.NewCephInstaller(t, kh.Clientset, false, installer.VersionMaster, installer.NautilusVersion)
+	cleanupHost := false
+	i := installer.NewCephInstaller(t, kh.Clientset, false, "", installer.VersionMaster, installer.NautilusVersion, cleanupHost)
 
 	op := &MCTestOperations{i, kh, t, namespace1, namespace2, installer.SystemNamespace(namespace1), "", false}
-	p := kh.IsStorageClassPresent("manual")
-	if p == nil && kh.VersionAtLeast("v1.13.0") {
+	if kh.VersionAtLeast("v1.13.0") {
 		op.testOverPVC = true
 		op.storageClassName = "manual"
 	}
@@ -149,6 +153,12 @@ func NewMCTestOperations(t func() *testing.T, namespace1 string, namespace2 stri
 // SetUpRook is wrapper for setting up multiple rook clusters.
 func (o MCTestOperations) Setup() {
 	var err error
+	if o.testOverPVC {
+		cmdArgs := utils.CommandArgs{Command: localPathPVCmd, CmdArgs: []string{installer.TestScratchDevice()}}
+		cmdOut := utils.ExecuteCommand(cmdArgs)
+		require.NoError(o.T(), cmdOut.Err)
+	}
+
 	err = o.installer.CreateCephOperator(installer.SystemNamespace(o.namespace1))
 	require.NoError(o.T(), err)
 
@@ -183,7 +193,7 @@ func (o MCTestOperations) Teardown() {
 func (o MCTestOperations) startCluster(namespace, store string) error {
 	logger.Infof("starting cluster %s", namespace)
 	err := o.installer.CreateRookCluster(namespace, o.systemNamespace, store, o.testOverPVC, o.storageClassName,
-		cephv1.MonSpec{Count: 1, AllowMultiplePerNode: true}, true, 1, installer.NautilusVersion)
+		cephv1.MonSpec{Count: 1, AllowMultiplePerNode: true}, true, false, installer.NautilusVersion)
 	if err != nil {
 		o.T().Fail()
 		o.installer.GatherAllRookLogs(o.T().Name(), namespace, o.systemNamespace)

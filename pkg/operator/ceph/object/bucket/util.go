@@ -33,6 +33,7 @@ import (
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephclientset "github.com/rook/rook/pkg/client/clientset/versioned/typed/ceph.rook.io/v1"
+	cephObject "github.com/rook/rook/pkg/operator/ceph/object"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-bucket-prov")
@@ -40,18 +41,20 @@ var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-bucket-prov")
 const (
 	genUserLen           = 8
 	cephUser             = "cephUser"
-	provisionerName      = "ceph.rook.io/bucket"
 	prefixObjectStoreSvc = "rook-ceph-rgw"
 	accessKeyIdKey       = "accessKeyID"
 	secretSecretKeyKey   = "secretAccessKey"
 	objectStoreName      = "objectStoreName"
 	objectStoreNamespace = "objectStoreNamespace"
+	objectStoreEndpoint  = "endpoint"
 )
 
 func NewBucketController(cfg *rest.Config, p *Provisioner) (*provisioner.Provisioner, error) {
 	const allNamespaces = ""
-	logger.Infof("Ceph Bucket Provisioner launched")
-	return provisioner.NewProvisioner(cfg, provisionerName, p, allNamespaces)
+	provName := cephObject.GetObjectBucketProvisioner(p.context, p.namespace)
+
+	logger.Infof("ceph bucket provisioner launched watching for provisioner %q", provName)
+	return provisioner.NewProvisioner(cfg, provName, p, allNamespaces)
 }
 
 // Return the secret namespace and name from the passed storage class.
@@ -80,6 +83,10 @@ func getObjectStoreNameSpace(sc *storagev1.StorageClass) string {
 	return sc.Parameters[objectStoreNamespace]
 }
 
+func getObjectStoreEndpoint(sc *storagev1.StorageClass) string {
+	return sc.Parameters[objectStoreEndpoint]
+}
+
 func getBucketName(ob *bktv1alpha1.ObjectBucket) string {
 	return ob.Spec.Endpoint.BucketName
 }
@@ -99,9 +106,9 @@ func getObjectStore(c cephclientset.CephV1Interface, namespace, name string) (*c
 	store, err := c.CephObjectStores(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			return nil, errors.Wrapf(err, "cephObjectStore not found")
+			return nil, errors.Wrap(err, "cephObjectStore not found")
 		}
-		return nil, errors.Wrapf(err, "error getting cephObjectStore")
+		return nil, errors.Wrap(err, "error getting cephObjectStore")
 	}
 	return store, err
 }
@@ -111,9 +118,9 @@ func getService(c kubernetes.Interface, namespace, name string) (*v1.Service, er
 	svc, err := c.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			return nil, errors.Wrapf(err, "cephObjectStore service not found")
+			return nil, errors.Wrap(err, "cephObjectStore service not found")
 		}
-		return nil, errors.Wrapf(err, "error getting cephObjectStore service")
+		return nil, errors.Wrap(err, "error getting cephObjectStore service")
 	}
 	return svc, nil
 }

@@ -84,12 +84,44 @@ func TestValidatePool(t *testing.T) {
 	err = ValidatePool(context, &p)
 	assert.Nil(t, err)
 
+	// Tests with various compression modes
+	// succeed with compression mode "none"
+	p = cephv1.CephBlockPool{ObjectMeta: metav1.ObjectMeta{Name: "mypool", Namespace: "myns"}}
+	p.Spec.Replicated.Size = 1
+	p.Spec.Replicated.RequireSafeReplicaSize = false
+	p.Spec.CompressionMode = "none"
+	err = ValidatePool(context, &p)
+	assert.Nil(t, err)
+
+	// succeed with compression mode "aggressive"
+	p = cephv1.CephBlockPool{ObjectMeta: metav1.ObjectMeta{Name: "mypool", Namespace: "myns"}}
+	p.Spec.Replicated.Size = 1
+	p.Spec.Replicated.RequireSafeReplicaSize = false
+	p.Spec.CompressionMode = "aggressive"
+	err = ValidatePool(context, &p)
+	assert.Nil(t, err)
+
+	// fail with compression mode "unsupported"
+	p = cephv1.CephBlockPool{ObjectMeta: metav1.ObjectMeta{Name: "mypool", Namespace: "myns"}}
+	p.Spec.Replicated.Size = 1
+	p.Spec.Replicated.RequireSafeReplicaSize = false
+	p.Spec.CompressionMode = "unsupported"
+	err = ValidatePool(context, &p)
+	assert.Error(t, err)
+
+	// succeed with ec pool and valid compression mode
+	p = cephv1.CephBlockPool{ObjectMeta: metav1.ObjectMeta{Name: "mypool", Namespace: "myns"}}
+	p.Spec.ErasureCoded.CodingChunks = 1
+	p.Spec.ErasureCoded.DataChunks = 2
+	p.Spec.CompressionMode = "passive"
+	err = ValidatePool(context, &p)
+	assert.Nil(t, err)
 }
 
 func TestValidateCrushProperties(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		if args[1] == "crush" && args[2] == "dump" {
 			return `{"types":[{"type_id": 0,"name": "osd"}],"buckets":[{"id": -1,"name":"default"},{"id": -2,"name":"good"}]}`, nil
@@ -127,7 +159,8 @@ func TestValidateCrushProperties(t *testing.T) {
 
 func TestCreatePool(t *testing.T) {
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName, command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			logger.Infof("Command: %s %v", command, args)
 			if command == "ceph" && args[1] == "erasure-code-profile" {
 				return `{"k":"2","m":"1","plugin":"jerasure","technique":"reed_sol_van"}`, nil
 			}
@@ -145,6 +178,8 @@ func TestCreatePool(t *testing.T) {
 
 	// succeed with EC
 	p.Spec.Replicated.Size = 0
+	p.Spec.ErasureCoded.CodingChunks = 1
+	p.Spec.ErasureCoded.DataChunks = 2
 	err = createPool(context, p)
 	assert.Nil(t, err)
 }
@@ -152,7 +187,7 @@ func TestCreatePool(t *testing.T) {
 func TestDeletePool(t *testing.T) {
 	failOnDelete := false
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName, command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
 			if command == "ceph" && args[1] == "lspools" {
 				return `[{"poolnum":1,"poolname":"mypool"}]`, nil
 			} else if command == "ceph" && args[1] == "pool" && args[2] == "get" {
@@ -161,7 +196,7 @@ func TestDeletePool(t *testing.T) {
 
 			return "", nil
 		},
-		MockExecuteCommandWithOutput: func(debug bool, actionName string, command string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			emptyPool := "{\"images\":{\"count\":0,\"provisioned_bytes\":0,\"snap_count\":0},\"trash\":{\"count\":1,\"provisioned_bytes\":2048,\"snap_count\":0}}"
 			p := "{\"images\":{\"count\":1,\"provisioned_bytes\":1024,\"snap_count\":0},\"trash\":{\"count\":1,\"provisioned_bytes\":2048,\"snap_count\":0}}"
 			logger.Infof("Command: %s %v", command, args)
@@ -236,9 +271,9 @@ func TestCephBlockPoolController(t *testing.T) {
 	}
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName, command, outfile string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
 			if args[0] == "status" {
-				return `{"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
 			}
 
 			return "", nil
@@ -285,9 +320,16 @@ func TestCephBlockPoolController(t *testing.T) {
 		},
 		Status: cephv1.ClusterStatus{
 			Phase: "",
+			CephVersion: &cephv1.ClusterVersion{
+				Version: "14.2.9-0",
+			},
+			CephStatus: &cephv1.CephStatus{
+				Health: "",
+			},
 		},
 	}
-	s.AddKnownTypes(cephv1.SchemeGroupVersion, cephCluster)
+
+	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{}, &cephv1.CephClusterList{})
 
 	// Create CephCluster for updateCephBlockPoolStatus()
 	_, err = c.RookClientset.CephV1().CephClusters(namespace).Create(cephCluster)
@@ -307,12 +349,26 @@ func TestCephBlockPoolController(t *testing.T) {
 	// SUCCESS! The CephCluster is ready
 	//
 	cephCluster.Status.Phase = k8sutil.ReadyStatus
+	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
+
 	objects := []runtime.Object{
 		pool,
 		cephCluster,
 	}
 	// Create a fake client to mock API calls.
 	cl = fake.NewFakeClient(objects...)
+
+	executor = &exectest.MockExecutor{
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			if args[0] == "status" {
+				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+			}
+
+			return "", nil
+		},
+	}
+	c.Executor = executor
+
 	// Create a ReconcileCephBlockPool object with the scheme and fake client.
 	r = &ReconcileCephBlockPool{client: cl, scheme: s, context: c}
 

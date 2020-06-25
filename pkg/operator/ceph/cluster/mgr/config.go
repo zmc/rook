@@ -21,7 +21,6 @@ import (
 
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
-	apps "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -30,7 +29,7 @@ const (
 	keyringTemplate = `
 [mgr.%s]
 	key = %s
-	caps mon = "allow *"
+	caps mon = "allow profile mgr"
 	caps mds = "allow *"
 	caps osd = "allow *"
 `
@@ -58,8 +57,7 @@ func (c *Cluster) dashboardPort() int {
 
 func (c *Cluster) generateKeyring(m *mgrConfig) (string, error) {
 	user := fmt.Sprintf("mgr.%s", m.DaemonID)
-	/* TODO: the access string here does not match the access from the keyring template. should they match? */
-	access := []string{"mon", "allow *", "mds", "allow *", "osd", "allow *"}
+	access := []string{"mon", "allow profile mgr", "mds", "allow *", "osd", "allow *"}
 	s := keyring.GetSecretStore(c.context, c.Namespace, &c.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
@@ -79,9 +77,4 @@ func (c *Cluster) generateKeyring(m *mgrConfig) (string, error) {
 
 	keyring := fmt.Sprintf(keyringTemplate, m.DaemonID, key)
 	return keyring, s.CreateOrUpdate(m.ResourceName, keyring)
-}
-
-func (c *Cluster) associateKeyring(existingKeyring string, d *apps.Deployment) error {
-	s := keyring.GetSecretStoreForDeployment(c.context, d)
-	return s.CreateOrUpdate(d.GetName(), existingKeyring)
 }

@@ -20,9 +20,12 @@ package objectuser
 import (
 	"context"
 	"fmt"
+	"reflect"
 
+	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -34,6 +37,7 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/object"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	corev1 "k8s.io/api/core/v1"
@@ -44,19 +48,30 @@ import (
 )
 
 const (
-	appName        = object.AppName
-	controllerName = "ceph-object-store-user-controller"
+	appName             = object.AppName
+	controllerName      = "ceph-object-store-user-controller"
+	cephObjectStoreKind = "CephObjectStoreUser"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 
+var cephObjectStoreUserKind = reflect.TypeOf(cephv1.CephObjectStoreUser{}).Name()
+
+// Sets the type meta for the controller main object
+var controllerTypeMeta = metav1.TypeMeta{
+	Kind:       cephObjectStoreUserKind,
+	APIVersion: fmt.Sprintf("%s/%s", cephv1.CustomResourceGroup, cephv1.Version),
+}
+
 // ReconcileObjectStoreUser reconciles a ObjectStoreUser object
 type ReconcileObjectStoreUser struct {
-	client     client.Client
-	scheme     *runtime.Scheme
-	context    *clusterd.Context
-	objContext *object.Context
-	userConfig object.ObjectUser
+	client          client.Client
+	scheme          *runtime.Scheme
+	context         *clusterd.Context
+	objContext      *object.Context
+	userConfig      object.ObjectUser
+	cephClusterSpec *cephv1.ClusterSpec
+	clusterInfo     *cephconfig.ClusterInfo
 }
 
 // Add creates a new CephObjectStoreUser Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -84,18 +99,19 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
+	logger.Info("successfully started")
 
 	// Watch for changes on the CephObjectStoreUser CRD object
-	err = c.Watch(&source.Kind{Type: &cephv1.CephObjectStoreUser{}}, &handler.EnqueueRequestForObject{}, opcontroller.WatchUpdatePredicate())
+	err = c.Watch(&source.Kind{Type: &cephv1.CephObjectStoreUser{TypeMeta: controllerTypeMeta}}, &handler.EnqueueRequestForObject{}, opcontroller.WatchControllerPredicate())
 	if err != nil {
 		return err
 	}
 
 	// Watch secrets
-	err = c.Watch(&source.Kind{Type: &corev1.Secret{}}, &handler.EnqueueRequestForOwner{
+	err = c.Watch(&source.Kind{Type: &corev1.Secret{TypeMeta: metav1.TypeMeta{Kind: "Secret", APIVersion: corev1.SchemeGroupVersion.String()}}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
 		OwnerType:    &cephv1.CephObjectStoreUser{},
-	}, opcontroller.WatchPredicateForNonCRDObject())
+	}, opcontroller.WatchPredicateForNonCRDObject(&cephv1.CephObjectStoreUser{TypeMeta: controllerTypeMeta}, mgr.GetScheme()))
 	if err != nil {
 		return err
 	}
@@ -132,21 +148,16 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 
 	// The CR was just created, initializing status fields
 	if cephObjectStoreUser.Status == nil {
-		cephObjectStoreUser.Status = &cephv1.Status{}
-		cephObjectStoreUser.Status.Phase = k8sutil.Created
-		err := opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-		if err != nil {
-			return reconcile.Result{}, errors.Wrap(err, "failed to set status")
-		}
+		updateStatus(r.client, request.NamespacedName, k8sutil.Created)
 	}
 
 	// Make sure a CephCluster is present otherwise do nothing
-	_, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName)
+	cephCluster, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
 	if !isReadyToReconcile {
 		// This handles the case where the Ceph Cluster is gone and we want to delete that CR
 		// We skip the deleteUser() function since everything is gone already
 		//
-		// ALso, only remove the finalizer if the CephCluster is gone
+		// Also, only remove the finalizer if the CephCluster is gone
 		// If not, we should wait for it to be ready
 		// This handles the case where the operator is not ready to accept Ceph command but the cluster exists
 		if !cephObjectStoreUser.GetDeletionTimestamp().IsZero() && !cephClusterExists {
@@ -159,16 +170,28 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 			// Return and do not requeue. Successful deletion.
 			return reconcile.Result{}, nil
 		}
-
-		logger.Debugf("CephCluster resource not ready in namespace %q, retrying in %q.", request.NamespacedName.Namespace, opcontroller.WaitForRequeueIfCephClusterNotReadyAfter.String())
 		return reconcileResponse, nil
 	}
+	r.cephClusterSpec = &cephCluster.Spec
 
 	// Set a finalizer so we can do cleanup before the object goes away
 	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephObjectStoreUser)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
 	}
+
+	// Populate clusterInfo
+	// Always populate it during each reconcile
+	var clusterInfo *cephconfig.ClusterInfo
+	if r.cephClusterSpec.External.Enable {
+		clusterInfo = mon.PopulateExternalClusterInfo(r.context, request.NamespacedName.Namespace)
+	} else {
+		clusterInfo, _, _, err = mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
+		if err != nil {
+			return reconcile.Result{}, errors.Wrap(err, "failed to populate cluster info")
+		}
+	}
+	r.clusterInfo = clusterInfo
 
 	// validate isObjectStoreInitialized
 	objContext, err := r.isObjectStoreInitialized(cephObjectStoreUser)
@@ -183,12 +206,9 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 			// Return and do not requeue. Successful deletion.
 			return reconcile.Result{}, nil
 		}
-		logger.Debugf("ObjectStore resource not ready in namespace %q, retrying in %q. %v", request.NamespacedName.Namespace, opcontroller.WaitForRequeueIfCephClusterNotReadyAfter.String(), err)
-		cephObjectStoreUser.Status.Phase = k8sutil.ReconcileFailedStatus
-		err := opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-		if err != nil {
-			return reconcile.Result{}, errors.Wrap(err, "failed to set status")
-		}
+		logger.Debugf("ObjectStore resource not ready in namespace %q, retrying in %q. %v",
+			request.NamespacedName.Namespace, opcontroller.WaitForRequeueIfCephClusterNotReady.RequeueAfter.String(), err)
+		updateStatus(r.client, request.NamespacedName, k8sutil.ReconcileFailedStatus)
 		return opcontroller.WaitForRequeueIfCephClusterNotReady, nil
 	}
 	// Set the object store context
@@ -198,10 +218,15 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 	userConfig := generateUserConfig(cephObjectStoreUser)
 	r.userConfig = userConfig
 
+	// Set the cephx external username if the CephCluster is external
+	if r.cephClusterSpec.External.Enable {
+		r.objContext.RunAsUser = r.clusterInfo.ExternalCred.Username
+	}
+
 	// DELETE: the CR was deleted
 	if !cephObjectStoreUser.GetDeletionTimestamp().IsZero() {
 		logger.Debugf("deleting pool %q", cephObjectStoreUser.Name)
-		err := deleteUser(r.context, cephObjectStoreUser)
+		err := r.deleteUser(cephObjectStoreUser)
 		if err != nil {
 			return reconcile.Result{}, errors.Wrapf(err, "failed to delete ceph object user %q", cephObjectStoreUser.Name)
 		}
@@ -217,51 +242,28 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 	}
 
 	// validate the user settings
-	err = ValidateUser(cephObjectStoreUser)
+	err = r.validateUser(cephObjectStoreUser)
 	if err != nil {
-		cephObjectStoreUser.Status.Phase = k8sutil.ReconcileFailedStatus
-		err := opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-		if err != nil {
-			return reconcile.Result{}, errors.Wrap(err, "failed to set status")
-		}
+		updateStatus(r.client, request.NamespacedName, k8sutil.ReconcileFailedStatus)
 		return reconcile.Result{}, errors.Wrapf(err, "invalid pool CR %q spec", cephObjectStoreUser.Name)
-	}
-
-	// Start object reconciliation, updating status for this
-	cephObjectStoreUser.Status.Phase = k8sutil.ReconcilingStatus
-	err = opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to set status")
 	}
 
 	// CREATE/UPDATE CEPH USER
 	reconcileResponse, err = r.reconcileCephUser(cephObjectStoreUser)
 	if err != nil {
-		cephObjectStoreUser.Status.Phase = k8sutil.ReconcileFailedStatus
-		errStatus := opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-		if errStatus != nil {
-			return reconcile.Result{}, errors.Wrap(errStatus, "failed to set status")
-		}
+		updateStatus(r.client, request.NamespacedName, k8sutil.ReconcileFailedStatus)
 		return reconcileResponse, err
 	}
 
 	// CREATE/UPDATE KUBERNETES SECRET
 	reconcileResponse, err = r.reconcileCephUserSecret(cephObjectStoreUser)
 	if err != nil {
-		cephObjectStoreUser.Status.Phase = k8sutil.ReconcileFailedStatus
-		errStatus := opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-		if errStatus != nil {
-			return reconcile.Result{}, errors.Wrap(errStatus, "failed to set status")
-		}
+		updateStatus(r.client, request.NamespacedName, k8sutil.ReconcileFailedStatus)
 		return reconcileResponse, err
 	}
 
 	// Set Ready status, we are done reconciling
-	cephObjectStoreUser.Status.Phase = k8sutil.ReadyStatus
-	err = opcontroller.UpdateStatus(r.client, cephObjectStoreUser)
-	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to set status")
-	}
+	updateStatus(r.client, request.NamespacedName, k8sutil.ReadyStatus)
 
 	// Return and do not requeue
 	logger.Debug("done reconciling")
@@ -306,6 +308,13 @@ func (r *ReconcileObjectStoreUser) createCephUser(u *cephv1.CephObjectStoreUser)
 
 func (r *ReconcileObjectStoreUser) isObjectStoreInitialized(u *cephv1.CephObjectStoreUser) (*object.Context, error) {
 	objContext := object.NewContext(r.context, u.Spec.Store, u.Namespace)
+
+	// If the cluster is external just return
+	// we don't need to validate u.Spec.Store
+	if r.cephClusterSpec.External.Enable {
+		return objContext, nil
+	}
+
 	err := r.objectStoreInitialized(u)
 	if err != nil {
 		return objContext, errors.Wrap(err, "failed to detect if object store is initialized")
@@ -377,12 +386,14 @@ func (r *ReconcileObjectStoreUser) reconcileCephUserSecret(cephObjectStoreUser *
 }
 
 func (r *ReconcileObjectStoreUser) objectStoreInitialized(cephObjectStoreUser *cephv1.CephObjectStoreUser) error {
-	err := r.getObjectStore(cephObjectStoreUser)
+	err := r.getObjectStore(cephObjectStoreUser.Spec.Store)
 	if err != nil {
 		return err
 	}
 	logger.Debug("CephObjectStore exists")
 
+	// There are no pods running when the cluster is external
+	// Unless you pass the admin key...
 	pods, err := r.getRgwPodList(cephObjectStoreUser)
 	if err != nil {
 		return err
@@ -390,25 +401,32 @@ func (r *ReconcileObjectStoreUser) objectStoreInitialized(cephObjectStoreUser *c
 
 	// check if at least one pod is running
 	if len(pods.Items) > 0 {
-		logger.Debugf("CephObjectStore %q is running with %d pods. %v", cephObjectStoreUser.Name, len(pods.Items), pods)
+		logger.Debugf("CephObjectStore %q is running with %d pods", cephObjectStoreUser.Name, len(pods.Items))
 		return nil
 	}
 
 	return errors.New("no rgw pod found")
 }
 
-func (r *ReconcileObjectStoreUser) getObjectStore(cephObjectStoreUser *cephv1.CephObjectStoreUser) error {
+func (r *ReconcileObjectStoreUser) getObjectStore(storeName string) error {
 	// check if CephObjectStore CR is created
 	objectStores := &cephv1.CephObjectStoreList{}
 	err := r.client.List(context.TODO(), objectStores)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			return errors.Wrapf(err, "CephObjectStore %q could not be found", cephObjectStoreUser.Name)
+			return errors.Wrapf(err, "CephObjectStore %q could not be found", storeName)
 		}
 		return errors.Wrap(err, "failed to get CephObjectStore")
 	}
 
-	return nil
+	for _, store := range objectStores.Items {
+		if store.Name == storeName {
+			logger.Infof("CephObjectStore %q found", storeName)
+			return nil
+		}
+	}
+
+	return errors.Errorf("CephObjectStore %q could not be found", storeName)
 }
 
 func (r *ReconcileObjectStoreUser) getRgwPodList(cephObjectStoreUser *cephv1.CephObjectStoreUser) (*corev1.PodList, error) {
@@ -433,35 +451,55 @@ func (r *ReconcileObjectStoreUser) getRgwPodList(cephObjectStoreUser *cephv1.Cep
 }
 
 // Delete the user
-func deleteUser(context *clusterd.Context, u *cephv1.CephObjectStoreUser) error {
-	objContext := object.NewContext(context, u.Spec.Store, u.Namespace)
-	_, rgwerr, err := object.DeleteUser(objContext, u.Name)
+func (r *ReconcileObjectStoreUser) deleteUser(u *cephv1.CephObjectStoreUser) error {
+	output, err := object.DeleteUser(r.objContext, u.Name)
 	if err != nil {
-		if rgwerr == 3 {
-			logger.Infof("ceph object user %q does not exist in store %q", u.Name, u.Spec.Store)
-		} else {
-			return errors.Wrapf(err, "failed to delete ceph object user %q", u.Name)
-		}
+		return errors.Wrapf(err, "failed to delete ceph object user %q. %v", u.Name, output)
 	}
 
 	logger.Infof("ceph object user %q deleted successfully", u.Name)
 	return nil
 }
 
-// ValidateUser validates the user arguments
-func ValidateUser(u *cephv1.CephObjectStoreUser) error {
+// validateUser validates the user arguments
+func (r *ReconcileObjectStoreUser) validateUser(u *cephv1.CephObjectStoreUser) error {
 	if u.Name == "" {
 		return errors.New("missing name")
 	}
 	if u.Namespace == "" {
 		return errors.New("missing namespace")
 	}
-	if u.Spec.Store == "" {
-		return errors.New("missing store")
+	if !r.cephClusterSpec.External.Enable {
+		if u.Spec.Store == "" {
+			return errors.New("missing store")
+		}
 	}
 	return nil
 }
 
 func labelsForRgw(name string) map[string]string {
 	return map[string]string{"rgw": name, k8sutil.AppAttr: appName}
+}
+
+// updateStatus updates an object with a given status
+func updateStatus(client client.Client, name types.NamespacedName, status string) {
+	user := &cephv1.CephObjectStoreUser{}
+	if err := client.Get(context.TODO(), name, user); err != nil {
+		if kerrors.IsNotFound(err) {
+			logger.Debug("CephObjectStoreUser resource not found. Ignoring since object must be deleted.")
+			return
+		}
+		logger.Warningf("failed to retrieve object store user %q to update status to %q. %v", name, status, err)
+		return
+	}
+	if user.Status == nil {
+		user.Status = &cephv1.Status{}
+	}
+
+	user.Status.Phase = status
+	if err := opcontroller.UpdateStatus(client, user); err != nil {
+		logger.Errorf("failed to set object store user %q status to %q. %v", name, status, err)
+		return
+	}
+	logger.Debugf("object store user %q status updated to %q", name, status)
 }

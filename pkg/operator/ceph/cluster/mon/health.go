@@ -17,6 +17,7 @@ limitations under the License.
 package mon
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -81,16 +83,33 @@ func (c *Cluster) checkHealth() error {
 
 	logger.Debugf("Checking health for mons in cluster. %s", c.ClusterInfo.Name)
 
-	// connect to the mons
-	// get the status and check for quorum
-	quorumStatus, err := client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name, client.IsDebugLevel())
-	if err != nil {
-		return errors.Wrapf(err, "failed to get mon quorum status")
-	}
-	logger.Debugf("Mon quorum status: %+v", quorumStatus)
+	// For an external connection we use a special function to get the status
 	if c.spec.External.Enable {
+		var err error
+		var quorumStatus client.MonStatusResponse
+		// backward compatibility for existing deployments on 1.2 that are using the admin key
+		if c.ClusterInfo.AdminSecret != AdminSecretName {
+			quorumStatus, err = client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name)
+			if err != nil {
+				return errors.Wrap(err, "failed to get external mon quorum status")
+			}
+		} else {
+			quorumStatus, err = client.GetMonQuorumStatusHealth(c.context, c.ClusterInfo.Name, c.ClusterInfo.ExternalCred.Username)
+			if err != nil {
+				return errors.Wrap(err, "failed to get external mon quorum status")
+			}
+		}
+
 		return c.handleExternalMonStatus(quorumStatus)
 	}
+
+	// connect to the mons
+	// get the status and check for quorum
+	quorumStatus, err := client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name)
+	if err != nil {
+		return errors.Wrap(err, "failed to get mon quorum status")
+	}
+	logger.Debugf("Mon quorum status: %+v", quorumStatus)
 
 	// Use a local mon count in case the user updates the crd in another goroutine.
 	// We need to complete a health check with a consistent value.
@@ -116,13 +135,13 @@ func (c *Cluster) checkHealth() error {
 			// when the mon isn't in the clusterInfo, but is in quorum and there are
 			// enough mons, remove it else remove it on the next run
 			if inQuorum && len(quorumStatus.MonMap.Mons) > desiredMonCount {
-				logger.Warningf("mon %s not in source of truth but in quorum, removing", mon.Name)
+				logger.Warningf("mon %q not in source of truth but in quorum, removing", mon.Name)
 				if err := c.removeMon(mon.Name); err != nil {
 					logger.Warningf("failed to remove mon %q. %v", mon.Name, err)
 				}
 			} else {
 				logger.Warningf(
-					"mon %s not in source of truth and not in quorum, not enough mons to remove now (wanted: %d, current: %d)",
+					"mon %q not in source of truth and not in quorum, not enough mons to remove now (wanted: %d, current: %d)",
 					mon.Name,
 					desiredMonCount,
 					len(quorumStatus.MonMap.Mons),
@@ -131,38 +150,42 @@ func (c *Cluster) checkHealth() error {
 		}
 
 		if inQuorum {
-			logger.Debugf("mon %s found in quorum", mon.Name)
+			logger.Debugf("mon %q found in quorum", mon.Name)
 			// delete the "timeout" for a mon if the pod is in quorum again
 			if _, ok := c.monTimeoutList[mon.Name]; ok {
 				delete(c.monTimeoutList, mon.Name)
-				logger.Infof("mon %s is back in quorum, removed from mon out timeout list", mon.Name)
+				logger.Infof("mon %q is back in quorum, removed from mon out timeout list", mon.Name)
 			}
-		} else {
-			logger.Debugf("mon %s NOT found in quorum. Mon quorum status: %+v", mon.Name, quorumStatus)
-			allMonsInQuorum = false
-
-			// If not yet set, add the current time, for the timeout
-			// calculation, to the list
-			if _, ok := c.monTimeoutList[mon.Name]; !ok {
-				c.monTimeoutList[mon.Name] = time.Now()
-			}
-
-			// when the timeout for the mon has been reached, continue to the
-			// normal failover/delete mon pod part of the code
-			if time.Since(c.monTimeoutList[mon.Name]) <= MonOutTimeout {
-				timeToFailover := int(MonOutTimeout.Seconds() - time.Since(c.monTimeoutList[mon.Name]).Seconds())
-				logger.Warningf("mon %s not found in quorum, waiting for timeout (%d seconds left) before failover", mon.Name, timeToFailover)
-				continue
-			}
-
-			logger.Warningf("mon %s NOT found in quorum and timeout exceeded, mon will be failed over", mon.Name)
-			c.failMon(len(quorumStatus.MonMap.Mons), desiredMonCount, mon.Name)
-			// only deal with one unhealthy mon per health check
-			return nil
+			continue
 		}
+
+		logger.Debugf("mon %q NOT found in quorum. Mon quorum status: %+v", mon.Name, quorumStatus)
+		allMonsInQuorum = false
+
+		// If not yet set, add the current time, for the timeout
+		// calculation, to the list
+		if _, ok := c.monTimeoutList[mon.Name]; !ok {
+			c.monTimeoutList[mon.Name] = time.Now()
+		}
+
+		// when the timeout for the mon has been reached, continue to the
+		// normal failover/delete mon pod part of the code
+		if time.Since(c.monTimeoutList[mon.Name]) <= MonOutTimeout {
+			timeToFailover := int(MonOutTimeout.Seconds() - time.Since(c.monTimeoutList[mon.Name]).Seconds())
+			logger.Warningf("mon %q not found in quorum, waiting for timeout (%d seconds left) before failover", mon.Name, timeToFailover)
+
+			// Restart the mon if it is stuck on a failed node
+			c.restartMonIfStuckTerminating(mon.Name)
+			continue
+		}
+
+		logger.Warningf("mon %q NOT found in quorum and timeout exceeded, mon will be failed over", mon.Name)
+		c.failMon(len(quorumStatus.MonMap.Mons), desiredMonCount, mon.Name)
+		// only deal with one unhealthy mon per health check
+		return nil
 	}
 
-	// after all unhealthy mons have been removed/failovered
+	// after all unhealthy mons have been removed or failed over
 	// handle all mons that haven't been in the Ceph mon map
 	for mon := range monsNotFound {
 		logger.Warningf("mon %s NOT found in ceph mon map, failover", mon)
@@ -222,7 +245,7 @@ func (c *Cluster) failoverMon(name string) error {
 
 	// Assign the pod to a node
 	if err := c.assignMons(mConf); err != nil {
-		return errors.Wrapf(err, "failed to place new mon on a node")
+		return errors.Wrap(err, "failed to place new mon on a node")
 	}
 
 	if c.Network.IsHost() {
@@ -235,7 +258,7 @@ func (c *Cluster) failoverMon(name string) error {
 		// Create the service endpoint
 		serviceIP, err := c.createService(m)
 		if err != nil {
-			return errors.Wrapf(err, "failed to create mon service")
+			return errors.Wrap(err, "failed to create mon service")
 		}
 		m.PublicIP = serviceIP
 	}
@@ -308,22 +331,22 @@ func removeMonitorFromQuorum(context *clusterd.Context, clusterName, name string
 
 func (c *Cluster) handleExternalMonStatus(status client.MonStatusResponse) error {
 	// We don't need to validate Ceph version if no image is present
-	if c.spec.CephVersion.Image == "" {
+	if c.spec.CephVersion.Image != "" {
 		_, err := controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, c.ClusterInfo.CephVersion)
 		if err != nil {
-			return errors.Wrapf(err, "failed to validate external ceph version")
+			return errors.Wrap(err, "failed to validate external ceph version")
 		}
 	}
 
 	changed, err := c.addOrRemoveExternalMonitor(status)
 	if err != nil {
-		return errors.Wrapf(err, "failed to add or remove external mon")
+		return errors.Wrap(err, "failed to add or remove external mon")
 	}
 
 	// let's save the monitor's config if anything happened
 	if changed {
 		if err := c.saveMonConfig(); err != nil {
-			return errors.Wrapf(err, "failed to save mon config after adding/removing external mon")
+			return errors.Wrap(err, "failed to save mon config after adding/removing external mon")
 		}
 	}
 
@@ -404,4 +427,22 @@ func (c *Cluster) addOrRemoveExternalMonitor(status client.MonStatusResponse) (b
 
 	logger.Debugf("ClusterInfo.Monitors is %+v", c.ClusterInfo.Monitors)
 	return changed, nil
+}
+
+// restartMonIfStuckTerminating will check if a mon is on a node that is not ready.
+// If the pod is stuck in terminating state, go ahead and force delete the pod so K8s
+// will allow the mon to be restarted on another node.
+func (c *Cluster) restartMonIfStuckTerminating(monName string) error {
+	logger.Debugf("Checking for a stuck mon %q pod", monName)
+	labels := fmt.Sprintf("app=%s,mon=%s", AppName, monName)
+	pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(metav1.ListOptions{LabelSelector: labels})
+	if err != nil {
+		return errors.Wrapf(err, "failed to get pod for mon %q", monName)
+	}
+	for _, pod := range pods.Items {
+		if err := k8sutil.ForceDeletePodIfStuck(c.context, pod); err != nil {
+			logger.Warningf("skipping forced restart of mon %q. %v", monName, err)
+		}
+	}
+	return nil
 }

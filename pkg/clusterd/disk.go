@@ -19,6 +19,7 @@ package clusterd
 import (
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 
@@ -33,9 +34,13 @@ var (
 	isRBD  = regexp.MustCompile("^rbd[0-9]+p?[0-9]{0,}$")
 )
 
+func supportedDeviceType(device string) bool {
+	return device == sys.DiskType || device == sys.SSDType || device == sys.LVMType || device == sys.MultiPath || device == sys.PartType || device == sys.LinearType
+}
+
 // GetDeviceEmpty check whether a device is completely empty
 func GetDeviceEmpty(device *sys.LocalDisk) bool {
-	return device.Parent == "" && (device.Type == sys.DiskType || device.Type == sys.SSDType || device.Type == sys.CryptType || device.Type == sys.LVMType) && len(device.Partitions) == 0 && device.Filesystem == ""
+	return device.Parent == "" && supportedDeviceType(device.Type) && len(device.Partitions) == 0 && device.Filesystem == ""
 }
 
 func ignoreDevice(d string) bool {
@@ -61,8 +66,7 @@ func DiscoverDevices(executor exec.Executor) ([]*sys.LocalDisk, error) {
 		// Populate device information coming from lsblk
 		disk, err := PopulateDeviceInfo(d, executor)
 		if err != nil {
-			// skip device if lsblk fails
-			logger.Warningf("skipping device %q because 'lsblk' failed. %v", d, err)
+			logger.Warningf("skipping device %q. %v", d, err)
 			continue
 		}
 
@@ -106,12 +110,11 @@ func PopulateDeviceInfo(d string, executor exec.Executor) (*sys.LocalDisk, error
 	}
 
 	diskType, ok := diskProps["TYPE"]
-	if !ok || (diskType != sys.SSDType && diskType != sys.CryptType && diskType != sys.DiskType && diskType != sys.PartType && diskType != sys.LinearType && diskType != sys.LVMType) {
-		if !ok {
-			return nil, errors.New("diskType is empty")
-		} else {
-			return nil, fmt.Errorf("unsupported diskType %+s", diskType)
-		}
+	if !ok {
+		return nil, errors.New("diskType is empty")
+	}
+	if !supportedDeviceType(diskType) {
+		return nil, fmt.Errorf("unsupported diskType %+s", diskType)
 	}
 
 	// get the UUID for disks
@@ -144,10 +147,12 @@ func PopulateDeviceInfo(d string, executor exec.Executor) (*sys.LocalDisk, error
 		}
 	}
 	if val, ok := diskProps["PKNAME"]; ok {
-		disk.Parent = val
+		if val != "" {
+			disk.Parent = path.Base(val)
+		}
 	}
 	if val, ok := diskProps["NAME"]; ok {
-		disk.RealName = val
+		disk.RealPath = val
 	}
 
 	return disk, nil

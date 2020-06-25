@@ -57,15 +57,13 @@ var (
 
 // GlobalConfig represents the [global] sections of Ceph's config file.
 type GlobalConfig struct {
-	FSID                string `ini:"fsid,omitempty"`
-	MonMembers          string `ini:"mon initial members,omitempty"`
-	MonHost             string `ini:"mon host"`
-	PublicAddr          string `ini:"public addr,omitempty"`
-	PublicNetwork       string `ini:"public network,omitempty"`
-	ClusterAddr         string `ini:"cluster addr,omitempty"`
-	ClusterNetwork      string `ini:"cluster network,omitempty"`
-	MonAllowPoolDelete  bool   `ini:"mon_allow_pool_delete"`
-	MonAllowPoolSizeOne bool   `ini:"mon_allow_pool_size_one"`
+	FSID           string `ini:"fsid,omitempty"`
+	MonMembers     string `ini:"mon initial members,omitempty"`
+	MonHost        string `ini:"mon host"`
+	PublicAddr     string `ini:"public addr,omitempty"`
+	PublicNetwork  string `ini:"public network,omitempty"`
+	ClusterAddr    string `ini:"cluster addr,omitempty"`
+	ClusterNetwork string `ini:"cluster network,omitempty"`
 }
 
 // CephConfig represents an entire Ceph config including all sections.
@@ -97,7 +95,16 @@ func GenerateAdminConnectionConfigWithSettings(context *clusterd.Context, cluste
 	keyringPath := path.Join(root, fmt.Sprintf("%s.keyring", client.AdminUsername))
 	err := writeKeyring(AdminKeyring(cluster), keyringPath)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to write keyring to %s", root)
+		return "", errors.Wrapf(err, "failed to write admin keyring to %s", root)
+	}
+
+	// If this is an external cluster
+	if cluster.IsInitializedExternalCred(false) {
+		keyringPath := path.Join(root, fmt.Sprintf("%s.keyring", cluster.ExternalCred.Username))
+		err := writeKeyring(ExternalUserKeyring(cluster.ExternalCred.Username, cluster.ExternalCred.Secret), keyringPath)
+		if err != nil {
+			return "", errors.Wrapf(err, "failed to write keyring %q to %s", cluster.ExternalCred.Username, root)
+		}
 	}
 
 	filePath, err := GenerateConfigFile(context, cluster, root, client.AdminUsername, keyringPath, settings, nil)
@@ -118,12 +125,20 @@ func GenerateConfigFile(context *clusterd.Context, cluster *ClusterInfo, pathRoo
 
 	configFile, err := createGlobalConfigFileSection(context, cluster, globalConfig)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to create global config section")
+		return "", errors.Wrap(err, "failed to create global config section")
 	}
 
 	qualifiedUser := getQualifiedUser(user)
 	if err := addClientConfigFileSection(configFile, qualifiedUser, keyringPath, clientSettings); err != nil {
-		return "", errors.Wrapf(err, "failed to add admin client config section")
+		return "", errors.Wrap(err, "failed to add admin client config section")
+	}
+
+	if cluster.IsInitializedExternalCred(false) {
+		keyringPath = path.Join(path.Join(context.ConfigDir, cluster.Name), fmt.Sprintf("%s.keyring", cluster.ExternalCred.Username))
+		qualifiedUser := getQualifiedUser(cluster.ExternalCred.Username)
+		if err := addClientConfigFileSection(configFile, qualifiedUser, keyringPath, clientSettings); err != nil {
+			return "", errors.Wrap(err, "failed to add user client config section")
+		}
 	}
 
 	// write the entire config to disk
@@ -152,7 +167,7 @@ func CreateDefaultCephConfig(context *clusterd.Context, cluster *ClusterInfo) (*
 	if cephVersionEnv != "" {
 		v, err := cephver.ExtractCephVersion(cephVersionEnv)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to extract ceph version")
+			return nil, errors.Wrap(err, "failed to extract ceph version")
 		}
 		cluster.CephVersion = *v
 	}
@@ -163,15 +178,13 @@ func CreateDefaultCephConfig(context *clusterd.Context, cluster *ClusterInfo) (*
 
 	conf := &CephConfig{
 		GlobalConfig: &GlobalConfig{
-			FSID:                cluster.FSID,
-			MonMembers:          strings.Join(monMembers, " "),
-			MonHost:             strings.Join(monHosts, ","),
-			PublicAddr:          context.NetworkInfo.PublicAddr,
-			PublicNetwork:       context.NetworkInfo.PublicNetwork,
-			ClusterAddr:         context.NetworkInfo.ClusterAddr,
-			ClusterNetwork:      context.NetworkInfo.ClusterNetwork,
-			MonAllowPoolDelete:  true,
-			MonAllowPoolSizeOne: true,
+			FSID:           cluster.FSID,
+			MonMembers:     strings.Join(monMembers, " "),
+			MonHost:        strings.Join(monHosts, ","),
+			PublicAddr:     context.NetworkInfo.PublicAddr,
+			PublicNetwork:  context.NetworkInfo.PublicNetwork,
+			ClusterAddr:    context.NetworkInfo.ClusterAddr,
+			ClusterNetwork: context.NetworkInfo.ClusterNetwork,
 		},
 	}
 
@@ -190,7 +203,7 @@ func createGlobalConfigFileSection(context *clusterd.Context, cluster *ClusterIn
 		var err error
 		ceph, err = CreateDefaultCephConfig(context, cluster)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to create default ceph config")
+			return nil, errors.Wrap(err, "failed to create default ceph config")
 		}
 	}
 

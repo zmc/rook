@@ -395,13 +395,23 @@ func updateDeviceCM(context *clusterd.Context) error {
 	return nil
 }
 
+func logDevices(devices []*sys.LocalDisk) {
+	var devicesList []string
+	for _, device := range devices {
+		logger.Debugf("localdevice %q: %+v", device.Name, device)
+		devicesList = append(devicesList, device.Name)
+	}
+	logger.Infof("localdevices: %q", strings.Join(devicesList, ", "))
+}
+
 func probeDevices(context *clusterd.Context) ([]sys.LocalDisk, error) {
 	devices := make([]sys.LocalDisk, 0)
 	localDevices, err := clusterd.DiscoverDevices(context.Executor)
-	logger.Infof("localdevices: %+v", localDevices)
 	if err != nil {
 		return devices, fmt.Errorf("failed initial hardware discovery. %+v", err)
 	}
+
+	logDevices(localDevices)
 
 	// ceph-volume inventory command takes a little time to complete.
 	// Get this data only if it is needed and once by function execution
@@ -460,7 +470,7 @@ func probeDevices(context *clusterd.Context) ([]sys.LocalDisk, error) {
 // getCephVolumeInventory: Return a map of strings indexed by device with the
 // information about the device returned by the command <ceph-volume inventory>
 func getCephVolumeInventory(context *clusterd.Context) (*map[string]string, error) {
-	inventory, err := context.Executor.ExecuteCommandWithOutput(false, "", "ceph-volume", "inventory", "--format", "json")
+	inventory, err := context.Executor.ExecuteCommandWithOutput("ceph-volume", "inventory", "--format", "json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute ceph-volume inventory. %+v", err)
 	}

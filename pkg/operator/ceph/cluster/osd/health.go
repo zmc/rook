@@ -23,9 +23,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -35,53 +35,51 @@ const (
 )
 
 var (
-	healthCheckInterval = 300 * time.Second
+	healthCheckInterval = 60 * time.Second
 )
 
-// Monitor defines OSD process monitoring
-type Monitor struct {
+// OSDHealthMonitor defines OSD process monitoring
+type OSDHealthMonitor struct {
 	context                        *clusterd.Context
-	clusterName                    string
+	namespace                      string
 	removeOSDsIfOUTAndSafeToRemove bool
-	cephVersion                    cephver.CephVersion
 }
 
-// NewMonitor instantiates OSD monitoring
-func NewMonitor(context *clusterd.Context, clusterName string, removeOSDsIfOUTAndSafeToRemove bool, cephVersion cephver.CephVersion) *Monitor {
-	return &Monitor{context, clusterName, removeOSDsIfOUTAndSafeToRemove, cephVersion}
+// NewOSDHealthMonitor instantiates OSD monitoring
+func NewOSDHealthMonitor(context *clusterd.Context, namespace string, removeOSDsIfOUTAndSafeToRemove bool) *OSDHealthMonitor {
+	return &OSDHealthMonitor{context, namespace, removeOSDsIfOUTAndSafeToRemove}
 }
 
 // Start runs monitoring logic for osds status at set intervals
-func (m *Monitor) Start(stopCh chan struct{}) {
+func (m *OSDHealthMonitor) Start(stopCh chan struct{}) {
 
 	for {
 		select {
 		case <-time.After(healthCheckInterval):
 			logger.Debug("Checking osd processes status.")
-			err := m.osdStatus()
+			err := m.checkOSDHealth()
 			if err != nil {
-				logger.Warningf("failed OSD status check. %v", err)
+				logger.Debugf("failed OSD status check. %v", err)
 			}
 
 		case <-stopCh:
-			logger.Infof("Stopping monitoring of OSDs in namespace %s", m.clusterName)
+			logger.Infof("Stopping monitoring of OSDs in namespace %s", m.namespace)
 			return
 		}
 	}
 }
 
 // Update updates the removeOSDsIfOUTAndSafeToRemove
-func (m *Monitor) Update(removeOSDsIfOUTAndSafeToRemove bool) {
+func (m *OSDHealthMonitor) Update(removeOSDsIfOUTAndSafeToRemove bool) {
 	m.removeOSDsIfOUTAndSafeToRemove = removeOSDsIfOUTAndSafeToRemove
 }
 
-// OSDStatus validates osd dump output
-func (m *Monitor) osdStatus() error {
-	osdDump, err := client.GetOSDDump(m.context, m.clusterName)
+// checkOSDHealth takes action when needed if the OSDs are not healthy
+func (m *OSDHealthMonitor) checkOSDHealth() error {
+	osdDump, err := client.GetOSDDump(m.context, m.namespace)
 	if err != nil {
 		return err
 	}
-	logger.Debugf("osd dump %v", osdDump)
 
 	for _, osdStatus := range osdDump.OSDs {
 		id64, err := osdStatus.OSD.Int64()
@@ -97,17 +95,22 @@ func (m *Monitor) osdStatus() error {
 			return err
 		}
 
-		if status != upStatus {
-			logger.Debugf("osd.%d is marked 'DOWN'", id)
-		} else {
+		if status == upStatus {
 			logger.Debugf("osd.%d is healthy.", id)
+			continue
+		}
 
+		logger.Debugf("osd.%d is marked 'DOWN'", id)
+
+		// check if the down osd is stuck terminating
+		if err := m.restartOSDIfStuck(id); err != nil {
+			logger.Warningf("failed to restart OSD %d. %v", id, err)
 		}
 
 		if in != inStatus {
 			logger.Debugf("osd.%d is marked 'OUT'", id)
 			if m.removeOSDsIfOUTAndSafeToRemove {
-				if err := m.handleOSDMarkedOut(id); err != nil {
+				if err := m.removeOSDDeploymentIfSafeToDestroy(id); err != nil {
 					logger.Errorf("error handling marked out osd osd.%d. %v", id, err)
 				}
 			}
@@ -117,9 +120,9 @@ func (m *Monitor) osdStatus() error {
 	return nil
 }
 
-func (m *Monitor) handleOSDMarkedOut(outOSDid int) error {
+func (m *OSDHealthMonitor) removeOSDDeploymentIfSafeToDestroy(outOSDid int) error {
 	label := fmt.Sprintf("ceph-osd-id=%d", outOSDid)
-	dp, err := k8sutil.GetDeployments(m.context.Clientset, m.clusterName, label)
+	dp, err := k8sutil.GetDeployments(m.context.Clientset, m.namespace, label)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			return nil
@@ -127,7 +130,7 @@ func (m *Monitor) handleOSDMarkedOut(outOSDid int) error {
 		return errors.Wrapf(err, "failed to get osd deployment of osd id %d", outOSDid)
 	}
 	if len(dp.Items) != 0 {
-		safeToDestroyOSD, err := client.OsdSafeToDestroy(m.context, m.clusterName, outOSDid, m.cephVersion)
+		safeToDestroyOSD, err := client.OsdSafeToDestroy(m.context, m.namespace, outOSDid)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get osd deployment of osd id %d", outOSDid)
 		}
@@ -142,6 +145,23 @@ func (m *Monitor) handleOSDMarkedOut(outOSDid int) error {
 					return errors.Wrapf(err, "failed to delete osd deployment %s", dp.Items[0].Name)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// restartOSDIfStuck will check if a portable OSD is on a node that is not ready.
+// If the pod is stuck in terminating state, go ahead and force delete the pod so K8s
+// will free up the volume and allow the OSD to be restarted on another node.
+func (m *OSDHealthMonitor) restartOSDIfStuck(osdID int) error {
+	labels := fmt.Sprintf("ceph-osd-id=%d,portable=true", osdID)
+	pods, err := m.context.Clientset.CoreV1().Pods(m.namespace).List(metav1.ListOptions{LabelSelector: labels})
+	if err != nil {
+		return errors.Wrapf(err, "failed to get OSD with ID %d", osdID)
+	}
+	for _, pod := range pods.Items {
+		if err := k8sutil.ForceDeletePodIfStuck(m.context, pod); err != nil {
+			logger.Warningf("skipping restart of OSD %d. %v", osdID, err)
 		}
 	}
 	return nil

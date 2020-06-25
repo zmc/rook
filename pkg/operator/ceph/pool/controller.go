@@ -19,6 +19,8 @@ package pool
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 
 	"github.com/coreos/pkg/capnslog"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
@@ -26,11 +28,13 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/model"
+	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -47,6 +51,14 @@ const (
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
+
+var cephBlockPoolKind = reflect.TypeOf(cephv1.CephBlockPool{}).Name()
+
+// Sets the type meta for the controller main object
+var controllerTypeMeta = metav1.TypeMeta{
+	Kind:       cephBlockPoolKind,
+	APIVersion: fmt.Sprintf("%s/%s", cephv1.CustomResourceGroup, cephv1.Version),
+}
 
 var _ reconcile.Reconciler = &ReconcileCephBlockPool{}
 
@@ -82,9 +94,10 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
+	logger.Info("successfully started")
 
 	// Watch for changes on the CephBlockPool CRD object
-	err = c.Watch(&source.Kind{Type: &cephv1.CephBlockPool{}}, &handler.EnqueueRequestForObject{}, opcontroller.WatchUpdatePredicate())
+	err = c.Watch(&source.Kind{Type: &cephv1.CephBlockPool{TypeMeta: controllerTypeMeta}}, &handler.EnqueueRequestForObject{}, opcontroller.WatchControllerPredicate())
 	if err != nil {
 		return err
 	}
@@ -116,26 +129,21 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
-		return reconcile.Result{}, errors.Wrapf(err, "failed to get CephBlockPool")
+		return reconcile.Result{}, errors.Wrap(err, "failed to get CephBlockPool")
 	}
 
 	// The CR was just created, initializing status fields
 	if cephBlockPool.Status == nil {
-		cephBlockPool.Status = &cephv1.Status{}
-		cephBlockPool.Status.Phase = k8sutil.Created
-		err := opcontroller.UpdateStatus(r.client, cephBlockPool)
-		if err != nil {
-			return reconcile.Result{}, errors.Wrap(err, "failed to set status")
-		}
+		updateStatus(r.client, request.NamespacedName, k8sutil.Created)
 	}
 
 	// Make sure a CephCluster is present otherwise do nothing
-	_, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName)
+	cephCluster, isReadyToReconcile, cephClusterExists, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
 	if !isReadyToReconcile {
 		// This handles the case where the Ceph Cluster is gone and we want to delete that CR
 		// We skip the deletePool() function since everything is gone already
 		//
-		// ALso, only remove the finalizer if the CephCluster is gone
+		// Also, only remove the finalizer if the CephCluster is gone
 		// If not, we should wait for it to be ready
 		// This handles the case where the operator is not ready to accept Ceph command but the cluster exists
 		if !cephBlockPool.GetDeletionTimestamp().IsZero() && !cephClusterExists {
@@ -148,8 +156,6 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 			// Return and do not requeue. Successful deletion.
 			return reconcile.Result{}, nil
 		}
-
-		logger.Debugf("CephCluster resource not ready in namespace %q, retrying in %q.", request.NamespacedName.Namespace, opcontroller.WaitForRequeueIfCephClusterNotReadyAfter.String())
 		return reconcileResponse, nil
 	}
 
@@ -182,30 +188,35 @@ func (r *ReconcileCephBlockPool) reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, errors.Wrapf(err, "invalid pool CR %q spec", cephBlockPool.Name)
 	}
 
-	// Start object reconciliation, updating status for this
-	cephBlockPool.Status.Phase = k8sutil.ReconcilingStatus
-	err = opcontroller.UpdateStatus(r.client, cephBlockPool)
+	updateStatus(r.client, request.NamespacedName, k8sutil.ReconcilingStatus)
+
+	// Get CephCluster version
+	cephVersion, err := opcontroller.GetImageVersion(cephCluster)
 	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to set status")
+		return reconcile.Result{}, errors.Wrapf(err, "failed to fetch ceph version from cephcluster %q", cephCluster.Name)
+	}
+
+	// If the CephCluster has enabled the "pg_autoscaler" module and is running Nautilus
+	// we force the pg_autoscale_mode to "on"
+	_, propertyExists := cephBlockPool.Spec.Parameters[cephclient.PgAutoscaleModeProperty]
+	if mgr.IsModuleInSpec(cephCluster.Spec.Mgr.Modules, mgr.PgautoscalerModuleName) &&
+		!cephVersion.IsAtLeastOctopus() &&
+		!propertyExists {
+		if len(cephBlockPool.Spec.Parameters) == 0 {
+			cephBlockPool.Spec.Parameters = make(map[string]string)
+		}
+		cephBlockPool.Spec.Parameters[cephclient.PgAutoscaleModeProperty] = cephclient.PgAutoscaleModeOn
 	}
 
 	// CREATE/UPDATE
 	reconcileResponse, err = r.reconcileCreatePool(cephBlockPool)
 	if err != nil {
-		cephBlockPool.Status.Phase = k8sutil.ReconcileFailedStatus
-		errStatus := opcontroller.UpdateStatus(r.client, cephBlockPool)
-		if errStatus != nil {
-			return reconcile.Result{}, errors.Wrap(errStatus, "failed to set status")
-		}
+		updateStatus(r.client, request.NamespacedName, k8sutil.ReconcileFailedStatus)
 		return reconcileResponse, errors.Wrapf(err, "failed to create pool %q.", cephBlockPool.GetName())
 	}
 
 	// Set Ready status, we are done reconciling
-	cephBlockPool.Status.Phase = k8sutil.ReadyStatus
-	err = opcontroller.UpdateStatus(r.client, cephBlockPool)
-	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to set status")
-	}
+	updateStatus(r.client, request.NamespacedName, k8sutil.ReadyStatus)
 
 	// Return and do not requeue
 	logger.Debug("done reconciling")
@@ -226,7 +237,7 @@ func (r *ReconcileCephBlockPool) reconcileCreatePool(cephBlockPool *cephv1.CephB
 func createPool(context *clusterd.Context, p *cephv1.CephBlockPool) error {
 	// create the pool
 	logger.Infof("creating pool %q in namespace %q", p.Name, p.Namespace)
-	if err := cephclient.CreatePoolWithProfile(context, p.Namespace, *p.Spec.ToModel(p.Name), poolApplicationNameRBD); err != nil {
+	if err := cephclient.CreatePoolWithProfile(context, p.Namespace, p.Name, p.Spec, poolApplicationNameRBD); err != nil {
 		return errors.Wrapf(err, "failed to create pool %q", p.Name)
 	}
 
@@ -237,7 +248,7 @@ func createPool(context *clusterd.Context, p *cephv1.CephBlockPool) error {
 func deletePool(context *clusterd.Context, p *cephv1.CephBlockPool) error {
 	pools, err := cephclient.ListPoolSummaries(context, p.Namespace)
 	if err != nil {
-		return errors.Wrapf(err, "failed to list pools")
+		return errors.Wrap(err, "failed to list pools")
 	}
 
 	// Only delete the pool if it exists...
@@ -253,79 +264,27 @@ func deletePool(context *clusterd.Context, p *cephv1.CephBlockPool) error {
 	return nil
 }
 
-// ModelToSpec reflect the internal pool struct from a pool spec
-func ModelToSpec(pool model.Pool) cephv1.PoolSpec {
-	ec := pool.ErasureCodedConfig
-	return cephv1.PoolSpec{
-		FailureDomain: pool.FailureDomain,
-		CrushRoot:     pool.CrushRoot,
-		DeviceClass:   pool.DeviceClass,
-		Replicated:    cephv1.ReplicatedSpec{Size: pool.ReplicatedConfig.Size},
-		ErasureCoded:  cephv1.ErasureCodedSpec{CodingChunks: ec.CodingChunkCount, DataChunks: ec.DataChunkCount, Algorithm: ec.Algorithm},
-	}
-}
-
-// ValidatePool Validate the pool arguments
-func ValidatePool(context *clusterd.Context, p *cephv1.CephBlockPool) error {
-	if p.Name == "" {
-		return errors.New("missing name")
-	}
-	if p.Namespace == "" {
-		return errors.New("missing namespace")
-	}
-	if err := ValidatePoolSpec(context, p.Namespace, &p.Spec); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ValidatePoolSpec validates the Ceph block pool spec CR
-func ValidatePoolSpec(context *clusterd.Context, namespace string, p *cephv1.PoolSpec) error {
-	if p.Replication() != nil && p.ErasureCode() != nil {
-		return errors.New("both replication and erasure code settings cannot be specified")
-	}
-
-	var crush cephclient.CrushMap
-	var err error
-	if p.FailureDomain != "" || p.CrushRoot != "" {
-		crush, err = cephclient.GetCrushMap(context, namespace)
-		if err != nil {
-			return errors.Wrapf(err, "failed to get crush map")
+// updateStatus updates a pool CR with the given status
+func updateStatus(client client.Client, poolName types.NamespacedName, status string) {
+	pool := &cephv1.CephBlockPool{}
+	err := client.Get(context.TODO(), poolName, pool)
+	if err != nil {
+		if kerrors.IsNotFound(err) {
+			logger.Debug("CephBlockPool resource not found. Ignoring since object must be deleted.")
+			return
 		}
+		logger.Warningf("failed to retrieve pool %q to update status to %q. %v", poolName, status, err)
+		return
 	}
 
-	// validate the failure domain if specified
-	if p.FailureDomain != "" {
-		found := false
-		for _, t := range crush.Types {
-			if t.Name == p.FailureDomain {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return errors.Errorf("unrecognized failure domain %s", p.FailureDomain)
-		}
+	if pool.Status == nil {
+		pool.Status = &cephv1.Status{}
 	}
 
-	// validate the crush root if specified
-	if p.CrushRoot != "" {
-		found := false
-		for _, t := range crush.Buckets {
-			if t.Name == p.CrushRoot {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return errors.Errorf("unrecognized crush root %s", p.CrushRoot)
-		}
+	pool.Status.Phase = status
+	if err := opcontroller.UpdateStatus(client, pool); err != nil {
+		logger.Warningf("failed to set pool %q status to %q. %v", pool.Name, status, err)
+		return
 	}
-
-	// validate pool replica size
-	if p.Replicated.Size == 1 && p.Replicated.RequireSafeReplicaSize {
-		return errors.Errorf("error pool size is %d and requireSafeReplicaSize is %t, must be false", p.Replicated.Size, p.Replicated.RequireSafeReplicaSize)
-	}
-
-	return nil
+	logger.Debugf("pool %q status updated to %q", poolName, status)
 }
