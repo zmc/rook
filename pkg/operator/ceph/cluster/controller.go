@@ -454,21 +454,6 @@ func (c *ClusterController) initializeCluster(cluster *cluster, clusterObj *ceph
 	if !monitoringActivated {
 		c.startClusterMonitoring(cluster)
 	}
-}
-
-func (c *ClusterController) startClusterMonitoring(cluster *cluster) {
-	if cluster.Info == nil {
-		clusterInfo, _, _, err := mon.CreateOrLoadClusterInfo(c.context, cluster.Namespace, nil)
-		if err != nil {
-			logger.Errorf("failed to start osd monitoring. %v", err)
-			return
-		}
-		cluster.Info = clusterInfo
-		logger.Infof("cluster info loaded for monitoring: %+v", clusterInfo)
-	}
-
-	// enable the cluster monitoring goroutines once
-	logger.Infof("enabling cluster monitoring goroutines")
 
 	// Start client CRD watcher
 	clientController := cephclient.NewClientController(c.context, cluster.Namespace)
@@ -506,6 +491,21 @@ func (c *ClusterController) startClusterMonitoring(cluster *cluster) {
 	cluster.childControllers = []childController{
 		poolController, objectStoreController, objectStoreUserController, fileController, ganeshaController,
 	}
+}
+
+func (c *ClusterController) startClusterMonitoring(cluster *cluster) {
+	if cluster.Info == nil {
+		clusterInfo, _, _, err := mon.CreateOrLoadClusterInfo(c.context, cluster.Namespace, nil)
+		if err != nil {
+			logger.Errorf("failed to start osd monitoring. %v", err)
+			return
+		}
+		cluster.Info = clusterInfo
+		logger.Infof("cluster info loaded for monitoring: %+v", clusterInfo)
+	}
+
+	// enable the cluster monitoring goroutines once
+	logger.Infof("enabling cluster monitoring goroutines")
 
 	// Populate ClusterInfo
 	cluster.mons.ClusterInfo = cluster.Info
