@@ -20,6 +20,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	"strings"
 )
 
 // MonStore provides methods for setting Ceph configurations in the centralized mon
@@ -60,6 +61,18 @@ func (m *MonStore) Set(who, option, value string) error {
 			"you may need to use the rook-config-override ConfigMap. output: %s", string(out))
 	}
 	return nil
+}
+
+// Set sets a config in the centralized mon configuration database.
+// https://docs.ceph.com/docs/master/rados/configuration/ceph-conf/#monitor-configuration-database
+func (m *MonStore) Get(who, option string) (string, error) {
+	args := []string{"config", "get", who, normalizeKey(option)}
+	cephCmd := client.NewCephCommand(m.context, m.namespace, args)
+	out, err := cephCmd.Run()
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to get config setting %q for user %q", option, who)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // SetAll sets all configs from the overrides in the centralized mon configuration database.
