@@ -811,6 +811,9 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 		}
 	}
 
+	// Restart the mon if it is stuck on a failed node
+	c.restartMonIfStuckTerminating(m.DaemonName)
+
 	err := updateDeploymentAndWait(c.context, d, c.Namespace, daemonType, m.DaemonName, cephVersionToUse, c.isUpgrade, c.spec.SkipUpgradeChecks, false)
 	if err != nil {
 		return errors.Wrapf(err, "failed to update mon deployment %s", m.ResourceName)
