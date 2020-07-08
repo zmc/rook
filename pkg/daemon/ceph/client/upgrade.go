@@ -218,7 +218,7 @@ func okToStopDaemon(context *clusterd.Context, deployment, clusterName, daemonTy
 // This basically makes sure all the PGs have settled
 func okToContinueOSDDaemon(context *clusterd.Context, namespace string) error {
 	// Reconciliating PGs should not take too long so let's wait up to 10 minutes
-	err := util.Retry(10, 60*time.Second, func() error {
+	err := util.Retry(4, 15*time.Second, func() error {
 		return IsClusterCleanError(context, namespace)
 	})
 	if err != nil {
