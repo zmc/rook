@@ -265,7 +265,7 @@ func objectStoreInitialized(context *object.Context) (bool, error) {
 		return false, err
 	}
 	// check if at least one pod is running
-	if len(pods.Items) > 0 {
+	if pods != nil {
 		logger.Infof("CephObjectStore %s is running", context.Name)
 		return true, nil
 	}
