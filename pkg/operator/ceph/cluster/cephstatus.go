@@ -25,6 +25,7 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/daemon/ceph/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -103,6 +104,9 @@ func (c *cephStatusChecker) checkStatus() {
 	status, err = client.StatusWithUser(c.context, c.namespace, healthCheckUser)
 	if err != nil {
 		logger.Errorf("failed to get ceph status. %v", err)
+		if err := c.updateCephStatus(cephStatusOnError(err.Error())); err != nil {
+			logger.Errorf("failed to query cluster status in namespace %q. %v", c.namespace, err)
+		}
 		return
 	}
 
@@ -156,4 +160,21 @@ func toCustomResourceStatus(currentStatus cephv1.ClusterStatus, newStatus *clien
 
 func formatTime(t time.Time) string {
 	return t.Format(time.RFC3339)
+}
+
+func cephStatusOnError(errorMessage string) *cephclient.CephStatus {
+	details := make(map[string]cephclient.CheckMessage)
+	details["error"] = cephclient.CheckMessage{
+		Severity: "Urgent",
+		Summary: cephclient.Summary{
+			Message: errorMessage,
+		},
+	}
+
+	return &cephclient.CephStatus{
+		Health: cephclient.HealthStatus{
+			Status: "HEALTH_ERR",
+			Checks: details,
+		},
+	}
 }
