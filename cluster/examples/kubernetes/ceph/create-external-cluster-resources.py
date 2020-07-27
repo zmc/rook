@@ -315,8 +315,10 @@ class RadosJSON:
     def _gen_output_map(self):
         if self.out_map:
             return
-        self._invalid_endpoint(self._arg_parser.rgw_endpoint)
-        self.endpoint_dial(self._arg_parser.rgw_endpoint)
+        # if rgw_endpoint is provided, validate it
+        if self._arg_parser.rgw_endpoint:
+            self._invalid_endpoint(self._arg_parser.rgw_endpoint)
+            self.endpoint_dial(self._arg_parser.rgw_endpoint)
         if not self.cluster.pool_exists(self._arg_parser.rbd_data_pool_name):
             raise ExecutionFailureException(
                 "The provided 'rbd-data-pool-name': {}, don't exists".format(
