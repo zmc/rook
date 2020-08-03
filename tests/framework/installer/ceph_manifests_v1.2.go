@@ -656,6 +656,7 @@ rules:
   - csidrivers
   verbs:
   - create
+  - delete
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1beta1
@@ -1903,7 +1904,7 @@ parameters:
 }
 
 //GetObc returns the manifest to create object bucket claim
-func (m *CephManifestsV1_2) GetObc(claimName string, storageClassName string, objectBucketName string, varBucketName bool) string {
+func (m *CephManifestsV1_2) GetObc(claimName string, storageClassName string, objectBucketName string, maxObject string, varBucketName bool) string {
 	bucketParameter := "generateBucketName"
 	if varBucketName {
 		bucketParameter = "bucketName"
@@ -1914,7 +1915,9 @@ metadata:
   name: ` + claimName + `
 spec:
   ` + bucketParameter + `: ` + objectBucketName + `
-  storageClassName: ` + storageClassName
+  storageClassName: ` + storageClassName + `
+  additionalConfig:
+    maxObjects: "` + maxObject + `"`
 }
 
 func (m *CephManifestsV1_2) GetClient(namespace string, claimName string, caps map[string]string) string {

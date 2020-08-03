@@ -159,7 +159,6 @@ spec:
                 storageClassDeviceSets: {}
             driveGroups:
               type: array
-              nullable: true
               items:
                 properties:
                   name:
@@ -993,6 +992,7 @@ rules:
   - csidrivers
   verbs:
   - create
+  - delete
 ---
 # Aspects of ceph-mgr that require cluster-wide access
 kind: ClusterRole
