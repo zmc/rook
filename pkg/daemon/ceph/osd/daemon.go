@@ -195,6 +195,12 @@ func Provision(context *clusterd.Context, agent *OsdAgent, crushLocation string)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get device info for %q", agent.devices[0].Name)
 		}
+
+		rawDevice, err = clusterd.PopulateDeviceUdevInfo(rawDevice.KernelName, context.Executor, rawDevice)
+		if err != nil {
+			logger.Warningf("failed to get udev info for device %q. %v", agent.devices[0].Name, err)
+		}
+
 		rawDevice.Type = pvcDataTypeDevice
 		rawDevices = append(rawDevices, rawDevice)
 
@@ -424,6 +430,13 @@ func getAvailableDevices(context *clusterd.Context, agent *OsdAgent) (*DeviceOsd
 					}
 				}
 				matchedDevice = desiredDevice
+
+				// On PVC, we must use the real name not the /mnt name since c-v calls udev
+				// udevadm will fail with
+				// stderr Unknown device, --name=, --path=, or absolute path in /dev/ or /sys expected.
+				if agent.pvcBacked {
+					matchedDevice.Name = device.RealPath
+				}
 				if matched {
 					break
 				}

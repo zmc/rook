@@ -70,6 +70,7 @@ spec:
       count: 3
       portable: false
       tuneDeviceClass: false
+      encrypted: false
       volumeClaimTemplates:
       - metadata:
           name: data
@@ -238,6 +239,7 @@ For example, you can do:
 * `cluster`: "my-replication-storage-network"
 
 For `multus` network provider, an already working cluster with Multus networking is required. Network attachment definition that later will be attached to the cluster needs to be created before the Cluster CRD.
+The Network attachment definitions should be using whereabouts cni.
 If Rook cannot find the provided Network attachment definition it will fail running the Ceph OSD pods.
 You can add the Multus network attachment selection annotation selecting the created network attachment definition on `selectors`.
 
@@ -315,6 +317,7 @@ The following are the settings for Storage Class Device Sets which can be config
   * `volumeMode`: The volume mode to be set for the PVC. Which should be Block
   * `accessModes`: The access mode for the PVC to be bound by OSD.
 * `schedulerName`: Scheduler name for OSD pod placement. (Optional)
+* `encrypted`: whether to encrypt all the OSDs in a given storageClassDeviceSet
 
 ### OSD Configuration Settings
 
@@ -1030,6 +1033,8 @@ parameters:
     # The secrets contain Ceph admin credentials.
     csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
     csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph-external
+    csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+    csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph-external
     csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
     csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph-external
 

@@ -349,6 +349,7 @@ class RadosJSON:
         cmd_json = {"prefix": "auth get-or-create",
                     "entity": self.run_as_user,
                     "caps": ["mon", "allow r, allow command quorum_status, allow command version",
+                             "mgr", "allow command config",
                              "osd", ("allow rwx pool={0}.rgw.meta, " +
                                      "allow r pool=.rgw.root, " +
                                      "allow rw pool={0}.rgw.control, " +
@@ -510,7 +511,8 @@ class RadosJSON:
                         "name": "ceph-rgw",
                         "kind": "StorageClass",
                         "data": {
-                            "endpoint": self.out_map['RGW_ENDPOINT']
+                            "endpoint": self.out_map['RGW_ENDPOINT'],
+                            "poolPrefix": self.out_map['RGW_POOL_PREFIX']
                         }
             })
         return json.dumps(json_out)+LINESEP
