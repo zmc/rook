@@ -46,7 +46,18 @@ The release channel is the most recent release of Rook that is considered stable
 
 ```console
 helm repo add rook-release https://charts.rook.io/release
-helm install --namespace rook-ceph rook-release/rook-ceph
+```
+
+For Helm `v3.x`:
+
+```console
+helm install --namespace rook-ceph rook-ceph rook-release/rook-ceph
+```
+
+For Helm `v2.x` the `--name` flag needs to be specified:
+
+```console
+helm install --namespace rook-ceph --name rook-ceph rook-release/rook-ceph
 ```
 
 ### Master
@@ -58,15 +69,23 @@ To install the helm chart from master, you will need to pass the specific versio
 
 ```console
 helm repo add rook-master https://charts.rook.io/master
+
+# For Helm v3.x
+helm search repo rook-ceph --versions
+helm install --namespace rook-ceph rook-ceph rook-master/rook-ceph --version <version>
+
+# For Helm v2.x
 helm search rook-ceph
-helm install --namespace rook-ceph rook-master/rook-ceph --version <version>
+helm install --namespace rook-ceph --name rook-ceph rook-master/rook-ceph --version <version>
 ```
 
-For example:
+For example to install version `v1.3.0.860.g80ff2bb`:
 
-```cosnole
-helm install --namespace rook-ceph rook-master/rook-ceph --version v0.7.0-278.gcbd9726
+```console
+helm install --namespace rook-ceph rook-ceph rook-master/rook-ceph --version v1.3.0.860.g80ff2bb
 ```
+
+For Helm `v2.x` the `--name` flag must be specified instead of just `rook-ceph`, e.g., `--name rook-ceph`.
 
 ### Development Build
 
@@ -78,8 +97,9 @@ To deploy from a local build from your development environment:
 
 ```console
 cd cluster/charts/rook-ceph
-helm install --namespace rook-ceph --name rook-ceph .
+helm install --namespace rook-ceph rook-ceph .
 ```
+For Helm `v2.x` the `--name` flag must be specified instead of just `rook-ceph`, e.g., `--name rook-ceph`.
 
 ## Uninstalling the Chart
 
@@ -137,7 +157,7 @@ The following tables lists the configurable parameters of the rook-operator char
 | `csi.rbdLivenessMetricsPort`       | Ceph CSI RBD driver metrics port.                                                                                           | `8080`                                                 |
 | `csi.forceCephFSKernelClient`      | Enable Ceph Kernel clients on kernel < 4.17 which support quotas for Cephfs.                                                | `true`                                                 |
 | `csi.kubeletDirPath`               | Kubelet root directory path (if the Kubelet uses a different path for the `--root-dir` flag)                                | `/var/lib/kubelet`                                     |
-| `csi.cephcsi.image`                | Ceph CSI image.                                                                                                             | `quay.io/cephcsi/cephcsi:v3.0.0`                       |
+| `csi.cephcsi.image`                | Ceph CSI image.                                                                                                             | `quay.io/cephcsi/cephcsi:v3.1.0`                       |
 | `csi.rbdPluginUpdateStrategy`      | CSI Rbd plugin daemonset update strategy, supported values are OnDelete and RollingUpdate.                                  | `OnDelete`                                             |
 | `csi.cephFSPluginUpdateStrategy`   | CSI CephFS plugin daemonset update strategy, supported values are OnDelete and RollingUpdate.                               | `OnDelete`                                             |
 | `csi.registrar.image`              | Kubernetes CSI registrar image.                                                                                             | `quay.io/k8scsi/csi-node-driver-registrar:v1.2.0`      |
@@ -166,16 +186,20 @@ The following tables lists the configurable parameters of the rook-operator char
 You can pass the settings with helm command line parameters. Specify each parameter using the
 `--set key=value[,key=value]` argument to `helm install`. For example, the following command will install rook where RBAC is not enabled.
 
+For Helm `v2.x` the `--name` flag must be specified instead of just `rook-ceph`, e.g., `--name rook-ceph`.
+
 ```console
-helm install --namespace rook-ceph --name rook-ceph rook-release/rook-ceph --set rbacEnable=false
+helm install --namespace rook-ceph rook-ceph rook-release/rook-ceph --set rbacEnable=false
 ```
 
 ### Settings File
 
 Alternatively, a yaml file that specifies the values for the above parameters (`values.yaml`) can be provided while installing the chart.
 
+For Helm `v2.x` the `--name` flag must be specified instead of just `rook-ceph`, e.g., `--name rook-ceph`.
+
 ```console
-helm install --namespace rook-ceph --name rook-ceph rook-release/rook-ceph -f values.yaml
+helm install --namespace rook-ceph rook-ceph rook-release/rook-ceph -f values.yaml
 ```
 
 Here are the sample settings to get you started.

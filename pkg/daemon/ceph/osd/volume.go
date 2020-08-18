@@ -23,6 +23,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -329,16 +330,28 @@ func (a *OsdAgent) initializeBlockPVC(context *clusterd.Context, devices *Device
 				}
 
 				// Return failure
-				return "", "", "", errors.Wrap(err, "failed ceph-volume") // fail return here as validation provided by ceph-volume
+				return "", "", "", errors.Wrapf(err, "failed to run ceph-volume. debug logs below:\n%s", cvLog)
 			}
 			logger.Infof("%v", op)
 			// if raw mode is used or PV on LV, let's return the path of the device
 			if lvBackedPV || cephVolumeMode == "raw" && !isEncrypted {
 				blockPath = deviceArg
 			} else if cephVolumeMode == "raw" && isEncrypted {
-				blockPath = getEncryptedBlockPath(op)
+				blockPath = getEncryptedBlockPath(op, oposd.DmcryptBlockType)
 				if blockPath == "" {
 					return "", "", "", errors.New("failed to get encrypted block path from ceph-volume lvm prepare output")
+				}
+				if metadataDev {
+					metadataBlockPath = getEncryptedBlockPath(op, oposd.DmcryptMetadataType)
+					if metadataBlockPath == "" {
+						return "", "", "", errors.New("failed to get encrypted block.db path from ceph-volume lvm prepare output")
+					}
+				}
+				if walDev {
+					walBlockPath = getEncryptedBlockPath(op, oposd.DmcryptWalType)
+					if walBlockPath == "" {
+						return "", "", "", errors.New("failed to get encrypted block.wal path from ceph-volume lvm prepare output")
+					}
 				}
 			} else {
 				blockPath = getLVPath(op)
@@ -369,14 +382,16 @@ func getLVPath(op string) string {
 	return ""
 }
 
-func getEncryptedBlockPath(op string) string {
-	tmp := sys.Grep(op, "luksOpen")
-	tmpList := strings.Split(tmp, " ")
+func getEncryptedBlockPath(op, blockType string) string {
+	re := regexp.MustCompile("(?m)^.*luksOpen.*$")
+	matches := re.FindAllString(op, -1)
 
-	// The command looks like: "Running command: /usr/sbin/cryptsetup --key-file - --allow-discards luksOpen /dev/xvdbr ceph-43e9efed-0676-4731-b75a-a4c42ece1bb1-xvdbr-block-dmcrypt"
-	for _, item := range tmpList {
-		if strings.Contains(item, "block-dmcrypt") {
-			return fmt.Sprintf("/dev/mapper/%s", item)
+	for _, line := range matches {
+		lineSlice := strings.Fields(line)
+		for _, word := range lineSlice {
+			if strings.Contains(word, blockType) {
+				return fmt.Sprintf("/dev/mapper/%s", word)
+			}
 		}
 	}
 
@@ -621,8 +636,8 @@ func GetCephVolumeLVMOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 	cvMode := "lvm"
 
 	var lvPath string
-
-	result, err := context.Executor.ExecuteCommandWithOutput(cephVolumeCmd, cvMode, "list", lv, "--format", "json")
+	args := []string{cvMode, "list", lv, "--format", "json"}
+	result, err := callCephVolume(context, false, args...)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to retrieve ceph-volume %s list results", cvMode)
 	}
@@ -631,7 +646,7 @@ func GetCephVolumeLVMOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 	var cephVolumeResult map[string][]osdInfo
 	err = json.Unmarshal([]byte(result), &cephVolumeResult)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to unmarshal ceph-volume %s list results", cvMode)
+		return nil, errors.Wrapf(err, "failed to unmarshal ceph-volume %s list results. %s", cvMode, result)
 	}
 
 	for name, osdInfo := range cephVolumeResult {
@@ -713,7 +728,12 @@ func GetCephVolumeRawOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 	// lv can be a block device if raw mode is used
 	cvMode := "raw"
 
-	result, err := context.Executor.ExecuteCommandWithOutput(cephVolumeCmd, cvMode, "list", block, "--format", "json")
+	args := []string{cvMode, "list", block, "--format", "json"}
+	if block == "" {
+		args = []string{cvMode, "list", "--format", "json"}
+	}
+
+	result, err := callCephVolume(context, false, args...)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to retrieve ceph-volume %s list results", cvMode)
 	}
@@ -770,6 +790,24 @@ func GetCephVolumeRawOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 			if err != nil {
 				return nil, errors.Wrapf(err, "failed to close encrypted device %q for osd %d", block, osdID)
 			}
+
+			// If there is a metadata block
+			if metadataBlock != "" {
+				// Close encrypted device
+				err = closeEncryptedDevice(context, metadataBlock)
+				if err != nil {
+					return nil, errors.Wrapf(err, "failed to close encrypted db device %q for osd %d", metadataBlock, osdID)
+				}
+			}
+
+			// If there is a wal block
+			if walBlock != "" {
+				// Close encrypted device
+				err = closeEncryptedDevice(context, walBlock)
+				if err != nil {
+					return nil, errors.Wrapf(err, "failed to close encrypted wal device %q for osd %d", walBlock, osdID)
+				}
+			}
 		}
 
 		osds = append(osds, osd)
@@ -779,7 +817,7 @@ func GetCephVolumeRawOSDs(context *clusterd.Context, clusterInfo *client.Cluster
 	return osds, nil
 }
 
-func callCephVolume(context *clusterd.Context, args ...string) (string, error) {
+func callCephVolume(context *clusterd.Context, requiresCombinedOutput bool, args ...string) (string, error) {
 	// Use stdbuf to capture the python output buffer such that we can write to the pod log as the
 	// logging happens instead of using the default buffering that will log everything after
 	// ceph-volume exits
@@ -794,7 +832,13 @@ func callCephVolume(context *clusterd.Context, args ...string) (string, error) {
 	}
 	baseArgs := []string{"-oL", cephVolumeCmd, "--log-path", logPath}
 
-	co, err := context.Executor.ExecuteCommandWithCombinedOutput(baseCommand, append(baseArgs, args...)...)
+	// Do not use combined output for "list" calls, otherwise we will get stderr is the output and this will break the json unmarshall
+	f := context.Executor.ExecuteCommandWithOutput
+	if requiresCombinedOutput {
+		// If the action is preparing we need the combined output
+		f = context.Executor.ExecuteCommandWithCombinedOutput
+	}
+	co, err := f(baseCommand, append(baseArgs, args...)...)
 	if err != nil {
 		// Print c-v log before exiting with failure
 		cvLog := readCVLogContent("/tmp/ceph-log/ceph-volume.log")

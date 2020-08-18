@@ -492,10 +492,12 @@ func TestParseCephVolumeLVMResult(t *testing.T) {
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("%s %v", command, args)
 
-		if command == "ceph-volume" {
-			return cephVolumeLVMTestResult, nil
+		logger.Infof("%s %v", command, args)
+		if command == "stdbuf" {
+			if args[4] == "lvm" && args[5] == "list" {
+				return cephVolumeLVMTestResult, nil
+			}
 		}
-
 		return "", errors.Errorf("unknown command %s %s", command, args)
 	}
 
@@ -510,12 +512,13 @@ func TestParseCephVolumeRawResult(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("%s %v", command, args)
-
-		if command == "ceph-volume" {
-			return cephVolumeRAWTestResult, nil
+		if command == "stdbuf" {
+			if args[4] == "raw" && args[5] == "list" {
+				return cephVolumeRAWTestResult, nil
+			}
 		}
 
-		return "", errors.Errorf("unknown command %s %s", command, args)
+		return "", errors.Errorf("unknown command: %s, args: %#v", command, args)
 	}
 	clusterInfo := &cephclient.ClusterInfo{Namespace: "name"}
 
@@ -532,8 +535,10 @@ func TestCephVolumeResultMultiClusterSingleOSD(t *testing.T) {
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("%s %v", command, args)
 
-		if command == "ceph-volume" {
-			return cephVolumeTestResultMultiCluster, nil
+		if command == "stdbuf" {
+			if args[4] == "lvm" && args[5] == "list" {
+				return cephVolumeTestResultMultiCluster, nil
+			}
 		}
 
 		return "", errors.Errorf("unknown command %s %s", command, args)
@@ -541,6 +546,7 @@ func TestCephVolumeResultMultiClusterSingleOSD(t *testing.T) {
 
 	context := &clusterd.Context{Executor: executor}
 	osds, err := GetCephVolumeLVMOSDs(context, &cephclient.ClusterInfo{Namespace: "name"}, "451267e6-883f-4936-8dff-080d781c67d5", "", false, false)
+
 	assert.Nil(t, err)
 	require.NotNil(t, osds)
 	assert.Equal(t, 1, len(osds))
@@ -553,8 +559,10 @@ func TestCephVolumeResultMultiClusterMultiOSD(t *testing.T) {
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("%s %v", command, args)
 
-		if command == "ceph-volume" {
-			return cephVolumeTestResultMultiClusterMultiOSD, nil
+		if command == "stdbuf" {
+			if args[4] == "lvm" && args[5] == "list" {
+				return cephVolumeTestResultMultiClusterMultiOSD, nil
+			}
 		}
 
 		return "", errors.Errorf("unknown command %s% s", command, args)
@@ -607,20 +615,40 @@ func TestPrintCVLogContent(t *testing.T) {
 }
 
 func TestGetEncryptedBlockPath(t *testing.T) {
+	cvOp := `
+2020-08-13 13:33:55.181541 D | exec: Running command: stdbuf -oL ceph-volume --log-path /var/log/ceph/set1-data-0-hfdc6 raw prepare --bluestore --data /dev/xvdce --crush-device-class hybriddu13 --dmcrypt --block.db /dev/xvdbb --block.wal /dev/xvdcu
+2020-08-13 13:34:34.246638 I | cephosd: Running command: /usr/bin/ceph-authtool --gen-print-key
+Running command: /usr/bin/ceph-authtool --gen-print-key
+Running command: /usr/bin/ceph --cluster ceph --name client.bootstrap-osd --keyring /var/lib/ceph/bootstrap-osd/ceph.keyring -i - osd new e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d
+Running command: /usr/bin/ceph-authtool --gen-print-key
+Running command: /usr/sbin/cryptsetup --batch-mode --key-file - luksFormat /dev/xvdce
+Running command: /usr/sbin/cryptsetup --key-file - --allow-discards luksOpen /dev/xvdce ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdce-block-dmcrypt
+Running command: /usr/sbin/cryptsetup --batch-mode --key-file - luksFormat /dev/xvdcu
+Running command: /usr/sbin/cryptsetup --key-file - --allow-discards luksOpen /dev/xvdcu ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdcu-wal-dmcrypt
+Running command: /usr/sbin/cryptsetup --batch-mode --key-file - luksFormat /dev/xvdbb
+Running command: /usr/sbin/cryptsetup --key-file - --allow-discards luksOpen /dev/xvdbb ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdbb-db-dmcrypt
+Running command: /usr/bin/mount -t tmpfs tmpfs /var/lib/ceph/osd/ceph-2
+Running command: /usr/bin/chown -R ceph:ceph /dev/mapper/ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdce-block-dmcrypt
+Running command: /usr/bin/ln -s /dev/mapper/ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdce-block-dmcrypt /var/lib/ceph/osd/ceph-2/block
+Running command: /usr/bin/ceph --cluster ceph --name client.bootstrap-osd --keyring /var/lib/ceph/bootstrap-osd/ceph.keyring mon getmap -o /var/lib/ceph/osd/ceph-2/activate.monmap`
+
 	type args struct {
-		op string
+		op        string
+		blockType string
 	}
 	tests := []struct {
 		name string
 		args args
 		want string
 	}{
-		{"not-found", args{"Running command: /usr/bin/mount -t tmpfs tmpfs /var/lib/ceph/osd/ceph-1"}, ""},
-		{"found", args{"Running command: /usr/sbin/cryptsetup --key-file - --allow-discards luksOpen /dev/xvdbr ceph-43e9efed-0676-4731-b75a-a4c42ece1bb1-xvdbr-block-dmcrypt"}, "/dev/mapper/ceph-43e9efed-0676-4731-b75a-a4c42ece1bb1-xvdbr-block-dmcrypt"},
+		{"not-found", args{"Running command: /usr/bin/mount -t tmpfs tmpfs /var/lib/ceph/osd/ceph-1", "block-dmcrypt"}, ""},
+		{"found-block", args{cvOp, "block-dmcrypt"}, "/dev/mapper/ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdce-block-dmcrypt"},
+		{"found-db", args{cvOp, "db-dmcrypt"}, "/dev/mapper/ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdbb-db-dmcrypt"},
+		{"found-wal", args{cvOp, "wal-dmcrypt"}, "/dev/mapper/ceph-e3c9ca4a-d00f-464b-9ac7-91fb151f6c8d-xvdcu-wal-dmcrypt"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := getEncryptedBlockPath(tt.args.op); got != tt.want {
+			if got := getEncryptedBlockPath(tt.args.op, tt.args.blockType); got != tt.want {
 				t.Errorf("getEncryptedBlockPath() = %v, want %v", got, tt.want)
 			}
 		})
