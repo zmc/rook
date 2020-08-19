@@ -134,6 +134,7 @@ type osdProperties struct {
 	resources           v1.ResourceRequirements
 	storeConfig         osdconfig.StoreConfig
 	placement           rookv1.Placement
+	preparePlacement    *rookv1.Placement
 	metadataDevice      string
 	location            string
 	portable            bool
@@ -157,12 +158,21 @@ func (osdProps osdProperties) onPVCWithWal() bool {
 	return osdProps.walPVC.ClaimName != ""
 }
 
+func (osdProps osdProperties) getPreparePlacement() rookv1.Placement {
+	// If the osd prepare placement is specified, use it
+	if osdProps.preparePlacement != nil {
+		return *osdProps.preparePlacement
+	}
+	// Fall back to use the same placement as requested for the osd daemons
+	return osdProps.placement
+}
+
 // Start the osd management
 func (c *Cluster) Start() error {
 	config := c.newProvisionConfig()
 
 	// Validate pod's memory if specified
-	err := controller.CheckPodMemory(cephv1.GetOSDResources(c.spec.Resources), cephOsdPodMinimumMemory)
+	err := controller.CheckPodMemory(cephv1.ResourcesKeyOSD, cephv1.GetOSDResources(c.spec.Resources), cephOsdPodMinimumMemory)
 	if err != nil {
 		return errors.Wrap(err, "failed to check pod memory")
 	}
@@ -244,6 +254,7 @@ func (c *Cluster) startProvisioningOverPVCs(config *provisionConfig) {
 			walPVC:           walSource,
 			resources:        volume.Resources,
 			placement:        volume.Placement,
+			preparePlacement: volume.PreparePlacement,
 			portable:         volume.Portable,
 			crushDeviceClass: volume.CrushDeviceClass,
 			schedulerName:    volume.SchedulerName,
@@ -252,18 +263,15 @@ func (c *Cluster) startProvisioningOverPVCs(config *provisionConfig) {
 
 		logger.Debugf("osdProps are %+v", osdProps)
 
-		// If the deviceSet template has "encrypted" but the Ceph version is not compatible
 		if osdProps.encrypted {
+			// If the deviceSet template has "encrypted" but the Ceph version is not compatible
 			if !c.isCephVolumeRawModeSupported() {
 				errMsg := fmt.Sprintf("failed to validate storageClassDeviceSet %q. min required ceph version to support encryption is %q or %q", volume.Name, cephVolumeRawEncryptionModeMinNautilusCephVersion.String(), cephVolumeRawEncryptionModeMinOctopusCephVersion.String())
 				config.addError(errMsg)
 				continue
 			}
-		}
 
-		// create encryption Kubernetes Secret if the PVC is encrypted
-		if osdProps.encrypted {
-			// Generate dmcrypt key
+			// create encryption Kubernetes Secret if the PVC is encrypted
 			key, err := generateDmCryptKey()
 			if err != nil {
 				errMsg := fmt.Sprintf("failed to generate dmcrypt key for osd claim %q. %v", osdProps.pvc.ClaimName, err)
@@ -715,6 +723,7 @@ func (c *Cluster) getOSDPropsForPVC(pvcName string) (osdProperties, error) {
 				walPVC:              walSource,
 				resources:           volumeSource.Resources,
 				placement:           volumeSource.Placement,
+				preparePlacement:    volumeSource.PreparePlacement,
 				portable:            volumeSource.Portable,
 				tuneSlowDeviceClass: volumeSource.TuneSlowDeviceClass,
 				pvcSize:             volumeSource.Size,
