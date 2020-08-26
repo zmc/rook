@@ -51,7 +51,7 @@ import (
 var (
 	logger                                            = capnslog.NewPackageLogger("github.com/rook/rook", "op-osd")
 	updateDeploymentAndWait                           = mon.UpdateCephDeploymentAndWait
-	cephVolumeRawEncryptionModeMinNautilusCephVersion = cephver.CephVersion{Major: 14, Minor: 2, Extra: 11}
+	cephVolumeRawEncryptionModeMinNautilusCephVersion = cephver.CephVersion{Major: 14, Minor: 2, Extra: 8}
 	cephVolumeRawEncryptionModeMinOctopusCephVersion  = cephver.CephVersion{Major: 15, Minor: 2, Extra: 5}
 )
 
