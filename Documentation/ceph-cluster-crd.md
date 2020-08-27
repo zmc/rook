@@ -111,7 +111,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
   * On **Minikube** environments, use `/data/rook`. Minikube boots into a tmpfs but it provides some [directories](https://github.com/kubernetes/minikube/blob/master/site/content/en/docs/handbook/persistent_volumes.md#a-note-on-mounts-persistence-and-minikube-hosts) where files can be persisted across reboots. Using one of these directories will ensure that Rook's data and configuration files are persisted and that enough storage space is available.
   * **WARNING**: For test scenarios, if you delete a cluster and start a new cluster on the same hosts, the path used by `dataDirHostPath` must be deleted. Otherwise, stale keys and other config will remain from the previous cluster and the new mons will fail to start.
 If this value is empty, each pod will get an ephemeral directory to store their config files that is tied to the lifetime of the pod running on that node. More details can be found in the Kubernetes [empty dir docs](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir).
-* `skipUpgradeChecks`: if set to true Rook won't perform any upgrade checks on Ceph daemons during an upgrade. Use this at **YOUR OWN RISK**, only if you know what you're doing. To understand Rook's upgrade process of Ceph, read the [upgrade doc](Documentation/ceph-upgrade.html#ceph-version-upgrades).
+* `skipUpgradeChecks`: if set to true Rook won't perform any upgrade checks on Ceph daemons during an upgrade. Use this at **YOUR OWN RISK**, only if you know what you're doing. To understand Rook's upgrade process of Ceph, read the [upgrade doc](ceph-upgrade.md#ceph-version-upgrades).
 * `continueUpgradeAfterChecksEvenIfNotHealthy`: if set to true Rook will continue the OSD daemon upgrade process even if the PGs are not clean, or continue with the MDS upgrade even the file system is not healthy.
 * `dashboard`: Settings for the Ceph dashboard. To view the dashboard in your browser see the [dashboard guide](ceph-dashboard.md).
   * `enabled`: Whether to enable the dashboard to view cluster status
@@ -131,7 +131,8 @@ For more details on the mons and when to choose a number other than `3`, see the
   * `modules`: is the list of Ceph manager modules to enable
 * `crashCollector`: The settings for crash collector daemon(s).
   * `disable`: is set to `true`, the crash collector will not run on any node where a Ceph daemon runs
-* `annotations`: [annotations configuration settings](#annotations-configuration-settings)
+* `annotations`: [annotations configuration settings](#annotations-and-labels)
+* `labels`: [labels configuration settings](#annotations-and-labels)
 * `placement`: [placement configuration settings](#placement-configuration-settings)
 * `resources`: [resources configuration settings](#cluster-wide-resources-configuration-settings)
 * `priorityClassNames`: [priority class names configuration settings](#priority-class-names-configuration-settings)
@@ -376,16 +377,17 @@ A Drive Group is defined by a name, a Ceph Drive Group spec, and a Rook placemen
   (Optional) Default is no placement criteria, which matches all untainted nodes.
   The syntax is the same as for [other placement configuration](#placement-configuration-settings).
 
-### Annotations Configuration Settings
+### Annotations and Labels
 
-Annotations can be specified so that the Rook components will have those annotations added to them.
+Annotations and Labels can be specified so that the Rook components will have those annotations / labels added to them.
 
-You can set annotations for Rook components for the list of key value pairs:
+You can set annotations / labels for Rook components for the list of key value pairs:
 
-* `all`: Set annotations for all components
-* `mgr`: Set annotations for MGRs
-* `mon`: Set annotations for mons
-* `osd`: Set annotations for OSDs
+* `all`: Set annotations / labels for all components
+* `mgr`: Set annotations / labels for MGRs
+* `mon`: Set annotations / labels for mons
+* `osd`: Set annotations / labels for OSDs
+* `prepareosd`: Set annotations / labels for OSD Prepare Jobs
 
 When other keys are set, `all` will be merged together with the specific component.
 
