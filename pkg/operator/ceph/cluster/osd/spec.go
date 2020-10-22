@@ -419,7 +419,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	podTemplateSpec := v1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   AppName,
-			Labels: c.getOSDLabels(osd.ID, failureDomainValue, osdProps.portable),
+			Labels: c.getOSDLabels(osd, failureDomainValue, osdProps.portable),
 		},
 		Spec: v1.PodSpec{
 			RestartPolicy:      v1.RestartPolicyAlways,
@@ -462,7 +462,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deploymentName,
 			Namespace: c.clusterInfo.Namespace,
-			Labels:    c.getOSDLabels(osd.ID, failureDomainValue, osdProps.portable),
+			Labels:    c.getOSDLabels(osd, failureDomainValue, osdProps.portable),
 		},
 		Spec: apps.DeploymentSpec{
 			Selector: &metav1.LabelSelector{

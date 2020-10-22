@@ -47,6 +47,8 @@ spec:
                   type: boolean
                 osdMaintenanceTimeout:
                   type: integer
+                pgHealthCheckTimeout:
+                  type: integer
                 manageMachineDisruptionBudgets:
                   type: boolean
             skipUpgradeChecks:
@@ -87,6 +89,8 @@ spec:
                     managePodBudgets:
                       type: boolean
                     osdMaintenanceTimeout:
+                      type: integer
+                    pgHealthCheckTimeout:
                       type: integer
                     manageMachineDisruptionBudgets:
                       type: boolean
