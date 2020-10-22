@@ -860,6 +860,9 @@ rules:
   - csidrivers
   verbs:
   - create
+  - delete
+  - get
+  - update
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1beta1
