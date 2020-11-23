@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -47,6 +48,18 @@ var (
 	// OperatorCephBaseImageVersion is the ceph version in the operator image
 	OperatorCephBaseImageVersion string
 )
+
+// CheckForCancelledOrchestration checks whether a cancellation has been requested
+func CheckForCancelledOrchestration(context *clusterd.Context) error {
+	defer context.RequestCancelOrchestration.UnSet()
+
+	// Check whether we need to cancel the orchestration
+	if context.RequestCancelOrchestration.IsSet() {
+		return errors.New("CANCELLING CURRENT ORCHESTATION")
+	}
+
+	return nil
+}
 
 // IsReadyToReconcile determines if a controller is ready to reconcile or not
 func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, namespacedName types.NamespacedName, controllerName string) (cephv1.CephCluster, bool, bool, reconcile.Result) {
