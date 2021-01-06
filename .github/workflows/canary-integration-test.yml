@@ -38,7 +38,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: deploy rook
       run: |
@@ -46,6 +46,8 @@ jobs:
         kubectl create -f cluster/examples/kubernetes/ceph/common.yaml
         kubectl create -f cluster/examples/kubernetes/ceph/operator.yaml
         sed -i "s|#deviceFilter:|deviceFilter: $(lsblk|awk '/14G/ {print $1}'| head -1)|g" cluster/examples/kubernetes/ceph/cluster-test.yaml
+        # recent c-v changes don't allow OSDs on a partition, so we stick with v15.2.7 until that is resolved
+        sed -i "s|:v15|:v15.2.7|g" cluster/examples/kubernetes/ceph/cluster-test.yaml
         kubectl create -f cluster/examples/kubernetes/ceph/cluster-test.yaml
         kubectl create -f cluster/examples/kubernetes/ceph/object-test.yaml
         kubectl create -f cluster/examples/kubernetes/ceph/pool-test.yaml
@@ -118,7 +120,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prerequisites
       run: |
@@ -198,7 +200,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prerequisites
       run: |
@@ -278,7 +280,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prerequisites
       run: |
@@ -348,7 +350,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prerequisites
       run: |
@@ -428,7 +430,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prerequisites
       run: |
@@ -508,7 +510,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prerequisites
       run: |
@@ -577,7 +579,7 @@ jobs:
         # set VERSION to a dummy value since Jenkins normally sets it for us. Do this to make Helm happy and not fail with "Error: Invalid Semantic Version"
         GOPATH=$(go env GOPATH) make clean && make -j$nproc IMAGES='ceph' VERSION=0 build
         docker images
-        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.3
+        docker tag $(docker images|awk '/build-/ {print $1}') rook/ceph:v1.5.4
 
     - name: rook prereq
       run: |

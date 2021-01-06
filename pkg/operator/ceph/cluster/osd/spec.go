@@ -238,10 +238,11 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	volumeMounts := controller.CephVolumeMounts(provisionConfig.DataPathMap, false)
 	configVolumeMounts := controller.RookVolumeMounts(provisionConfig.DataPathMap, false)
 	// When running on PVC, the OSDs don't need a bindmount on dataDirHostPath, only the monitors do
+	dataDirHostPath := c.spec.DataDirHostPath
 	if osdProps.onPVC() {
-		c.spec.DataDirHostPath = ""
+		dataDirHostPath = ""
 	}
-	volumes := controller.PodVolumes(provisionConfig.DataPathMap, c.spec.DataDirHostPath, false)
+	volumes := controller.PodVolumes(provisionConfig.DataPathMap, dataDirHostPath, false)
 	failureDomainValue := osdProps.crushHostname
 	doConfigInit := true       // initialize ceph.conf in init container?
 	doBinaryCopyInit := true   // copy tini and rook binaries in an init container?
@@ -563,7 +564,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 		}
 	}
 
-	removeDuplicateEnvVars(&podTemplateSpec.Spec)
+	k8sutil.RemoveDuplicateEnvVars(&podTemplateSpec.Spec)
 
 	deployment := &apps.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -622,30 +623,6 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 	}
 
 	return deployment, nil
-}
-
-func removeDuplicateEnvVars(pod *v1.PodSpec) {
-	for i := range pod.Containers {
-		removeDuplicateEnvVarsFromContainer(&pod.Containers[i])
-	}
-	for i := range pod.InitContainers {
-		removeDuplicateEnvVarsFromContainer(&pod.InitContainers[i])
-	}
-}
-
-func removeDuplicateEnvVarsFromContainer(container *v1.Container) {
-	foundVars := map[string]string{}
-	vars := []v1.EnvVar{}
-	for _, v := range container.Env {
-		if _, ok := foundVars[v.Name]; ok {
-			logger.Debugf("duplicate env var %q skipped on container %q", v.Name, container.Name)
-			continue
-		}
-
-		vars = append(vars, v)
-		foundVars[v.Name] = v.Value
-	}
-	container.Env = vars
 }
 
 // To get rook inside the container, the config init container needs to copy "tini" and "rook" binaries into a volume.

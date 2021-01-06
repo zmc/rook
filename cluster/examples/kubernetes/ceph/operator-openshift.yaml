@@ -45,10 +45,10 @@ users:
   # A user needs to be added for each rook service account.
   # This assumes running in the default sample "rook-ceph" namespace.
   # If other namespaces or service accounts are configured, they need to be updated here.
-  - system:serviceaccount:rook-ceph:rook-ceph-system
-  - system:serviceaccount:rook-ceph:default
-  - system:serviceaccount:rook-ceph:rook-ceph-mgr
-  - system:serviceaccount:rook-ceph:rook-ceph-osd
+  - system:serviceaccount:rook-ceph:rook-ceph-system # serviceaccount:namespace:operator
+  - system:serviceaccount:rook-ceph:default # serviceaccount:namespace:cluster
+  - system:serviceaccount:rook-ceph:rook-ceph-mgr # serviceaccount:namespace:cluster
+  - system:serviceaccount:rook-ceph:rook-ceph-osd # serviceaccount:namespace:cluster
 ---
 # scc for the CSI driver
 kind: SecurityContextConstraints
@@ -82,10 +82,10 @@ users:
   # A user needs to be added for each rook service account.
   # This assumes running in the default sample "rook-ceph" namespace.
   # If other namespaces or service accounts are configured, they need to be updated here.
-  - system:serviceaccount:rook-ceph:rook-csi-rbd-plugin-sa
-  - system:serviceaccount:rook-ceph:rook-csi-rbd-provisioner-sa
-  - system:serviceaccount:rook-ceph:rook-csi-cephfs-plugin-sa
-  - system:serviceaccount:rook-ceph:rook-csi-cephfs-provisioner-sa
+  - system:serviceaccount:rook-ceph:rook-csi-rbd-plugin-sa # serviceaccount:namespace:operator
+  - system:serviceaccount:rook-ceph:rook-csi-rbd-provisioner-sa # serviceaccount:namespace:operator
+  - system:serviceaccount:rook-ceph:rook-csi-cephfs-plugin-sa # serviceaccount:namespace:operator
+  - system:serviceaccount:rook-ceph:rook-csi-cephfs-provisioner-sa # serviceaccount:namespace:operator
 ---
 # Rook Ceph Operator Config
 # Use this ConfigMap to override operator configurations
@@ -96,7 +96,7 @@ apiVersion: v1
 metadata:
   name: rook-ceph-operator-config
   # should be in the namespace of the operator
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:operator
 data:
   # Enable the CSI driver.
   # To run the non-default version of the CSI driver, see the override-able image properties in operator.yaml
@@ -109,6 +109,13 @@ data:
   # Supported values from 0 to 5. 0 for general useful logs, 5 for trace level verbosity.
   # CSI_LOG_LEVEL: "0"
 
+  # OMAP generator generates the omap mapping between the PV name and the RBD image
+  # which helps CSI to identify the rbd images for CSI operations.
+  # CSI_ENABLE_OMAP_GENERATOR need to be enabled when we are using rbd mirroring feature.
+  # By default OMAP generator is disabled and when enabled it willbe deployed as a
+  # sidecar with CSI provisioner pod, to enable set it to true.
+  # CSI_ENABLE_OMAP_GENERATOR: "true"
+
   # Enable Ceph Kernel clients on kernel < 4.17 which support quotas for Cephfs
   # If you disable the kernel client, your application may be disrupted during upgrade.
   # See the upgrade guide: https://rook.io/docs/rook/master/ceph-upgrade.html
@@ -119,7 +126,7 @@ data:
   # The default version of CSI supported by Rook will be started. To change the version
   # of the CSI driver to something other than what is officially supported, change
   # these images to the desired release of the CSI driver.
-  # ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v3.1.2"
+  # ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v3.2.0"
   # ROOK_CSI_REGISTRAR_IMAGE: "k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.0.1"
   # ROOK_CSI_RESIZER_IMAGE: "k8s.gcr.io/sig-storage/csi-resizer:v1.0.0"
   # ROOK_CSI_PROVISIONER_IMAGE: "k8s.gcr.io/sig-storage/csi-provisioner:v2.0.0"
@@ -347,7 +354,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rook-ceph-operator
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:operator
   labels:
     operator: rook
     storage-backend: ceph
@@ -364,7 +371,7 @@ spec:
       serviceAccountName: rook-ceph-system
       containers:
       - name: rook-ceph-operator
-        image: rook/ceph:v1.5.3
+        image: rook/ceph:v1.5.4
         args: ["ceph", "operator"]
         volumeMounts:
         - mountPath: /var/lib/rook

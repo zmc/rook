@@ -46,7 +46,7 @@ If the `FSTYPE` field is not empty, there is a filesystem on top of the correspo
 If you're feeling lucky, a simple Rook cluster can be created with the following kubectl commands and [example yaml files](https://github.com/rook/rook/blob/{{ branchName }}/cluster/examples/kubernetes/ceph). For the more detailed install, skip to the next section to [deploy the Rook operator](#deploy-the-rook-operator).
 
 ```console
-git clone --single-branch --branch v1.5.3 https://github.com/rook/rook.git
+git clone --single-branch --branch v1.5.4 https://github.com/rook/rook.git
 cd rook/cluster/examples/kubernetes/ceph
 kubectl create -f crds.yaml -f common.yaml -f operator.yaml
 kubectl create -f cluster.yaml
@@ -85,6 +85,9 @@ Before you start the operator in production, there are some settings that you ma
    1. Device discovery: Rook will watch for new devices to configure if the `ROOK_ENABLE_DISCOVERY_DAEMON` setting is enabled, commonly used in bare metal clusters.
    2. Flex driver: The flex driver is deprecated in favor of the CSI driver, but can still be enabled with the `ROOK_ENABLE_FLEX_DRIVER` setting.
    3. Node affinity and tolerations: The CSI driver by default will run on any node in the cluster. To configure the CSI driver affinity, several settings are available.
+
+If you wish to deploy into a namespace other than the default `rook-ceph`, see the
+[Ceph advanced configuration section](ceph-advanced-configuration.md#using-alternate-namespaces) on the topic.
 
 ## Create a Rook Ceph Cluster
 
