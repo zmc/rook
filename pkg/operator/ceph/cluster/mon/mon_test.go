@@ -262,7 +262,61 @@ func TestSaveMonEndpoints(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, "a=2.3.4.5:6789", cm.Data[EndpointDataKey])
 	assert.Equal(t, `{"node":{"a":{"Name":"node0","Hostname":"myhost","Address":"1.1.1.1"}}}`, cm.Data[MappingKey])
-	assert.Equal(t, "2", cm.Data[MaxMonIDKey])
+	assert.Equal(t, "-1", cm.Data[MaxMonIDKey])
+
+	// Update the maxMonID to some random value
+	cm.Data[MaxMonIDKey] = "23"
+	_, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(cm)
+	assert.Nil(t, err)
+	// Confirm the maxMonId will be persisted and not updated to anything else.
+	// The value is only expected to be set directly to the configmap when a mon deployment is started.
+	err = c.saveMonConfig()
+	assert.Nil(t, err)
+	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	assert.Nil(t, err)
+	assert.Equal(t, "23", cm.Data[MaxMonIDKey])
+}
+
+func TestMaxMonID(t *testing.T) {
+	clientset := test.New(t, 1)
+	configDir, _ := ioutil.TempDir("", "")
+	defer os.RemoveAll(configDir)
+	c := New(&clusterd.Context{Clientset: clientset, ConfigDir: configDir}, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+
+	// when the configmap is not found, the maxMonID is -1
+	maxMonID, err := c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "-1", maxMonID)
+
+	// initialize the configmap
+	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
+	err = c.saveMonConfig()
+	assert.Nil(t, err)
+
+	// invalid mon names won't update the maxMonID
+	err = c.commitMaxMonID("bad-id")
+	assert.Error(t, err)
+
+	// starting a mon deployment will set the maxMonID
+	err = c.commitMaxMonID("a")
+	assert.Nil(t, err)
+	maxMonID, err = c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "0", maxMonID)
+
+	// set to a higher id
+	err = c.commitMaxMonID("d")
+	assert.Nil(t, err)
+	maxMonID, err = c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "3", maxMonID)
+
+	// setting to an id lower than the max will not update it
+	err = c.commitMaxMonID("c")
+	assert.Nil(t, err)
+	maxMonID, err = c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "3", maxMonID)
 }
 
 func TestMonInQuorum(t *testing.T) {
