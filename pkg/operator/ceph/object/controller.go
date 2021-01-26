@@ -136,6 +136,25 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		}
 	}
 
+	// Build Handler function to return the list of ceph object
+	// This is used by the watchers below
+	handlerFunc, err := opcontroller.ObjectToCRMapper(mgr.GetClient(), &cephv1.CephObjectStoreList{}, mgr.GetScheme())
+	if err != nil {
+		return err
+	}
+
+	// Watch for CephCluster Spec changes that we want to propagate to us
+	err = c.Watch(&source.Kind{Type: &cephv1.CephCluster{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       opcontroller.ClusterResource.Kind,
+			APIVersion: opcontroller.ClusterResource.APIVersion,
+		},
+	},
+	}, &handler.EnqueueRequestsFromMapFunc{ToRequests: handlerFunc}, opcontroller.WatchCephClusterPredicate())
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -308,7 +327,7 @@ func (r *ReconcileCephObjectStore) reconcileCreateObjectStore(cephObjectStore *c
 	var serviceIP string
 	var err error
 
-	if r.clusterSpec.External.Enable {
+	if cephObjectStore.Spec.IsExternal() {
 		logger.Info("reconciling external object store")
 
 		// RECONCILE SERVICE

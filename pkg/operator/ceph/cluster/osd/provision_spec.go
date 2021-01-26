@@ -114,7 +114,7 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 
 	if osdProps.onPVC() {
 		// Create volume config for PVCs
-		volumes = append(volumes, getPVCOSDVolumes(&osdProps)...)
+		volumes = append(volumes, getPVCOSDVolumes(&osdProps, c.spec.DataDirHostPath, c.clusterInfo.Namespace, true)...)
 		if osdProps.encrypted {
 			// If a KMS is configured we populate
 			if c.spec.Security.KeyManagementService.IsEnabled() {
@@ -153,10 +153,13 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 	if c.spec.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
+
+	p := cephv1.GetOSDPlacement(c.spec.Placement)
 	if !osdProps.onPVC() {
-		cephv1.GetOSDPlacement(c.spec.Placement).ApplyToPodSpec(&podSpec)
+		p.ApplyToPodSpec(&podSpec)
 	} else {
 		osdProps.getPreparePlacement().ApplyToPodSpec(&podSpec)
+		p.ApplyToPodSpec(&podSpec)
 	}
 	k8sutil.RemoveDuplicateEnvVars(&podSpec)
 

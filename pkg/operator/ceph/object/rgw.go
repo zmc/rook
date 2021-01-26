@@ -289,10 +289,7 @@ func (c *clusterConfig) deleteStore() error {
 
 		objContext.Endpoint = c.store.Status.Info["endpoint"]
 
-		err = disableRGWDashboard(objContext)
-		if err != nil {
-			logger.Warningf("failed to disable dashboard for rgw. %v", err)
-		}
+		go disableRGWDashboard(objContext)
 
 		err = deleteRealmAndPools(objContext, c.store.Spec)
 		if err != nil {
@@ -353,13 +350,6 @@ func (r *ReconcileCephObjectStore) validateStore(s *cephv1.CephObjectStore) erro
 	if !emptyPool(s.Spec.DataPool) {
 		if err := pool.ValidatePoolSpec(r.context, r.clusterInfo, r.clusterSpec, &s.Spec.DataPool); err != nil {
 			return errors.Wrap(err, "invalid data pool spec")
-		}
-	}
-
-	// Fail if we detected an external CephCluster CR and the list of endpoints is empty
-	if r.clusterSpec.External.Enable && r.clusterInfo.CephCred.Username != cephclient.AdminUsername {
-		if len(s.Spec.Gateway.ExternalRgwEndpoints) == 0 {
-			return errors.New("ceph cluster is external but externalRgwEndpoints list is empty")
 		}
 	}
 
