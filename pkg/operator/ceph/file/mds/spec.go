@@ -32,6 +32,7 @@ import (
 )
 
 const (
+	podIPEnvVar = "ROOK_POD_IP"
 	// MDS cache memory limit should be set to 50-60% of RAM reserved for the MDS container
 	// MDS uses approximately 125% of the value of mds_cache_memory_limit in RAM.
 	// Eventually we will tune this automatically: http://tracker.ceph.com/issues/36663
@@ -41,7 +42,7 @@ const (
 func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) (*apps.Deployment, error) {
 
 	mdsContainer := c.makeMdsDaemonContainer(mdsConfig)
-	config.ConfigureLivenessProbe(cephv1.KeyMds, mdsContainer, c.clusterSpec.HealthCheck)
+	mdsContainer = config.ConfigureLivenessProbe(cephv1.KeyMds, mdsContainer, c.clusterSpec.HealthCheck)
 
 	podSpec := v1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -127,6 +128,11 @@ func (c *Cluster) makeMdsDaemonContainer(mdsConfig *mdsConfig) v1.Container {
 		"--foreground",
 	)
 
+	if !c.clusterSpec.Network.IsHost() {
+		args = append(args,
+			config.NewFlag("public-addr", controller.ContainerEnvVarReference(podIPEnvVar)))
+	}
+
 	container := v1.Container{
 		Name: "mds",
 		Command: []string{
@@ -135,7 +141,7 @@ func (c *Cluster) makeMdsDaemonContainer(mdsConfig *mdsConfig) v1.Container {
 		Args:            args,
 		Image:           c.clusterSpec.CephVersion.Image,
 		VolumeMounts:    controller.DaemonVolumeMounts(mdsConfig.DataPathMap, mdsConfig.ResourceName),
-		Env:             controller.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
+		Env:             append(controller.DaemonEnvVars(c.clusterSpec.CephVersion.Image), k8sutil.PodIPEnvVar(podIPEnvVar)),
 		Resources:       c.fs.Spec.MetadataServer.Resources,
 		SecurityContext: controller.PodSecurityContext(),
 		LivenessProbe:   controller.GenerateLivenessProbeExecDaemon(config.MdsType, mdsConfig.DaemonID),
