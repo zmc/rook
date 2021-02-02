@@ -34,7 +34,7 @@ import (
 // Executor is the main interface for all the exec commands
 type Executor interface {
 	ExecuteCommand(command string, arg ...string) error
-	ExecuteCommandWithEnv(env []string, comand string, arg ...string) error
+	ExecuteCommandWithEnv(env []string, command string, arg ...string) error
 	ExecuteCommandWithOutput(command string, arg ...string) (string, error)
 	ExecuteCommandWithCombinedOutput(command string, arg ...string) (string, error)
 	ExecuteCommandWithOutputFile(command, outfileArg string, arg ...string) (string, error)
@@ -70,6 +70,7 @@ func (*CommandExecutor) ExecuteCommandWithEnv(env []string, command string, arg 
 // ExecuteCommandWithTimeout starts a process and wait for its completion with timeout.
 func (*CommandExecutor) ExecuteCommandWithTimeout(timeout time.Duration, command string, arg ...string) (string, error) {
 	logCommand(command, arg...)
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.Command(command, arg...)
 
 	var b bytes.Buffer
@@ -122,6 +123,7 @@ func (*CommandExecutor) ExecuteCommandWithTimeout(timeout time.Duration, command
 // ExecuteCommandWithOutput executes a command with output
 func (*CommandExecutor) ExecuteCommandWithOutput(command string, arg ...string) (string, error) {
 	logCommand(command, arg...)
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.Command(command, arg...)
 	return runCommandWithOutput(cmd, false)
 }
@@ -129,11 +131,13 @@ func (*CommandExecutor) ExecuteCommandWithOutput(command string, arg ...string) 
 // ExecuteCommandWithCombinedOutput executes a command with combined output
 func (*CommandExecutor) ExecuteCommandWithCombinedOutput(command string, arg ...string) (string, error) {
 	logCommand(command, arg...)
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.Command(command, arg...)
 	return runCommandWithOutput(cmd, true)
 }
 
 // ExecuteCommandWithOutputFileTimeout Same as ExecuteCommandWithOutputFile but with a timeout limit.
+// #nosec G307 Calling defer to close the file without checking the error return is not a risk for a simple file open and close
 func (*CommandExecutor) ExecuteCommandWithOutputFileTimeout(timeout time.Duration,
 	command, outfileArg string, arg ...string) (string, error) {
 
@@ -150,6 +154,7 @@ func (*CommandExecutor) ExecuteCommandWithOutputFileTimeout(timeout time.Duratio
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.CommandContext(ctx, command, arg...)
 	cmdOut, err := cmd.CombinedOutput()
 
@@ -168,10 +173,14 @@ func (*CommandExecutor) ExecuteCommandWithOutputFileTimeout(timeout time.Duratio
 	}
 
 	fileOut, err := ioutil.ReadAll(outFile)
+	if err := outFile.Close(); err != nil {
+		return "", err
+	}
 	return string(fileOut), err
 }
 
 // ExecuteCommandWithOutputFile executes a command with output on a file
+// #nosec G307 Calling defer to close the file without checking the error return is not a risk for a simple file open and close
 func (*CommandExecutor) ExecuteCommandWithOutputFile(command, outfileArg string, arg ...string) (string, error) {
 
 	// create a temporary file to serve as the output file for the command to be run and ensure
@@ -187,8 +196,12 @@ func (*CommandExecutor) ExecuteCommandWithOutputFile(command, outfileArg string,
 	arg = append(arg, outfileArg, outFile.Name())
 
 	logCommand(command, arg...)
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.Command(command, arg...)
 	cmdOut, err := cmd.CombinedOutput()
+	if err != nil {
+		cmdOut = []byte(fmt.Sprintf("%s. %s", string(cmdOut), assertErrorType(err)))
+	}
 	// if there was anything that went to stdout/stderr then log it, even before we return an error
 	if string(cmdOut) != "" {
 		logger.Debug(string(cmdOut))
@@ -199,12 +212,16 @@ func (*CommandExecutor) ExecuteCommandWithOutputFile(command, outfileArg string,
 
 	// read the entire output file and return that to the caller
 	fileOut, err := ioutil.ReadAll(outFile)
+	if err := outFile.Close(); err != nil {
+		return "", err
+	}
 	return string(fileOut), err
 }
 
 func startCommand(env []string, command string, arg ...string) (*exec.Cmd, io.ReadCloser, io.ReadCloser, error) {
 	logCommand(command, arg...)
 
+	// #nosec G204 Rook controls the input to the exec arguments
 	cmd := exec.Command(command, arg...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -265,7 +282,7 @@ func runCommandWithOutput(cmd *exec.Cmd, combinedOutput bool) (string, error) {
 	} else {
 		output, err = cmd.Output()
 		if err != nil {
-			out = fmt.Sprintf("%s. %s", string(output), string(err.(*exec.ExitError).Stderr))
+			output = []byte(fmt.Sprintf("%s. %s", string(output), assertErrorType(err)))
 		}
 	}
 
@@ -280,4 +297,15 @@ func runCommandWithOutput(cmd *exec.Cmd, combinedOutput bool) (string, error) {
 
 func logCommand(command string, arg ...string) {
 	logger.Debugf("Running command: %s %s", command, strings.Join(arg, " "))
+}
+
+func assertErrorType(err error) string {
+	switch errType := err.(type) {
+	case *exec.ExitError:
+		return string(errType.Stderr)
+	case *exec.Error:
+		return errType.Error()
+	}
+
+	return ""
 }

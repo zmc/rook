@@ -23,17 +23,16 @@ import (
 	"sync"
 
 	"github.com/coreos/pkg/capnslog"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/daemon/ceph/osd"
 	oposd "github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 )
 
 const (
-	ddBS      = "1M"           // DD's block size
-	ddCount   = "10"           // DD runs over the first 10 offsets
-	ddFlags   = "direct,dsync" // DD's sync flags"
-	ddIf      = "/dev/zero"
-	ddUtility = "dd"
+	shredUtility = "shred"
+	shredBS      = "10M" // Shred's block size
 )
 
 var (
@@ -42,38 +41,38 @@ var (
 
 // DiskSanitizer is simple struct to old the context to execute the commands
 type DiskSanitizer struct {
-	context     *clusterd.Context
-	clusterName string
-	clusterFSID string
+	context           *clusterd.Context
+	clusterInfo       *client.ClusterInfo
+	sanitizeDisksSpec *cephv1.SanitizeDisksSpec
 }
 
 // NewDiskSanitizer is function that returns a full filled DiskSanitizer object
-func NewDiskSanitizer(context *clusterd.Context, clusterName, clusterFSID string) *DiskSanitizer {
+func NewDiskSanitizer(context *clusterd.Context, clusterInfo *client.ClusterInfo, sanitizeDisksSpec *cephv1.SanitizeDisksSpec) *DiskSanitizer {
 	return &DiskSanitizer{
-		context:     context,
-		clusterName: clusterName,
-		clusterFSID: clusterFSID,
+		context:           context,
+		clusterInfo:       clusterInfo,
+		sanitizeDisksSpec: sanitizeDisksSpec,
 	}
 }
 
 // StartSanitizeDisks main entrypoint of the cleanup package
-func StartSanitizeDisks(sanitizer *DiskSanitizer) {
+func (s *DiskSanitizer) StartSanitizeDisks() {
 	// LVM based OSDs
-	osdLVMList, err := osd.GetCephVolumeLVMOSDs(sanitizer.context, sanitizer.clusterName, sanitizer.clusterFSID, "", false, false)
+	osdLVMList, err := osd.GetCephVolumeLVMOSDs(s.context, s.clusterInfo, s.clusterInfo.FSID, "", false, false)
 	if err != nil {
 		logger.Errorf("failed to list lvm osd(s). %v", err)
 	} else {
 		// Start the sanitizing sequence
-		sanitizer.sanitizeLVMDisk(osdLVMList)
+		s.sanitizeLVMDisk(osdLVMList)
 	}
 
 	// Raw based OSDs
-	osdRawList, err := osd.GetCephVolumeRawOSDs(sanitizer.context, sanitizer.clusterName, sanitizer.clusterFSID, "", "", false)
+	osdRawList, err := osd.GetCephVolumeRawOSDs(s.context, s.clusterInfo, s.clusterInfo.FSID, "", "", "", false)
 	if err != nil {
 		logger.Errorf("failed to list raw osd(s). %v", err)
 	} else {
 		// Start the sanitizing sequence
-		sanitizer.sanitizeRawDisk(osdRawList)
+		s.sanitizeRawDisk(osdRawList)
 	}
 }
 
@@ -145,23 +144,42 @@ func (s *DiskSanitizer) returnPVDevice(disk string) []string {
 	return strings.Split(output, ":")
 }
 
-func (s *DiskSanitizer) buildDDArgs(disk string) []string {
-	ddArgs := []string{
-		fmt.Sprintf("if=%s", ddIf),
-		fmt.Sprintf("of=%s", disk),
-		fmt.Sprintf("bs=%s", ddBS),
-		fmt.Sprintf("count=%s", ddCount),
-		fmt.Sprintf("oflag=%s", ddFlags),
+func (s *DiskSanitizer) buildDataSource() string {
+	return fmt.Sprintf("/dev/%s", s.sanitizeDisksSpec.DataSource.String())
+}
+
+func (s *DiskSanitizer) buildShredArgs(disk string) []string {
+	var shredArgs []string
+
+	// If data source is not zero, then let's add zeros at the end of the pass
+	if s.sanitizeDisksSpec.DataSource != cephv1.SanitizeDataSourceZero {
+		shredArgs = append(shredArgs, "--zero")
 	}
 
-	return ddArgs
+	// If this is a quick pass let's just overwrite the first 10MB
+	if s.sanitizeDisksSpec.Method == cephv1.SanitizeMethodQuick {
+		shredArgs = append(shredArgs, fmt.Sprintf("--size=%s", shredBS))
+	}
+
+	// If the data source for randomness is zero
+	if s.sanitizeDisksSpec.DataSource == cephv1.SanitizeDataSourceZero {
+		shredArgs = append(shredArgs, fmt.Sprintf("--random-source=%s", s.buildDataSource()))
+	}
+
+	shredArgs = append(shredArgs, []string{
+		"--force",
+		"--verbose",
+		fmt.Sprintf("--iterations=%s", strconv.Itoa(int(s.sanitizeDisksSpec.Iteration))),
+		disk}...)
+
+	return shredArgs
 }
 
 func (s *DiskSanitizer) executeSanitizeCommand(disk string, wg *sync.WaitGroup) {
 	// On return, notify the WaitGroup that we’re done
 	defer wg.Done()
 
-	output, err := s.context.Executor.ExecuteCommandWithCombinedOutput(ddUtility, s.buildDDArgs(disk)...)
+	output, err := s.context.Executor.ExecuteCommandWithCombinedOutput(shredUtility, s.buildShredArgs(disk)...)
 	if err != nil {
 		logger.Errorf("failed to sanitize osd disk %q. %s. %v", disk, output, err)
 	}

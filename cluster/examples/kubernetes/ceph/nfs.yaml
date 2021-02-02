@@ -2,7 +2,7 @@ apiVersion: ceph.rook.io/v1
 kind: CephNFS
 metadata:
   name: my-nfs
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:cluster
 spec:
   rados:
     # RADOS pool where NFS client recovery data is stored.
@@ -43,4 +43,6 @@ spec:
     #    cpu: "500m"
     #    memory: "1024Mi"
     # the priority class to set to influence the scheduler's pod preemption
-    priorityClassName:
+    #priorityClassName:
+    # The logging levels: NIV_NULL | NIV_FATAL | NIV_MAJ | NIV_CRIT | NIV_WARN | NIV_EVENT | NIV_INFO | NIV_DEBUG | NIV_MID_DEBUG |NIV_FULL_DEBUG |NB_LOG_LEVEL
+    logLevel: NIV_INFO

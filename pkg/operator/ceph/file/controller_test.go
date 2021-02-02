@@ -147,6 +147,7 @@ var (
 )
 
 func TestCephFilesystemController(t *testing.T) {
+	ctx := context.TODO()
 	// Set DEBUG logging
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
 	os.Setenv("ROOK_LOG_LEVEL", "DEBUG")
@@ -169,7 +170,6 @@ func TestCephFilesystemController(t *testing.T) {
 		},
 		TypeMeta: controllerTypeMeta,
 	}
-	cephCluster := &cephv1.CephCluster{}
 
 	// Objects to track in the fake client.
 	object := []runtime.Object{
@@ -201,7 +201,7 @@ func TestCephFilesystemController(t *testing.T) {
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{})
 
 	// Create a fake client to mock API calls.
-	cl := fake.NewFakeClientWithScheme(s, object...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	// Create a ReconcileCephFilesystem object with the scheme and fake client.
 	r := &ReconcileCephFilesystem{client: cl, scheme: s, context: c}
 
@@ -214,7 +214,7 @@ func TestCephFilesystemController(t *testing.T) {
 		},
 	}
 	logger.Info("STARTING PHASE 1")
-	res, err := r.Reconcile(req)
+	res, err := r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 1 DONE")
@@ -224,7 +224,7 @@ func TestCephFilesystemController(t *testing.T) {
 	//
 	// FAILURE we have a cluster but it's not ready
 	//
-	cephCluster = &cephv1.CephCluster{
+	cephCluster := &cephv1.CephCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      namespace,
 			Namespace: namespace,
@@ -238,11 +238,11 @@ func TestCephFilesystemController(t *testing.T) {
 	}
 	object = append(object, cephCluster)
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	// Create a ReconcileCephFilesystem object with the scheme and fake client.
 	r = &ReconcileCephFilesystem{client: cl, scheme: s, context: c}
 	logger.Info("STARTING PHASE 2")
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 2 DONE")
@@ -255,7 +255,6 @@ func TestCephFilesystemController(t *testing.T) {
 
 	// Mock clusterInfo
 	secrets := map[string][]byte{
-		"cluster-name": []byte("foo-cluster"),
 		"fsid":         []byte(name),
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
@@ -268,7 +267,7 @@ func TestCephFilesystemController(t *testing.T) {
 		Data: secrets,
 		Type: k8sutil.RookType,
 	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	// Add ready status to the CephCluster
@@ -276,7 +275,7 @@ func TestCephFilesystemController(t *testing.T) {
 	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
 
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 
 	executor = &exectest.MockExecutor{
 		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
@@ -301,7 +300,7 @@ func TestCephFilesystemController(t *testing.T) {
 	r = &ReconcileCephFilesystem{client: cl, scheme: s, context: c}
 
 	logger.Info("STARTING PHASE 3")
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.False(t, res.Requeue)
 	err = r.client.Get(context.TODO(), req.NamespacedName, fs)

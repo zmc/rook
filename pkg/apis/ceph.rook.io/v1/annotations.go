@@ -30,14 +30,14 @@ func GetMonAnnotations(a rook.AnnotationsSpec) rook.Annotations {
 	return mergeAllAnnotationsWithKey(a, KeyMon)
 }
 
+// GetOSDPrepareAnnotations returns the annotations for the OSD service
+func GetOSDPrepareAnnotations(a rook.AnnotationsSpec) rook.Annotations {
+	return mergeAllAnnotationsWithKey(a, KeyOSDPrepare)
+}
+
 // GetOSDAnnotations returns the annotations for the OSD service
 func GetOSDAnnotations(a rook.AnnotationsSpec) rook.Annotations {
 	return mergeAllAnnotationsWithKey(a, KeyOSD)
-}
-
-// GetRGWAnnotations returns the Annotations for the RBD mirrors
-func GetRGWAnnotations(a rook.AnnotationsSpec) rook.Annotations {
-	return mergeAllAnnotationsWithKey(a, KeyRGW)
 }
 
 // GetCleanupAnnotations returns the Annotations for the cleanup job

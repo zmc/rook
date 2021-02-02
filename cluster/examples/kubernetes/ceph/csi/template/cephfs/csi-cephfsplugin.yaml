@@ -14,6 +14,9 @@ spec:
       labels:
         app: csi-cephfsplugin
         contains: csi-cephfsplugin-metrics
+        {{ range $key, $value := .CSICephFSPodLabels }}
+        {{ $key }}: "{{ $value }}"
+        {{ end }}
     spec:
       serviceAccount: rook-csi-cephfs-plugin-sa
       hostNetwork: true
@@ -35,10 +38,6 @@ spec:
             - "--v={{ .LogLevel }}"
             - "--csi-address=/csi/csi.sock"
             - "--kubelet-registration-path={{ .KubeletDirPath }}/plugins/{{ .DriverNamePrefix }}cephfs.csi.ceph.com/csi.sock"
-          lifecycle:
-            preStop:
-              exec:
-                  command: ["/bin/sh", "-c", "rm -rf /registration/{{ .DriverNamePrefix }}cephfs.csi.ceph.com /registration/{{ .DriverNamePrefix }}cephfs.csi.ceph.com-reg.sock"]
           env:
             - name: KUBE_NODE_NAME
               valueFrom:
@@ -63,8 +62,6 @@ spec:
             - "--v={{ .LogLevel }}"
             - "--nodeserver=true"
             - "--drivername={{ .DriverNamePrefix }}cephfs.csi.ceph.com"
-            - "--metadatastorage=k8s_configmap"
-            - "--mountcachedir=/mount-cache-dir"
             - "--pidlimit=-1"
             - "--metricsport={{ .CephFSGRPCMetricsPort }}"
             - "--forcecephkernelclient={{ .ForceCephFSKernelClient }}"
@@ -102,8 +99,6 @@ spec:
               readOnly: true
             - name: host-dev
               mountPath: /dev
-            - name: mount-cache-dir
-              mountPath: /mount-cache-dir
             - name: ceph-csi-config
               mountPath: /etc/ceph-csi-config/
             - name: keys-tmp-dir
@@ -158,8 +153,6 @@ spec:
         - name: host-dev
           hostPath:
             path: /dev
-        - name: mount-cache-dir
-          emptyDir: {}
         - name: ceph-csi-config
           configMap:
             name: rook-ceph-csi-config

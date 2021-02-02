@@ -17,11 +17,13 @@ limitations under the License.
 package installer
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	cassandrav1alpha1 "github.com/rook/rook/pkg/apis/cassandra.rook.io/v1alpha1"
 	"github.com/rook/rook/tests/framework/utils"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -49,7 +51,7 @@ func (ci *CassandraInstaller) InstallCassandra(systemNamespace, namespace string
 		return err
 	}
 	if !defaultExists {
-		if err := InstallHostPathProvisioner(ci.k8sHelper); err != nil {
+		if err := CreateHostPathPVs(ci.k8sHelper, 3, true, "5Gi"); err != nil {
 			return err
 		}
 	} else {
@@ -119,17 +121,18 @@ func (ci *CassandraInstaller) CreateCassandraCluster(namespace string, count int
 }
 
 func (ci *CassandraInstaller) DeleteCassandraCluster(namespace string) {
-
+	ctx := context.TODO()
 	// Delete Cassandra Cluster
 	logger.Infof("Uninstalling Cassandra from namespace %s", namespace)
 	err := ci.k8sHelper.DeleteResourceAndWait(true, "-n", namespace, cassandraCRD, namespace)
 	checkError(ci.T(), err, fmt.Sprintf("cannot remove cluster %s", namespace))
 
 	crdCheckerFunc := func() error {
-		_, err := ci.k8sHelper.RookClientset.CassandraV1alpha1().Clusters(namespace).Get(namespace, metav1.GetOptions{})
+		_, err := ci.k8sHelper.RookClientset.CassandraV1alpha1().Clusters(namespace).Get(ctx, namespace, metav1.GetOptions{})
 		return err
 	}
 	err = ci.k8sHelper.WaitForCustomResourceDeletion(namespace, crdCheckerFunc)
+	assert.NoError(ci.T(), err)
 
 	// Delete Namespace
 	logger.Infof("Deleting Cassandra Cluster namespace %s", namespace)
@@ -138,7 +141,7 @@ func (ci *CassandraInstaller) DeleteCassandraCluster(namespace string) {
 }
 
 func (ci *CassandraInstaller) UninstallCassandra(systemNamespace string, namespace string) {
-
+	ctx := context.TODO()
 	// Delete deployed Cluster
 	// ci.DeleteCassandraCluster(namespace)
 	cassandraCluster := ci.manifests.GetCassandraCluster(namespace, 0, "")
@@ -156,8 +159,8 @@ func (ci *CassandraInstaller) UninstallCassandra(systemNamespace string, namespa
 
 	//Remove "anon-user-access"
 	logger.Info("Removing anon-user-access ClusterRoleBinding")
-	ci.k8sHelper.Clientset.RbacV1().ClusterRoleBindings().Delete("anon-user-access", nil)
-
+	err = ci.k8sHelper.Clientset.RbacV1().ClusterRoleBindings().Delete(ctx, "anon-user-access", metav1.DeleteOptions{})
+	assert.NoError(ci.T(), err)
 	logger.Info("Successfully deleted all cassandra operator related objects.")
 }
 
@@ -166,6 +169,6 @@ func (ci *CassandraInstaller) GatherAllCassandraLogs(systemNamespace, namespace,
 		return
 	}
 	logger.Infof("Gathering all logs from Cassandra Cluster %s", namespace)
-	ci.k8sHelper.GetLogsFromNamespace(systemNamespace, testName, testEnvName())
-	ci.k8sHelper.GetLogsFromNamespace(namespace, testName, testEnvName())
+	ci.k8sHelper.GetLogsFromNamespace(systemNamespace, testName, utils.TestEnvName())
+	ci.k8sHelper.GetLogsFromNamespace(namespace, testName, utils.TestEnvName())
 }

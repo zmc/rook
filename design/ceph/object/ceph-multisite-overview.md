@@ -1,8 +1,8 @@
 ## Ceph Multisite Overview
 
-Multisite is a feature of Ceph that allows object stores to replicate its data over multiple Ceph clusters. 
+Multisite is a feature of Ceph that allows object stores to replicate its data over multiple Ceph clusters.
 
-Multisite also allows object stores to be independent and isloated from other object stores in a cluster.
+Multisite also allows object stores to be independent and isolated from other object stores in a cluster.
 
 ### Ceph Multisite data model
 
@@ -34,11 +34,11 @@ When a ceph-object-store is created without the `zone` section; a realm, zone gr
 
 Since it is the only ceph-object-store in the realm, the data in the ceph-object-store remain independent and isolated from others on the same cluster.
 
-When a ceph-object-store is created with the `zone` section, the Ceph Multisite will be configured. 
+When a ceph-object-store is created with the `zone` section, the Ceph Multisite will be configured.
 
 The ceph-object-store will join a zone, zone group, and realm with a different than it's own.
 
-This allows the ceph-object-store to replacte it's data over multiple Ceph clusters.
+This allows the ceph-object-store to replace it's data over multiple Ceph clusters.
 
 ### Overview Ceph Multisite Steps
 To enable Ceph's multisite, the following steps need to happen.
@@ -60,12 +60,13 @@ To enable Ceph's multisite, the following steps need to happen.
 2. If an admins pulls a realm on a Rook Ceph cluster from another Ceph cluster, the admin should create:
 
     - A [ceph-object-realm](/design/ceph/object/realm.md) referring to the realm on the other Ceph cluster, and an endpoint in a master zone in that realm.
-    - A [ceph-object-zone](/design/ceph/object/zone.md) referring to the zone group that the new zone will be in. This is the same zone group that the endpoint specified in the ceph-object-realm-pull is in.
+    - A [ceph-object-zone-group](/design/ceph/object/zone-group.md) referring to the realm that was pulled or matching the ceph-object-zone-group resource from the cluster the the realm was pulled from.
+    - A [ceph-object-zone](/design/ceph/object/zone.md) referring to the zone group that the new zone will be in.
     - A [ceph-object-store](/design/ceph/object/store.md) referring to the ceph-object-zone resource.
 
 ### Future Design Roadmap
 
-At the moment the multisite resources only handles Day 1 initial configuration. 
+At the moment the multisite resources only handles Day 1 initial configuration.
 
 Changes made to the resource's configuration or deletion of the resource are not reflected on the Ceph cluster.
 
@@ -74,7 +75,7 @@ To be clear, when the ceph-object-{realm, zone group, zone} resource is deleted 
 Future iterations of this design will address these Day 2 operations and other such as:
 
 - Initializing and modifying Storage Classes
-- Deletion of the CR relecting deletion of the realm, zone group, & zone
+- Deletion of the CR reflecting deletion of the realm, zone group, & zone
 - The status of the ceph-object-{realm, zone group, zone} reflecting the status of the realm, zone group, and zone.
 - Changing the master zone group in a realm
 - Changing the master zone in a zone group

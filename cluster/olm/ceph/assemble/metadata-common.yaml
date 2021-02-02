@@ -128,11 +128,31 @@ spec:
         version: v1
         displayName: Ceph Filesystem
         description: Represents a Ceph Filesystem.
+      - kind: CephFilesystemMirror
+        name: cephfilesystemmirrors.ceph.rook.io
+        version: v1
+        displayName: Ceph Filesystem Mirror
+        description: Represents a Ceph Filesystem Mirror.
       - kind: CephRBDMirror
         name: cephrbdmirrors.ceph.rook.io
         version: v1
         displayName: Ceph RBD Mirror
         description: Represents a Ceph RBD Mirror.
+      - kind: CephObjectRealm
+        name: cephobjectrealms.ceph.rook.io
+        version: v1
+        displayName: Ceph Object Store Realm
+        description: Represents a Ceph Object Store Realm.
+      - kind: CephObjectZoneGroup
+        name: cephobjectzonegroups.ceph.rook.io
+        version: v1
+        displayName: Ceph Object Store Zone Group
+        description: Represents a Ceph Object Store Zone Group.
+      - kind: CephObjectZone
+        name: cephobjectzones.ceph.rook.io
+        version: v1
+        displayName: Ceph Object Store Zone
+        description: Represents a Ceph Object Store Zone.
   displayName: Rook-Ceph
   description: |
 
@@ -201,7 +221,7 @@ metadata:
           },
           "spec": {
             "cephVersion": {
-              "image": "ceph/ceph:v14.2.9"
+              "image": "ceph/ceph:v15.2.8"
             },
             "dataDirHostPath": "/var/lib/rook",
             "mon": {
@@ -363,7 +383,8 @@ metadata:
               "placement": {},
               "resources": {}
             },
-            "preservePoolsOnDelete": false
+            "preservePoolsOnDelete": false,
+            "preserveFilesystemOnDelete": false
           }
         },
         {

@@ -45,8 +45,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 	c := New(
 		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
 		"ns",
-		"/var/lib/rook",
-		cephv1.NetworkSpec{},
+		cephv1.ClusterSpec{},
 		metav1.OwnerReference{},
 		&sync.Mutex{},
 	)
@@ -68,7 +67,8 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 	}
 	monConfig := testGenMonConfig(monID)
 
-	d := c.makeDeployment(monConfig, false)
+	d, err := c.makeDeployment(monConfig, false)
+	assert.NoError(t, err)
 	assert.NotNil(t, d)
 
 	if pvc {
@@ -94,8 +94,7 @@ func TestDeploymentPVCSpec(t *testing.T) {
 	c := New(
 		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
 		"ns",
-		"/var/lib/rook",
-		cephv1.NetworkSpec{},
+		cephv1.ClusterSpec{},
 		metav1.OwnerReference{},
 		&sync.Mutex{},
 	)
@@ -155,8 +154,7 @@ func testRequiredDuringScheduling(t *testing.T, hostNetwork, allowMultiplePerNod
 	c := New(
 		&clusterd.Context{},
 		"ns",
-		"/var/lib/rook",
-		cephv1.NetworkSpec{},
+		cephv1.ClusterSpec{},
 		metav1.OwnerReference{},
 		&sync.Mutex{},
 	)

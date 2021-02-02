@@ -20,12 +20,14 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
+	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	cephconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	cephtest "github.com/rook/rook/pkg/operator/ceph/test"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
-	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
@@ -45,7 +47,7 @@ func TestPodSpecs(t *testing.T) {
 		},
 	}
 	store.Spec.Gateway.PriorityClassName = "my-priority-class"
-	info := testop.CreateConfigDir(1)
+	info := clienttest.CreateTestClusterInfo(1)
 	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
 
@@ -54,7 +56,7 @@ func TestPodSpecs(t *testing.T) {
 		store:       store,
 		rookVersion: "rook/rook:myversion",
 		clusterSpec: &cephv1.ClusterSpec{
-			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.1"},
+			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v15"},
 			Network: cephv1.NetworkSpec{
 				HostNetwork: true,
 			},
@@ -67,14 +69,15 @@ func TestPodSpecs(t *testing.T) {
 		ResourceName: resourceName,
 	}
 
-	s := c.makeRGWPodSpec(rgwConfig)
+	s, err := c.makeRGWPodSpec(rgwConfig)
+	assert.NoError(t, err)
 
 	// Check pod anti affinity is well added to be compliant with HostNetwork setting
 	assert.Equal(t,
 		1,
 		len(s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
 	assert.Equal(t,
-		getLabels(c.store.Name, c.store.Namespace),
+		getLabels(c.store.Name, c.store.Namespace, false),
 		s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchLabels)
 
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
@@ -96,7 +99,7 @@ func TestSSLPodSpec(t *testing.T) {
 		},
 	}
 	store.Spec.Gateway.PriorityClassName = "my-priority-class"
-	info := testop.CreateConfigDir(1)
+	info := clienttest.CreateTestClusterInfo(1)
 	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
 	store.Spec.Gateway.SSLCertificateRef = "mycert"
@@ -107,7 +110,7 @@ func TestSSLPodSpec(t *testing.T) {
 		store:       store,
 		rookVersion: "rook/rook:myversion",
 		clusterSpec: &cephv1.ClusterSpec{
-			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.1"},
+			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v15"},
 			Network: cephv1.NetworkSpec{
 				HostNetwork: true,
 			},
@@ -119,7 +122,8 @@ func TestSSLPodSpec(t *testing.T) {
 	rgwConfig := &rgwConfig{
 		ResourceName: resourceName,
 	}
-	s := c.makeRGWPodSpec(rgwConfig)
+	s, err := c.makeRGWPodSpec(rgwConfig)
+	assert.NoError(t, err)
 
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
 	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
@@ -132,35 +136,66 @@ func TestSSLPodSpec(t *testing.T) {
 }
 
 func TestValidateSpec(t *testing.T) {
-	context := &clusterd.Context{Executor: &exectest.MockExecutor{}}
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		if args[1] == "crush" && args[2] == "dump" {
+			return `{"types":[{"type_id": 0,"name": "osd"}, {"type_id": 1,"name": "host"}],"buckets":[{"id": -1,"name":"default"},{"id": -2,"name":"good"}, {"id": -3,"name":"host"}]}`, nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+
+	r := &ReconcileCephObjectStore{
+		context: context,
+		clusterSpec: &cephv1.ClusterSpec{
+			External: cephv1.ExternalSpec{
+				Enable: false,
+			},
+		},
+		clusterInfo: &client.ClusterInfo{
+			CephCred: client.CephCred{
+				Username: "client.admin",
+			},
+		},
+	}
 
 	// valid store
 	s := simpleStore()
-	err := validateStore(context, s)
+	err := r.validateStore(s)
 	assert.Nil(t, err)
 
 	// no name
 	s.Name = ""
-	err = validateStore(context, s)
+	err = r.validateStore(s)
 	assert.NotNil(t, err)
 	s.Name = "default"
-	err = validateStore(context, s)
+	err = r.validateStore(s)
 	assert.Nil(t, err)
 
 	// no namespace
 	s.Namespace = ""
-	err = validateStore(context, s)
+	err = r.validateStore(s)
 	assert.NotNil(t, err)
 	s.Namespace = "mycluster"
-	err = validateStore(context, s)
+	err = r.validateStore(s)
 	assert.Nil(t, err)
 
 	// no replication or EC is valid
 	s.Spec.MetadataPool.Replicated.Size = 0
-	err = validateStore(context, s)
+	err = r.validateStore(s)
 	assert.Nil(t, err)
 	s.Spec.MetadataPool.Replicated.Size = 1
-	err = validateStore(context, s)
+	err = r.validateStore(s)
+	assert.Nil(t, err)
+
+	// external with endpoints, success
+	s.Spec.Gateway.ExternalRgwEndpoints = []v1.EndpointAddress{
+		{
+			IP: "192.168.0.1",
+		},
+	}
+	err = r.validateStore(s)
 	assert.Nil(t, err)
 }
 

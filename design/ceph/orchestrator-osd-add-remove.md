@@ -80,9 +80,8 @@ internal `Go` spec for a drive group is given below.
 // DriveGroups is a map of Drive Group names to Drive Group specifications.
 type DriveGroups map[string]DriveGroupSpec
 
-// DriveGroupSpec is a mapping from keys to values
-// Rook must use the "host_pattern" key to determine the host on which to run the Drive Group
-type DriveGroupSpec map[string]interface{}
+// DriveGroupSpec is a YAML or JSON parsable spec.
+type DriveGroupSpec interface{}
 ```
 
 `ceph-volume` feature request #1 will be used here to allow Rook to pass along the Drive Group YAML
@@ -109,7 +108,7 @@ Orchestrator CLI or Dashboard interface.
 
 #### Reporting Status
 Rook should report failure messages back to the Rook Orchestrator Mgr Module via a `CephCluster`
-`status` mechanism so that the Orchestrator Module can take appropriate actions ot notify the user
+`status` mechanism so that the Orchestrator Module can take appropriate actions to notify the user
 of failure. Rook may report successful statuses back if needed by the Orchestrator Module; however,
 limiting the information reported back will keep the `CephCluster` resource's `status` field smaller
 and less unwieldy for users.

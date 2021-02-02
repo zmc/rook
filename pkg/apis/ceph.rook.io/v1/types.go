@@ -41,6 +41,17 @@ type CephCluster struct {
 	Status            ClusterStatus `json:"status,omitempty"`
 }
 
+type CephClusterHealthCheckSpec struct {
+	DaemonHealth  DaemonHealthSpec                     `json:"daemonHealth,omitempty"`
+	LivenessProbe map[rookv1.KeyType]*rookv1.ProbeSpec `json:"livenessProbe,omitempty"`
+}
+
+type DaemonHealthSpec struct {
+	Status              HealthCheckSpec `json:"status,omitempty"`
+	Monitor             HealthCheckSpec `json:"mon,omitempty"`
+	ObjectStorageDaemon HealthCheckSpec `json:"osd,omitempty"`
+}
+
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type CephClusterList struct {
@@ -53,11 +64,18 @@ type ClusterSpec struct {
 	// The version information that instructs Rook to orchestrate a particular version of Ceph.
 	CephVersion CephVersionSpec `json:"cephVersion,omitempty"`
 
+	// Ceph Drive Groups specification for how storage should be used in the cluster, given
+	// precedent over the Storage spec.
+	DriveGroups DriveGroupsSpec `json:"driveGroups,omitempty"`
+
 	// A spec for available storage in the cluster and how it should be used
 	Storage rookv1.StorageScopeSpec `json:"storage,omitempty"`
 
 	// The annotations-related configuration to add/set on each Pod related object.
 	Annotations rookv1.AnnotationsSpec `json:"annotations,omitempty"`
+
+	// The labels-related configuration to add/set on each Pod related object.
+	Labels rookv1.LabelsSpec `json:"labels,omitempty"`
 
 	// The placement-related configuration to pass to kubernetes (affinity, node selector, tolerations).
 	Placement rookv1.PlacementSpec `json:"placement,omitempty"`
@@ -79,6 +97,13 @@ type ClusterSpec struct {
 
 	// ContinueUpgradeAfterChecksEvenIfNotHealthy defines if an upgrade should continue even if PGs are not clean
 	ContinueUpgradeAfterChecksEvenIfNotHealthy bool `json:"continueUpgradeAfterChecksEvenIfNotHealthy,omitempty"`
+
+	// WaitTimeoutForHealthyOSDInMinutes defines the time the operator would wait before an OSD can be stopped for upgrade or restart.
+	// If the timeout exceeds and OSD is not ok to stop, then the operator would skip upgrade for the current OSD and proceed with the next one
+	// if `continueUpgradeAfterChecksEvenIfNotHealthy` is `false`. If `continueUpgradeAfterChecksEvenIfNotHealthy` is `true`, then opertor would
+	// continue with the upgrade of an OSD even if its not ok to stop after the timeout. This timeout won't be applied if `skipUpgradeChecks` is `true`.
+	// The default wait timeout is 10 minutes.
+	WaitTimeoutForHealthyOSDInMinutes time.Duration `json:"waitTimeoutForHealthyOSDInMinutes,omitempty"`
 
 	// A spec for configuring disruption management.
 	DisruptionManagement DisruptionManagementSpec `json:"disruptionManagement,omitempty"`
@@ -108,16 +133,61 @@ type ClusterSpec struct {
 	// Indicates user intent when deleting a cluster; blocks orchestration and should not be set if cluster
 	// deletion is not imminent.
 	CleanupPolicy CleanupPolicySpec `json:"cleanupPolicy,omitempty"`
+
+	// Internal daemon healthchecks and liveness probe
+	HealthCheck CephClusterHealthCheckSpec `json:"healthCheck"`
+
+	// Security represents security settings
+	Security SecuritySpec `json:"security,omitempty"`
+
+	// Logging represents loggings settings
+	LogCollector LogCollectorSpec `json:"logCollector,omitempty"`
 }
 
-// VersionSpec represents the settings for the Ceph version that Rook is orchestrating.
+// LogCollectorSpec is the logging spec
+type LogCollectorSpec struct {
+	Enabled     bool   `json:"enabled,omitempty"`
+	Periodicity string `json:"periodicity,omitempty"`
+}
+
+// SecuritySpec is security spec to include various security items such as kms
+type SecuritySpec struct {
+	KeyManagementService KeyManagementServiceSpec `json:"kms,omitempty"`
+}
+
+// KeyManagementServiceSpec represent various details of the KMS server
+type KeyManagementServiceSpec struct {
+	ConnectionDetails map[string]string `json:"connectionDetails,omitempty"`
+	TokenSecretName   string            `json:"tokenSecretName,omitempty"`
+}
+
+// CephVersionSpec represents the settings for the Ceph version that Rook is orchestrating.
 type CephVersionSpec struct {
-	// Image is the container image used to launch the ceph daemons, such as ceph/ceph:v13.2.6 or ceph/ceph:v14.2.2
+	// Image is the container image used to launch the ceph daemons, such as ceph/ceph:v15.2.8
 	Image string `json:"image,omitempty"`
 
 	// Whether to allow unsupported versions (do not set to true in production)
 	AllowUnsupported bool `json:"allowUnsupported,omitempty"`
 }
+
+// DriveGroupsSpec is a list Ceph Drive Group specifications.
+type DriveGroupsSpec []DriveGroup
+
+// DriveGroup specifies a Ceph Drive Group and where Rook should apply the Drive Group.
+type DriveGroup struct {
+	// Name is a unique name used to identify the Drive Group.
+	Name string `json:"name"`
+
+	// Spec is the JSON or YAML definition of a Ceph Drive Group. Placement information contained
+	// within this spec is ignored, as placement is specified via the Rook placement mechanism below.
+	Spec DriveGroupSpec `json:"spec"`
+
+	// Placement defines which nodes the Drive Group should be applied to.
+	Placement rookv1.Placement `json:"placement,omitempty"`
+}
+
+// DriveGroupSpec is a YAML or JSON definition of a Ceph Drive Group.
+type DriveGroupSpec map[string]interface{}
 
 // DashboardSpec represents the settings for the Ceph dashboard
 type DashboardSpec struct {
@@ -140,6 +210,12 @@ type MonitoringSpec struct {
 	// The namespace where the prometheus rules and alerts should be created.
 	// If empty, the same namespace as the cluster will be used.
 	RulesNamespace string `json:"rulesNamespace,omitempty"`
+
+	// ExternalMgrEndpoints points to an existing Ceph prometheus exporter endpoint
+	ExternalMgrEndpoints []v1.EndpointAddress `json:"externalMgrEndpoints,omitempty"`
+
+	// ExternalMgrPrometheusPort Prometheus exporter port
+	ExternalMgrPrometheusPort uint16 `json:"externalMgrPrometheusPort,omitempty"`
 }
 
 type ClusterStatus struct {
@@ -148,6 +224,7 @@ type ClusterStatus struct {
 	Message     string          `json:"message,omitempty"`
 	Conditions  []Condition     `json:"conditions,omitempty"`
 	CephStatus  *CephStatus     `json:"ceph,omitempty"`
+	CephStorage *CephStorage    `json:"storage,omitempty"`
 	CephVersion *ClusterVersion `json:"version,omitempty"`
 }
 
@@ -157,6 +234,22 @@ type CephStatus struct {
 	LastChecked    string                       `json:"lastChecked,omitempty"`
 	LastChanged    string                       `json:"lastChanged,omitempty"`
 	PreviousHealth string                       `json:"previousHealth,omitempty"`
+	Capacity       Capacity                     `json:"capacity,omitempty"`
+}
+
+type Capacity struct {
+	TotalBytes     uint64 `json:"bytesTotal,omitempty"`
+	UsedBytes      uint64 `json:"bytesUsed,omitempty"`
+	AvailableBytes uint64 `json:"bytesAvailable,omitempty"`
+	LastUpdated    string `json:"lastUpdated,omitempty"`
+}
+
+type CephStorage struct {
+	DeviceClasses []DeviceClasses `json:"deviceClasses,omitempty"`
+}
+
+type DeviceClasses struct {
+	Name string `json:"name,omitempty"`
 }
 
 type ClusterVersion struct {
@@ -190,8 +283,6 @@ const (
 	ConditionFailure     ConditionType = "Failure"
 	ConditionUpgrading   ConditionType = "Upgrading"
 	ConditionDeleting    ConditionType = "Deleting"
-	// DefaultFailureDomain for PoolSpec
-	DefaultFailureDomain = "host"
 )
 
 type ClusterState string
@@ -208,7 +299,20 @@ const (
 type MonSpec struct {
 	Count                int                       `json:"count,omitempty"`
 	AllowMultiplePerNode bool                      `json:"allowMultiplePerNode,omitempty"`
+	StretchCluster       *StretchClusterSpec       `json:"stretchCluster,omitempty"`
 	VolumeClaimTemplate  *v1.PersistentVolumeClaim `json:"volumeClaimTemplate,omitempty"`
+}
+
+type StretchClusterSpec struct {
+	FailureDomainLabel string                   `json:"failureDomainLabel,omitempty"`
+	SubFailureDomain   string                   `json:"subFailureDomain,omitempty"`
+	Zones              []StretchClusterZoneSpec `json:"zones,omitempty"`
+}
+
+type StretchClusterZoneSpec struct {
+	Name                string                    `json:"name,omitempty"`
+	Arbiter             bool                      `json:"arbiter,omitempty"`
+	VolumeClaimTemplate *v1.PersistentVolumeClaim `json:"volumeClaimTemplate,omitempty"`
 }
 
 // MgrSpec represents options to configure a ceph mgr
@@ -229,7 +333,8 @@ type ExternalSpec struct {
 
 // CrashCollectorSpec represents options to configure the crash controller
 type CrashCollectorSpec struct {
-	Disable bool `json:"disable"`
+	Disable      bool `json:"disable"`
+	DaysToRetain uint `json:"daysToRetain,omitempty"`
 }
 
 // +genclient
@@ -239,8 +344,8 @@ type CrashCollectorSpec struct {
 type CephBlockPool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec              PoolSpec `json:"spec"`
-	Status            *Status  `json:"status"`
+	Spec              PoolSpec             `json:"spec"`
+	Status            *CephBlockPoolStatus `json:"status"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -249,6 +354,13 @@ type CephBlockPoolList struct {
 	metav1.ListMeta `json:"metadata"`
 	Items           []CephBlockPool `json:"items"`
 }
+
+const (
+	// DefaultFailureDomain for PoolSpec
+	DefaultFailureDomain = "host"
+	// DefaultCRUSHRoot is the default name of the CRUSH root bucket
+	DefaultCRUSHRoot = "default"
+)
 
 // PoolSpec represents the spec of ceph pool
 type PoolSpec struct {
@@ -272,6 +384,54 @@ type PoolSpec struct {
 
 	// Parameters is a list of properties to enable on a given pool
 	Parameters map[string]string `json:"parameters,omitempty"`
+
+	// EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
+	EnableRBDStats bool `json:"enableRBDStats"`
+
+	// The mirroring settings
+	Mirroring MirroringSpec `json:"mirroring"`
+
+	// The mirroring statusCheck
+	StatusCheck MirrorHealthCheckSpec `json:"statusCheck"`
+}
+
+type MirrorHealthCheckSpec struct {
+	Mirror HealthCheckSpec `json:"mirror,omitempty"`
+}
+
+type CephBlockPoolStatus struct {
+	Phase                  ConditionType               `json:"phase,omitempty"`
+	MirroringStatus        *MirroringStatusSpec        `json:"mirroringStatus,omitempty"`
+	MirroringInfo          *MirroringInfoSpec          `json:"mirroringInfo,omitempty"`
+	SnapshotScheduleStatus *SnapshotScheduleStatusSpec `json:"snapshotScheduleStatus,omitempty"`
+	// Use only info and put mirroringStatus in it?
+	Info map[string]string `json:"info,omitempty"`
+}
+
+// MirroringStatusSpec is the status of the pool mirroring
+type MirroringStatusSpec struct {
+	Summary     SummarySpec `json:"summary,omitempty"`
+	LastChecked string      `json:"lastChecked,omitempty"`
+	LastChanged string      `json:"lastChanged,omitempty"`
+	Details     string      `json:"details,omitempty"`
+}
+
+type SummarySpec map[string]interface{}
+
+// MirroringInfoSpec is the status of the pool mirroring
+type MirroringInfoSpec struct {
+	Summary     SummarySpec `json:"summary,omitempty"`
+	LastChecked string      `json:"lastChecked,omitempty"`
+	LastChanged string      `json:"lastChanged,omitempty"`
+	Details     string      `json:"details,omitempty"`
+}
+
+// SnapshotScheduleStatus is the status of the snapshot schedule
+type SnapshotScheduleStatusSpec struct {
+	Summary     SummarySpec `json:"summary,omitempty"`
+	LastChecked string      `json:"lastChecked,omitempty"`
+	LastChanged string      `json:"lastChanged,omitempty"`
+	Details     string      `json:"details,omitempty"`
 }
 
 type Status struct {
@@ -288,6 +448,33 @@ type ReplicatedSpec struct {
 
 	// RequireSafeReplicaSize if false allows you to set replica 1
 	RequireSafeReplicaSize bool `json:"requireSafeReplicaSize"`
+
+	// ReplicasPerFailureDomain the number of replica in the specified failure domain
+	ReplicasPerFailureDomain uint `json:"replicasPerFailureDomain,omitempty"`
+
+	// SubFailureDomain the name of the sub-failure domain
+	SubFailureDomain string `json:"subFailureDomain,omitempty"`
+}
+
+// MirroringSpec represents the setting for a mirrored pool
+type MirroringSpec struct {
+	// Enabled whether this pool is mirrored or not
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Mode is the mirroring mode: either "pool" or "image"
+	Mode string `json:"mode,omitempty"`
+
+	// SnapshotSchedules is the scheduling of snapshot for mirrored images/pools
+	SnapshotSchedules []SnapshotScheduleSpec `json:"snapshotSchedules,omitempty"`
+}
+
+// SnapshotScheduleSpec represents the snapshot scheduling settings of a mirrored pool
+type SnapshotScheduleSpec struct {
+	// Interval represent the periodicity of the snapshot.
+	Interval string `json:"interval,omitempty"`
+
+	// StartTime indicates when to start the snapshot
+	StartTime string `json:"startTime,omitempty"`
 }
 
 // ErasureCodeSpec represents the spec for erasure code in a pool
@@ -332,8 +519,14 @@ type FilesystemSpec struct {
 	// Preserve pools on filesystem deletion
 	PreservePoolsOnDelete bool `json:"preservePoolsOnDelete"`
 
+	// Preserve the fs in the cluster on CephFilesystem CR deletion. Setting this to true automatically implies PreservePoolsOnDelete is true.
+	PreserveFilesystemOnDelete bool `json:"preserveFilesystemOnDelete"`
+
 	// The mds pod info
 	MetadataServer MetadataServerSpec `json:"metadataServer"`
+
+	// The mirroring settings
+	Mirroring FSMirroringSpec `json:"mirroring"`
 }
 
 type MetadataServerSpec struct {
@@ -350,11 +543,20 @@ type MetadataServerSpec struct {
 	// The annotations-related configuration to add/set on each Pod related object.
 	Annotations rookv1.Annotations `json:"annotations,omitempty"`
 
+	// The labels-related configuration to add/set on each Pod related object.
+	Labels rookv1.Labels `json:"labels,omitempty"`
+
 	// The resource requirements for the rgw pods
 	Resources v1.ResourceRequirements `json:"resources"`
 
 	// PriorityClassName sets priority classes on components
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
+// FSMirroringSpec represents the setting for a mirrored filesystem
+type FSMirroringSpec struct {
+	// Enabled whether this filesystem is mirrored or not
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // +genclient
@@ -364,8 +566,8 @@ type MetadataServerSpec struct {
 type CephObjectStore struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec              ObjectStoreSpec `json:"spec"`
-	Status            *Status         `json:"status"`
+	Spec              ObjectStoreSpec    `json:"spec"`
+	Status            *ObjectStoreStatus `json:"status"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -391,7 +593,21 @@ type ObjectStoreSpec struct {
 	Gateway GatewaySpec `json:"gateway"`
 
 	// The multisite info
-	Zone ZoneSpec `json:"zone"`
+	Zone ZoneSpec `json:"zone,omitempty"`
+
+	// The rgw Bucket healthchecks and liveness probe
+	HealthCheck BucketHealthCheckSpec `json:"healthCheck"`
+}
+
+type BucketHealthCheckSpec struct {
+	Bucket        HealthCheckSpec   `json:"bucket,omitempty"`
+	LivenessProbe *rookv1.ProbeSpec `json:"livenessProbe,omitempty"`
+}
+
+type HealthCheckSpec struct {
+	Disabled bool   `json:"disabled,omitempty"`
+	Interval string `json:"interval,omitempty"`
+	Timeout  string `json:"timeout,omitempty"`
 }
 
 type GatewaySpec struct {
@@ -404,9 +620,6 @@ type GatewaySpec struct {
 	// The number of pods in the rgw replicaset. If "allNodes" is specified, a daemonset is created.
 	Instances int32 `json:"instances"`
 
-	// Whether the rgw pods should be started as a daemonset on all nodes
-	AllNodes bool `json:"allNodes"`
-
 	// The name of the secret that stores the ssl certificate for secure rgw connections
 	SSLCertificateRef string `json:"sslCertificateRef"`
 
@@ -416,16 +629,36 @@ type GatewaySpec struct {
 	// The annotations-related configuration to add/set on each Pod related object.
 	Annotations rookv1.Annotations `json:"annotations,omitempty"`
 
+	// The labels-related configuration to add/set on each Pod related object.
+	Labels rookv1.Labels `json:"labels,omitempty"`
+
 	// The resource requirements for the rgw pods
 	Resources v1.ResourceRequirements `json:"resources"`
 
 	// PriorityClassName sets priority classes on the rgw pods
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// ExternalRgwEndpoints points to external rgw endpoint(s)
+	ExternalRgwEndpoints []v1.EndpointAddress `json:"externalRgwEndpoints,omitempty"`
 }
 
 type ZoneSpec struct {
 	// RGW Zone the Object Store is in
 	Name string `json:"name"`
+}
+
+type ObjectStoreStatus struct {
+	Phase        ConditionType     `json:"phase,omitempty"`
+	Message      string            `json:"message,omitempty"`
+	BucketStatus *BucketStatus     `json:"bucketStatus,omitempty"`
+	Info         map[string]string `json:"info,omitempty"`
+}
+
+type BucketStatus struct {
+	Health      ConditionType `json:"health,omitempty"`
+	Details     string        `json:"details,omitempty"`
+	LastChecked string        `json:"lastChecked,omitempty"`
+	LastChanged string        `json:"lastChanged,omitempty"`
 }
 
 // +genclient
@@ -435,8 +668,13 @@ type ZoneSpec struct {
 type CephObjectStoreUser struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec              ObjectStoreUserSpec `json:"spec"`
-	Status            *Status             `json:"status"`
+	Spec              ObjectStoreUserSpec    `json:"spec"`
+	Status            *ObjectStoreUserStatus `json:"status"`
+}
+
+type ObjectStoreUserStatus struct {
+	Phase string            `json:"phase,omitempty"`
+	Info  map[string]string `json:"info"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -476,6 +714,11 @@ type CephObjectRealmList struct {
 
 // ObjectRealmSpec represent the spec of an ObjectRealm
 type ObjectRealmSpec struct {
+	Pull PullSpec `json:"pull"`
+}
+
+type PullSpec struct {
+	Endpoint string `json:"endpoint"`
 }
 
 // +genclient
@@ -526,6 +769,12 @@ type CephObjectZoneList struct {
 type ObjectZoneSpec struct {
 	//The display name for the ceph users
 	ZoneGroup string `json:"zoneGroup"`
+
+	// The metadata pool settings
+	MetadataPool PoolSpec `json:"metadataPool"`
+
+	// The data pool settings
+	DataPool PoolSpec `json:"dataPool"`
 }
 
 // +genclient
@@ -572,11 +821,17 @@ type GaneshaServerSpec struct {
 	// The annotations-related configuration to add/set on each Pod related object.
 	Annotations rookv1.Annotations `json:"annotations,omitempty"`
 
+	// The labels-related configuration to add/set on each Pod related object.
+	Labels rookv1.Labels `json:"labels,omitempty"`
+
 	// Resources set resource requests and limits
 	Resources v1.ResourceRequirements `json:"resources,omitempty"`
 
 	// PriorityClassName sets the priority class on the pods
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// LogLevel set logging level
+	LogLevel string `json:"logLevel,omitempty"`
 }
 
 // NetworkSpec for Ceph includes backward compatibility code
@@ -585,6 +840,9 @@ type NetworkSpec struct {
 
 	// HostNetwork to enable host network
 	HostNetwork bool `json:"hostNetwork"`
+
+	// IPFamily is the single stack IPv6 or IPv4 protocol
+	IPFamily IPFamilyType `json:"ipFamily,omitempty"`
 }
 
 // DisruptionManagementSpec configures management of daemon disruptions
@@ -594,9 +852,15 @@ type DisruptionManagementSpec struct {
 	ManagePodBudgets bool `json:"managePodBudgets,omitempty"`
 
 	// OSDMaintenanceTimeout sets how many additional minutes the DOWN/OUT interval is for drained failure domains
-	// it only works if managePodBudgetss is true.
+	// it only works if managePodBudgets is true.
 	// the default is 30 minutes
 	OSDMaintenanceTimeout time.Duration `json:"osdMaintenanceTimeout,omitempty"`
+
+	// PGHealthCheckTimeout is the time (in minutes) that the operator will wait for the placement groups to become
+	// healthy (active+clean) after a drain was completed and OSDs came back up. Rook will continue with the next drain
+	// if the timeout exceeds. It only works if managePodBudgets is true.
+	// No values or 0 means that the operator will wait until the placement groups are healthy before unblocking the next drain.
+	PGHealthCheckTimeout time.Duration `json:"pgHealthCheckTimeout,omitempty"`
 
 	// This enables management of machinedisruptionbudgets
 	ManageMachineDisruptionBudgets bool `json:"manageMachineDisruptionBudgets,omitempty"`
@@ -612,7 +876,8 @@ type DisruptionManagementSpec struct {
 type CephClient struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
-	Spec              ClientSpec `json:"spec"`
+	Spec              ClientSpec        `json:"spec"`
+	Status            *CephClientStatus `json:"status"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -628,11 +893,27 @@ type ClientSpec struct {
 	Caps map[string]string `json:"caps"`
 }
 
+type CephClientStatus struct {
+	Phase ConditionType     `json:"phase,omitempty"`
+	Info  map[string]string `json:"info,omitempty"`
+}
 type CleanupPolicySpec struct {
-	Confirmation CleanupConfirmationProperty `json:"confirmation,omitempty"`
+	Confirmation              CleanupConfirmationProperty `json:"confirmation,omitempty"`
+	SanitizeDisks             SanitizeDisksSpec           `json:"sanitizeDisks"`
+	AllowUninstallWithVolumes bool                        `json:"allowUninstallWithVolumes,omitempty"`
 }
 
 type CleanupConfirmationProperty string
+
+type SanitizeDataSourceProperty string
+
+type SanitizeMethodProperty string
+
+type SanitizeDisksSpec struct {
+	Method     SanitizeMethodProperty     `json:"method,omitempty"`
+	DataSource SanitizeDataSourceProperty `json:"dataSource,omitempty"`
+	Iteration  int32                      `json:"iteration,omitempty"`
+}
 
 // +genclient
 // +genclient:noStatus
@@ -657,15 +938,72 @@ type RBDMirroringSpec struct {
 	// Count represents the number of rbd mirror instance to run
 	Count int `json:"count"`
 
+	// RBDMirroringPeerSpec represents the peers spec
+	Peers RBDMirroringPeerSpec `json:"peers,omitempty"`
+
 	// The affinity to place the rgw pods (default is to place on any available node)
 	Placement rookv1.Placement `json:"placement"`
 
 	// The annotations-related configuration to add/set on each Pod related object.
 	Annotations rookv1.Annotations `json:"annotations,omitempty"`
 
-	// The resource requirements for the rgw pods
+	// The labels-related configuration to add/set on each Pod related object.
+	Labels rookv1.Labels `json:"labels,omitempty"`
+
+	// The resource requirements for the rbd mirror pods
 	Resources v1.ResourceRequirements `json:"resources"`
 
-	// PriorityClassName sets priority classes on the rgw pods
+	// PriorityClassName sets priority class on the rbd mirror pods
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
+
+type RBDMirroringPeerSpec struct {
+	// SecretNames represents the Kubernetes Secret names to add rbd-mirror peers
+	SecretNames []string `json:"secretNames,omitempty"`
+}
+
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephFilesystemMirror struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              FilesystemMirroringSpec `json:"spec"`
+	Status            *Status                 `json:"status"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type CephFilesystemMirrorList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephFilesystemMirror `json:"items"`
+}
+
+type FilesystemMirroringSpec struct {
+	// The affinity to place the rgw pods (default is to place on any available node)
+	Placement rookv1.Placement `json:"placement"`
+
+	// The annotations-related configuration to add/set on each Pod related object.
+	Annotations rookv1.Annotations `json:"annotations,omitempty"`
+
+	// The labels-related configuration to add/set on each Pod related object.
+	Labels rookv1.Labels `json:"labels,omitempty"`
+
+	// The resource requirements for the cephfs-mirror pods
+	Resources v1.ResourceRequirements `json:"resources"`
+
+	// PriorityClassName sets priority class on the cephfs-mirror pods
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+}
+
+// IPFamilyType represents the single stack Ipv4 or Ipv6 protocol.
+type IPFamilyType string
+
+const (
+	// IPv6 internet protocol version
+	IPv6 IPFamilyType = "IPv6"
+	// IPv4 internet protocol version
+	IPv4 IPFamilyType = "IPv4"
+)

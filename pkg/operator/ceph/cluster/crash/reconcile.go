@@ -41,6 +41,8 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+	"k8s.io/api/batch/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -62,7 +64,7 @@ type ReconcileNode struct {
 // attached to it.
 // The Controller will requeue the Request to be processed again if an error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileNode) Reconcile(request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileNode) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
 	// workaround because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	result, err := r.reconcile(request)
 	if err != nil {
@@ -78,23 +80,26 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: request.Name}}
 	err := r.client.Get(context.TODO(), request.NamespacedName, node)
 	if err != nil {
-		//if a node is not present, check if there are any crashcollector deployment for that node and delete it.
-		deploymentList := &appsv1.DeploymentList{}
-		namespaceListOpts := client.InNamespace(request.Namespace)
-		err := r.client.List(context.TODO(), deploymentList, client.MatchingLabels{k8sutil.AppAttr: AppName, NodeNameLabel: request.Name}, namespaceListOpts)
-		if err != nil {
-			logger.Errorf("failed to list crash collector deployments, delete it/them manually. %v", err)
-		}
-		for _, d := range deploymentList.Items {
-			logger.Infof("deleting deployment %q for deleted node %q", d.ObjectMeta.Name, request.Name)
-			err := r.deleteCrashCollector(d)
+		if kerrors.IsNotFound(err) {
+			// if a node is not present, check if there are any crashcollector deployment for that node and delete it.
+			deploymentList := &appsv1.DeploymentList{}
+			namespaceListOpts := client.InNamespace(request.Namespace)
+			err := r.client.List(context.TODO(), deploymentList, client.MatchingLabels{k8sutil.AppAttr: AppName, NodeNameLabel: request.Name}, namespaceListOpts)
 			if err != nil {
-				logger.Errorf("failed to delete crash collector deployment %q, delete it manually. %v", d.Name, err)
-				continue
+				logger.Errorf("failed to list crash collector deployments, delete it/them manually. %v", err)
 			}
-			logger.Infof("crash collector deployment %q successfully removed", d.Name)
+			for _, d := range deploymentList.Items {
+				logger.Infof("deleting deployment %q for deleted node %q", d.ObjectMeta.Name, request.Name)
+				err := r.deleteCrashCollector(d)
+				if err != nil {
+					logger.Errorf("failed to delete crash collector deployment %q, delete it manually. %v", d.Name, err)
+					continue
+				}
+				logger.Infof("crash collector deployment %q successfully removed from dead node %q", d.Name, request.Name)
+			}
+		} else {
+			return reconcile.Result{}, errors.Wrapf(err, "could not get node %q", request.Name)
 		}
-		return reconcile.Result{}, errors.Errorf("could not get node %q", request.NamespacedName)
 	}
 
 	// Get the list of all the Ceph pods
@@ -189,6 +194,10 @@ func (r *ReconcileNode) reconcile(request reconcile.Request) (reconcile.Result, 
 			}
 			logger.Debugf("deployment successfully reconciled for node %q. operation: %q", request.Name, op)
 		}
+
+		if err := r.reconcileCrashRetention(namespace, cephCluster, cephVersion); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 
 	return reconcile.Result{}, nil
@@ -226,5 +235,36 @@ func (r *ReconcileNode) deleteCrashCollector(deployment appsv1.Deployment) error
 		return errors.Wrapf(err, "could not delete crash collector deployment %q", deploymentName)
 	}
 
+	return nil
+}
+
+func (r *ReconcileNode) reconcileCrashRetention(namespace string, cephCluster cephv1.CephCluster, cephVersion *cephver.CephVersion) error {
+	if cephCluster.Spec.CrashCollector.DaysToRetain == 0 {
+		logger.Debug("deleting cronjob if it exists...")
+		cronJob := &v1beta1.CronJob{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      prunerName,
+				Namespace: namespace,
+			},
+		}
+
+		err := r.client.Delete(context.TODO(), cronJob)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				logger.Debug("cronJob resource not found. Ignoring since object must be deleted.")
+			} else {
+				return err
+			}
+		} else {
+			logger.Debug("successfully deleted crash pruner cronjob.")
+		}
+	} else {
+		logger.Debugf("daysToRetain set to: %d", cephCluster.Spec.CrashCollector.DaysToRetain)
+		op, err := r.createOrUpdateCephCron(cephCluster, cephVersion)
+		if err != nil {
+			return errors.Wrapf(err, "node reconcile failed on op %q", op)
+		}
+		logger.Debugf("cronjob successfully reconciled. operation: %q", op)
+	}
 	return nil
 }

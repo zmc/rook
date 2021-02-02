@@ -18,11 +18,13 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
+
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/crash"
+	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
@@ -44,28 +46,16 @@ func (c *ClusterController) configureExternalCephCluster(cluster *cluster) error
 
 	// loop until we find the secret necessary to connect to the external cluster
 	// then populate clusterInfo
-	cluster.Info = mon.PopulateExternalClusterInfo(c.context, c.namespacedName.Namespace)
+	cluster.ClusterInfo = mon.PopulateExternalClusterInfo(c.context, c.namespacedName.Namespace, cluster.ownerRef)
+	cluster.ClusterInfo.SetName(cluster.crdName)
 
-	// If the user to check the ceph health and status is not the admin,
-	// we validate that ExternalCred has been populated correctly,
-	// then we check if the key (whether admin or not) is encoded in base64
-	if !mon.IsExternalHealthCheckUserAdmin(cluster.Info.AdminSecret) {
-		if !cluster.Info.IsInitializedExternalCred(true) {
-			return errors.New("invalid user health checker credentials")
-		}
-		if !cephconfig.IsKeyringBase64Encoded(cluster.Info.ExternalCred.Secret) {
-			return errors.Errorf("invalid user health checker key %q", cluster.Info.ExternalCred.Username)
-		}
-	} else {
-		// If the client.admin is used
-		if !cephconfig.IsKeyringBase64Encoded(cluster.Info.AdminSecret) {
-			return errors.Errorf("invalid user health checker key %q", client.AdminUsername)
-		}
+	if !client.IsKeyringBase64Encoded(cluster.ClusterInfo.CephCred.Secret) {
+		return errors.Errorf("invalid user health checker key for user %q", cluster.ClusterInfo.CephCred.Username)
 	}
 
 	// Write connection info (ceph config file and keyring) for ceph commands
 	if cluster.Spec.CephVersion.Image == "" {
-		err = mon.WriteConnectionConfig(c.context, cluster.Info)
+		err = mon.WriteConnectionConfig(c.context, cluster.ClusterInfo)
 		if err != nil {
 			logger.Errorf("failed to write config. attempting to continue. %v", err)
 		}
@@ -84,27 +74,27 @@ func (c *ClusterController) configureExternalCephCluster(cluster *cluster) error
 		//
 		// Only do this when doing a bit of management...
 		logger.Infof("creating %q configmap", k8sutil.ConfigOverrideName)
-		err = populateConfigOverrideConfigMap(c.context, c.namespacedName.Namespace, cluster.ownerRef)
+		err = populateConfigOverrideConfigMap(c.context, c.namespacedName.Namespace, cluster.ClusterInfo.OwnerRef)
 		if err != nil {
 			return errors.Wrap(err, "failed to populate config override config map")
 		}
 
 		logger.Infof("creating %q secret", config.StoreName)
-		err = config.GetStore(c.context, c.namespacedName.Namespace, &cluster.ownerRef).CreateOrUpdate(cluster.Info)
+		err = config.GetStore(c.context, c.namespacedName.Namespace, &cluster.ClusterInfo.OwnerRef).CreateOrUpdate(cluster.ClusterInfo)
 		if err != nil {
 			return errors.Wrap(err, "failed to update the global config")
 		}
 	}
 
 	// The cluster Identity must be established at this point
-	if !cluster.Info.IsInitialized(true) {
+	if !cluster.ClusterInfo.IsInitialized(true) {
 		return errors.New("the cluster identity was not established")
 	}
 	logger.Info("external cluster identity established")
 
 	// Create CSI Secrets only if the user has provided the admin key
-	if cluster.Info.AdminSecret != mon.AdminSecretName {
-		err = csi.CreateCSISecrets(c.context, c.namespacedName.Namespace, &cluster.ownerRef)
+	if cluster.ClusterInfo.CephCred.Username == client.AdminUsername {
+		err = csi.CreateCSISecrets(c.context, cluster.ClusterInfo)
 		if err != nil {
 			return errors.Wrap(err, "failed to create csi kubernetes secrets")
 		}
@@ -117,7 +107,7 @@ func (c *ClusterController) configureExternalCephCluster(cluster *cluster) error
 	}
 
 	// Save CSI configmap
-	err = csi.SaveClusterConfig(c.context.Clientset, c.namespacedName.Namespace, cluster.Info, c.csiConfigMutex)
+	err = csi.SaveClusterConfig(c.context.Clientset, c.namespacedName.Namespace, cluster.ClusterInfo, c.csiConfigMutex)
 	if err != nil {
 		return errors.Wrap(err, "failed to update csi cluster config")
 	}
@@ -126,29 +116,43 @@ func (c *ClusterController) configureExternalCephCluster(cluster *cluster) error
 	// Create Crash Collector Secret
 	// In 14.2.5 the crash daemon will read the client.crash key instead of the admin key
 	if !cluster.Spec.CrashCollector.Disable {
-		err = crash.CreateCrashCollectorSecret(c.context, c.namespacedName.Namespace, &cluster.ownerRef)
+		err = crash.CreateCrashCollectorSecret(c.context, cluster.ClusterInfo)
 		if err != nil {
 			return errors.Wrap(err, "failed to create crash collector kubernetes secret")
 		}
 	}
 
-	// Everything went well so let's update the CR's status to "connected"
-	config.ConditionExport(c.context, c.namespacedName, cephv1.ConditionConnected, v1.ConditionTrue, "ClusterConnected", "Cluster connected successfully")
+	// enable monitoring if `monitoring: enabled: true`
+	// We need the Ceph version
+	if cluster.Spec.Monitoring.Enabled {
+		// Discover external Ceph version to detect which service monitor to inject
+		externalVersion, err := client.GetCephMonVersion(c.context, cluster.ClusterInfo)
+		if err != nil {
+			return errors.Wrap(err, "failed to get external ceph mon version")
+		}
+		cluster.ClusterInfo.CephVersion = *externalVersion
 
-	// Mark initialization has done
-	cluster.initCompleted = true
+		// Populate ceph version
+		c.updateClusterCephVersion("", *externalVersion)
+
+		err = c.configureExternalClusterMonitoring(cluster)
+		if err != nil {
+			return errors.Wrap(err, "failed to configure external cluster monitoring")
+		}
+	}
 
 	return nil
 }
 
 func purgeExternalCluster(clientset kubernetes.Interface, namespace string) {
+	ctx := context.TODO()
 	// Purge the config maps
 	cmsToDelete := []string{
 		mon.EndpointConfigMapName,
 		k8sutil.ConfigOverrideName,
 	}
 	for _, cm := range cmsToDelete {
-		err := clientset.CoreV1().ConfigMaps(namespace).Delete(cm, &metav1.DeleteOptions{})
+		err := clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, cm, metav1.DeleteOptions{})
 		if err != nil && !kerrors.IsNotFound(err) {
 			logger.Errorf("failed to delete config map %q. %v", cm, err)
 		}
@@ -165,7 +169,7 @@ func purgeExternalCluster(clientset kubernetes.Interface, namespace string) {
 		config.StoreName,
 	}
 	for _, secret := range secretsToDelete {
-		err := clientset.CoreV1().Secrets(namespace).Delete(secret, &metav1.DeleteOptions{})
+		err := clientset.CoreV1().Secrets(namespace).Delete(ctx, secret, metav1.DeleteOptions{})
 		if err != nil && !kerrors.IsNotFound(err) {
 			logger.Errorf("failed to delete secret %q. %v", secret, err)
 		}
@@ -177,6 +181,67 @@ func validateExternalClusterSpec(cluster *cluster) error {
 		if cluster.Spec.DataDirHostPath == "" {
 			return errors.New("dataDirHostPath must be specified")
 		}
+	}
+
+	// Validate external services port
+	if cluster.Spec.Monitoring.Enabled {
+		if cluster.Spec.Monitoring.ExternalMgrPrometheusPort == 0 {
+			cluster.Spec.Monitoring.ExternalMgrPrometheusPort = mgr.DefaultMetricsPort
+		}
+	}
+
+	return nil
+}
+
+func (c *ClusterController) configureExternalClusterMonitoring(cluster *cluster) error {
+	// Initialize manager object
+	manager := mgr.New(
+		c.context,
+		cluster.ClusterInfo,
+		*cluster.Spec,
+		c.rookImage,
+	)
+
+	// Create external monitoring Service
+	service := manager.MakeMetricsService(mgr.ExternalMgrAppName, mgr.ServiceExternalMetricName)
+	logger.Info("creating mgr external monitoring service")
+	_, err := k8sutil.CreateOrUpdateService(c.context.Clientset, cluster.Namespace, service)
+	if err != nil && !kerrors.IsAlreadyExists(err) {
+		return errors.Wrap(err, "failed to create or update mgr service")
+	}
+	logger.Info("mgr external metrics service created")
+
+	// Create external monitoring Endpoints
+	endpoint := mgr.CreateExternalMetricsEndpoints(cluster.Namespace, cluster.Spec.Monitoring, cluster.ownerRef)
+	logger.Info("creating mgr external monitoring endpoints")
+	_, err = k8sutil.CreateOrUpdateEndpoint(c.context.Clientset, c.namespacedName.Namespace, endpoint)
+	if err != nil {
+		return errors.Wrap(err, "failed to create or update mgr endpoint")
+	}
+
+	// Deploy external ServiceMonittor
+	logger.Info("creating external service monitor")
+	// servicemonitor takes some metadata from the service for easy mapping
+	err = manager.EnableServiceMonitor(service)
+	if err != nil {
+		logger.Errorf("failed to enable external service monitor. %v", err)
+	} else {
+		logger.Info("external service monitor created")
+	}
+
+	// namespace in which the prometheusRule should be deployed
+	// if left empty, it will be deployed in current namespace
+	namespace := cluster.Spec.Monitoring.RulesNamespace
+	if namespace == "" {
+		namespace = cluster.Namespace
+	}
+
+	logger.Info("creating external prometheus rule")
+	err = manager.DeployPrometheusRule(mgr.PrometheusExternalRuleName, namespace)
+	if err != nil {
+		logger.Errorf("failed to create external prometheus rule. %v", err)
+	} else {
+		logger.Info("external prometheus rule created")
 	}
 
 	return nil

@@ -15,6 +15,11 @@ SUPPORTED_PLATFORMS='k8s|ocp|okd'
 operator_sdk="${OPERATOR_SDK:-operator-sdk}"
 yq="${YQ_TOOL:-yq}"
 
+# Default CSI to true
+: "${OLM_INCLUDE_CEPHFS_CSI:=true}"
+: "${OLM_INCLUDE_RBD_CSI:=true}"
+: "${OLM_INCLUDE_REPORTER:=true}"
+
 ##########
 # CHECKS #
 ##########
@@ -72,11 +77,12 @@ ROOK_OP_VERSION=$3
 # VARIABLES #
 #############
 YQ_CMD_DELETE=($yq delete -i)
-YQ_CMD_MERGE_OVERWRITE=($yq merge --inplace --overwrite --append --prettyPrint)
+YQ_CMD_MERGE_OVERWRITE=($yq merge --inplace --overwrite --prettyPrint)
 YQ_CMD_MERGE=($yq merge --inplace --append -P )
 YQ_CMD_WRITE=($yq write --inplace -P )
 OPERATOR_YAML_FILE_K8S="cluster/examples/kubernetes/ceph/operator.yaml"
 OPERATOR_YAML_FILE_OCP="cluster/examples/kubernetes/ceph/operator-openshift.yaml"
+CRD_YAML_FILE="cluster/examples/kubernetes/ceph/crds.yaml"
 COMMON_YAML_FILE="cluster/examples/kubernetes/ceph/common.yaml"
 CSV_PATH="$OLM_CATALOG_DIR/deploy/olm-catalog/${PLATFORM}/${VERSION}"
 CSV_BUNDLE_PATH="${CSV_PATH}/manifests"
@@ -86,17 +92,18 @@ OLM_OPERATOR_YAML_FILE="$OLM_CATALOG_DIR/deploy/operator.yaml"
 OLM_ROLE_YAML_FILE="$OLM_CATALOG_DIR/deploy/role.yaml"
 OLM_ROLE_BINDING_YAML_FILE="$OLM_CATALOG_DIR/deploy/role_binding.yaml"
 OLM_SERVICE_ACCOUNT_YAML_FILE="$OLM_CATALOG_DIR/deploy/service_account.yaml"
-CEPH_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephclusters.ceph.rook.io.crd.yaml"
-CEPH_BLOCK_POOLS_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephblockpools.ceph.rook.io.crd.yaml"
-CEPH_OBJECT_STORE_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectstores.ceph.rook.io.crd.yaml"
-CEPH_OBJECT_STORE_USERS_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectstoreusers.ceph.rook.io.crd.yaml"
-CEPH_OBJECT_REALM_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectrealms.ceph.rook.io.crd.yaml"
-CEPH_OBJECT_ZONEGROUP_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectzonegroups.ceph.rook.io.crd.yaml"
-CEPH_OBJECT_ZONE_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectzones.ceph.rook.io.crd.yaml"
-CEPH_FILESYSTEMS_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephfilesystems.ceph.rook.io.crd.yaml"
-CEPH_NFS_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephnfses.ceph.rook.io.crd.yaml"
-CEPH_CLIENT_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephclients.ceph.rook.io.crd.yaml"
-CEPH_RBD_MIRROR_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephrbdmirrors.ceph.rook.io.crd.yaml"
+CEPH_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephclusters.ceph.rook.io.crds.yaml"
+CEPH_BLOCK_POOLS_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephblockpools.ceph.rook.io.crds.yaml"
+CEPH_OBJECT_STORE_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectstores.ceph.rook.io.crds.yaml"
+CEPH_OBJECT_STORE_USERS_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectstoreusers.ceph.rook.io.crds.yaml"
+CEPH_OBJECT_REALM_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectrealms.ceph.rook.io.crds.yaml"
+CEPH_OBJECT_ZONEGROUP_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectzonegroups.ceph.rook.io.crds.yaml"
+CEPH_OBJECT_ZONE_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephobjectzones.ceph.rook.io.crds.yaml"
+CEPH_FILESYSTEMS_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephfilesystems.ceph.rook.io.crds.yaml"
+CEPH_NFS_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephnfses.ceph.rook.io.crds.yaml"
+CEPH_CLIENT_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephclients.ceph.rook.io.crds.yaml"
+CEPH_RBD_MIRROR_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephrbdmirrors.ceph.rook.io.crds.yaml"
+CEPH_FS_MIRROR_CRD_YAML_FILE="$OLM_CATALOG_DIR/deploy/crds/cephfilesystemmirrors.ceph.rook.io.crds.yaml"
 CEPH_EXTERNAL_SCRIPT_FILE="cluster/examples/kubernetes/ceph/create-external-cluster-resources.py"
 
 if [[ -d "$CSV_BUNDLE_PATH" ]]; then
@@ -164,15 +171,15 @@ function generate_role_yaml() {
     sed -n '/^# OLM: BEGIN OPERATOR ROLE$/,/# OLM: END OPERATOR ROLE$/p' "$COMMON_YAML_FILE" > "$OLM_ROLE_YAML_FILE"
     sed -n '/^# OLM: BEGIN CLUSTER ROLE$/,/# OLM: END CLUSTER ROLE$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_YAML_FILE"
 
-    if [ -n "$OLM_INCLUDE_CEPHFS_CSI" ]; then
+    if [ "$OLM_INCLUDE_CEPHFS_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI CEPHFS ROLE$/,/# OLM: END CSI CEPHFS ROLE$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_YAML_FILE"
         sed -n '/^# OLM: BEGIN CSI CEPHFS CLUSTER ROLE$/,/# OLM: END CSI CEPHFS CLUSTER ROLE$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_YAML_FILE"
     fi
-    if [ -n "$OLM_INCLUDE_RBD_CSI" ]; then
+    if [ "$OLM_INCLUDE_RBD_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI RBD ROLE$/,/# OLM: END CSI RBD ROLE$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_YAML_FILE"
         sed -n '/^# OLM: BEGIN CSI RBD CLUSTER ROLE$/,/# OLM: END CSI RBD CLUSTER ROLE$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_YAML_FILE"
     fi
-    if [ -n "$OLM_INCLUDE_REPORTER" ]; then
+    if [ "$OLM_INCLUDE_REPORTER" = true ] ; then
         sed -n '/^# OLM: BEGIN CMD REPORTER ROLE$/,/# OLM: END CMD REPORTER ROLE$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_YAML_FILE"
     fi
 }
@@ -180,15 +187,15 @@ function generate_role_yaml() {
 function generate_role_binding_yaml() {
     sed -n '/^# OLM: BEGIN OPERATOR ROLEBINDING$/,/# OLM: END OPERATOR ROLEBINDING$/p' "$COMMON_YAML_FILE" > "$OLM_ROLE_BINDING_YAML_FILE"
     sed -n '/^# OLM: BEGIN CLUSTER ROLEBINDING$/,/# OLM: END CLUSTER ROLEBINDING$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_BINDING_YAML_FILE"
-    if [ -n "$OLM_INCLUDE_CEPHFS_CSI" ]; then
+    if [ "$OLM_INCLUDE_CEPHFS_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI CEPHFS ROLEBINDING$/,/# OLM: END CSI CEPHFS ROLEBINDING$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_BINDING_YAML_FILE"
         sed -n '/^# OLM: BEGIN CSI CEPHFS CLUSTER ROLEBINDING$/,/# OLM: END CSI CEPHFS CLUSTER ROLEBINDING$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_BINDING_YAML_FILE"
     fi
-    if [ -n "$OLM_INCLUDE_RBD_CSI" ]; then
+    if [ "$OLM_INCLUDE_RBD_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI RBD ROLEBINDING$/,/# OLM: END CSI RBD ROLEBINDING$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_BINDING_YAML_FILE"
         sed -n '/^# OLM: BEGIN CSI RBD CLUSTER ROLEBINDING$/,/# OLM: END CSI RBD CLUSTER ROLEBINDING$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_BINDING_YAML_FILE"
     fi
-    if [ -n "$OLM_INCLUDE_REPORTER" ]; then
+    if [ "$OLM_INCLUDE_REPORTER" = true ] ; then
         sed -n '/^# OLM: BEGIN CMD REPORTER ROLEBINDING$/,/# OLM: END CMD REPORTER ROLEBINDING$/p' "$COMMON_YAML_FILE" >> "$OLM_ROLE_BINDING_YAML_FILE"
     fi
 }
@@ -197,31 +204,32 @@ function generate_service_account_yaml() {
     sed -n '/^# OLM: BEGIN SERVICE ACCOUNT SYSTEM$/,/# OLM: END SERVICE ACCOUNT SYSTEM$/p' "$COMMON_YAML_FILE" > "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     sed -n '/^# OLM: BEGIN SERVICE ACCOUNT OSD$/,/# OLM: END SERVICE ACCOUNT OSD$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     sed -n '/^# OLM: BEGIN SERVICE ACCOUNT MGR$/,/# OLM: END SERVICE ACCOUNT MGR$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
-    if [ -n "$OLM_INCLUDE_CEPHFS_CSI" ]; then
+    if [ "$OLM_INCLUDE_CEPHFS_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI CEPHFS SERVICE ACCOUNT$/,/# OLM: END CSI CEPHFS SERVICE ACCOUNT$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     fi
-    if [ -n "$OLM_INCLUDE_RBD_CSI" ]; then
+    if [ "$OLM_INCLUDE_RBD_CSI" = true ]; then
         sed -n '/^# OLM: BEGIN CSI RBD SERVICE ACCOUNT$/,/# OLM: END CSI RBD SERVICE ACCOUNT$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     fi
-    if [ -n "$OLM_INCLUDE_REPORTER" ]; then
+    if [ "$OLM_INCLUDE_REPORTER" = true ] ; then
         sed -n '/^# OLM: BEGIN CMD REPORTER SERVICE ACCOUNT$/,/# OLM: END CMD REPORTER SERVICE ACCOUNT$/p' "$COMMON_YAML_FILE" >> "$OLM_SERVICE_ACCOUNT_YAML_FILE"
     fi
 }
 
 function generate_crds_yaml() {
-    sed -n '/^# OLM: BEGIN CEPH CRD$/,/# OLM: END CEPH CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_CRD_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH OBJECT STORE CRD$/,/# OLM: END CEPH OBJECT STORE CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_STORE_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH OBJECT STORE USERS CRD$/,/# OLM: END CEPH OBJECT STORE USERS CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_STORE_USERS_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH OBJECT REALM CRD$/,/# OLM: END CEPH OBJECT REALM CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_REALM_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH OBJECT ZONEGROUP CRD$/,/# OLM: END CEPH OBJECT ZONEGROUP CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_ZONEGROUP_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH OBJECT ZONE CRD$/,/# OLM: END CEPH OBJECT ZONE CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_ZONE_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH BLOCK POOL CRD$/,/# OLM: END CEPH BLOCK POOL CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_BLOCK_POOLS_CRD_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH NFS CRD$/,/# OLM: END CEPH NFS CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_NFS_CRD_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH CLIENT CRD$/,/# OLM: END CEPH CLIENT CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_CLIENT_CRD_YAML_FILE"
-    sed -n '/^# OLM: BEGIN CEPH RBD MIRROR CRD$/,/# OLM: END CEPH RBD MIRROR CRD$/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_RBD_MIRROR_CRD_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH CRD$/,/# OLM: END CEPH CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_CRD_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH OBJECT STORE CRD$/,/# OLM: END CEPH OBJECT STORE CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_STORE_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH OBJECT STORE USERS CRD$/,/# OLM: END CEPH OBJECT STORE USERS CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_STORE_USERS_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH OBJECT REALM CRD$/,/# OLM: END CEPH OBJECT REALM CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_REALM_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH OBJECT ZONEGROUP CRD$/,/# OLM: END CEPH OBJECT ZONEGROUP CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_ZONEGROUP_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH OBJECT ZONE CRD$/,/# OLM: END CEPH OBJECT ZONE CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_OBJECT_ZONE_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH BLOCK POOL CRD$/,/# OLM: END CEPH BLOCK POOL CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_BLOCK_POOLS_CRD_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH NFS CRD$/,/# OLM: END CEPH NFS CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_NFS_CRD_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH CLIENT CRD$/,/# OLM: END CEPH CLIENT CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_CLIENT_CRD_YAML_FILE"
+    sed -n '/^# OLM: BEGIN CEPH RBD MIRROR CRD$/,/# OLM: END CEPH RBD MIRROR CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_RBD_MIRROR_CRD_YAML_FILE"
 
-    if [ -n "$OLM_INCLUDE_CEPHFS_CSI" ]; then
-        sed -n '/^# OLM: BEGIN CEPH FS CRD$/,/# OLM: END CEPH FS CRD/p' "$COMMON_YAML_FILE" | grep -v '^#' > "$CEPH_FILESYSTEMS_CRD_YAML_FILE"
+    if [ "$OLM_INCLUDE_CEPHFS_CSI" = true ]; then
+        sed -n '/^# OLM: BEGIN CEPH FS CRD$/,/# OLM: END CEPH FS CRD/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_FILESYSTEMS_CRD_YAML_FILE"
+        sed -n '/^# OLM: BEGIN CEPH FS MIRROR CRD$/,/# OLM: END CEPH FS MIRROR CRD$/p' "$CRD_YAML_FILE" | grep -v '^#' > "$CEPH_FS_MIRROR_CRD_YAML_FILE"
     fi
 }
 
@@ -244,17 +252,18 @@ function hack_csv() {
     # rook-ceph-osd --> serviceAccountName
     #     rook-ceph-osd --> rule
 
-    sed -i 's/rook-ceph-cluster-mgmt-rules/rook-ceph-system/' "$CSV_FILE_NAME"
-    sed -i 's/rook-ceph-global-rules/rook-ceph-system/' "$CSV_FILE_NAME"
+    sed -i 's/rook-ceph-global/rook-ceph-system/' "$CSV_FILE_NAME"
     sed -i 's/rook-ceph-object-bucket/rook-ceph-system/' "$CSV_FILE_NAME"
+    sed -i 's/rook-ceph-cluster-mgmt/rook-ceph-system/' "$CSV_FILE_NAME"
 
-    sed -i 's/rook-ceph-mgr-system-rules/rook-ceph-mgr/' "$CSV_FILE_NAME"
-    sed -i 's/rook-ceph-mgr-cluster-rules/rook-ceph-mgr/' "$CSV_FILE_NAME"
+    sed -i 's/rook-ceph-mgr-cluster/rook-ceph-mgr/' "$CSV_FILE_NAME"
+    sed -i 's/rook-ceph-mgr-system/rook-ceph-mgr/' "$CSV_FILE_NAME"
 
-    sed -i 's/cephfs-csi-nodeplugin-rules/rook-csi-cephfs-plugin-sa/' "$CSV_FILE_NAME"
-    sed -i 's/cephfs-external-provisioner-runner-rules/rook-csi-cephfs-provisioner-sa/' "$CSV_FILE_NAME"
-    sed -i 's/rbd-csi-nodeplugin-rules/rook-csi-rbd-plugin-sa/' "$CSV_FILE_NAME"
-    sed -i 's/rbd-external-provisioner-runner-rules/rook-csi-rbd-provisioner-sa/' "$CSV_FILE_NAME"
+    sed -i 's/cephfs-csi-nodeplugin/rook-csi-cephfs-plugin-sa/' "$CSV_FILE_NAME"
+    sed -i 's/cephfs-external-provisioner-runner/rook-csi-cephfs-provisioner-sa/' "$CSV_FILE_NAME"
+
+    sed -i 's/rbd-csi-nodeplugin/rook-csi-rbd-plugin-sa/' "$CSV_FILE_NAME"
+    sed -i 's/rbd-external-provisioner-runner/rook-csi-rbd-provisioner-sa/' "$CSV_FILE_NAME"
     # The operator-sdk also does not properly respect when
     # Roles differ from the Service Account name
     # The operator-sdk instead assumes the Role/ClusterRole is the ServiceAccount name

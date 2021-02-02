@@ -1,7 +1,3 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name:  rook-nfs
 ---
 # A default storageclass must be present
 apiVersion: v1
@@ -22,7 +18,6 @@ metadata:
   name: rook-nfs
   namespace: rook-nfs
 spec:
-  serviceAccountName: rook-nfs
   replicas: 1
   exports:
   - name: share1
@@ -34,4 +29,4 @@ spec:
       claimName: nfs-default-claim
   # A key/value list of annotations
   annotations:
-  #  key: value
+    rook: nfs

@@ -19,6 +19,7 @@ package client
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
@@ -34,7 +35,7 @@ func TestGetCephMonVersionString(t *testing.T) {
 	}
 	context := &clusterd.Context{Executor: executor}
 
-	_, err := getCephMonVersionString(context, "rook-ceph")
+	_, err := getCephMonVersionString(context, AdminClusterInfo("mycluster"))
 	assert.NoError(t, err)
 }
 
@@ -46,7 +47,7 @@ func TestGetCephMonVersionsString(t *testing.T) {
 	}
 	context := &clusterd.Context{Executor: executor}
 
-	_, err := getAllCephDaemonVersionsString(context, "rook-ceph")
+	_, err := getAllCephDaemonVersionsString(context, AdminClusterInfo("mycluster"))
 	assert.Nil(t, err)
 }
 
@@ -59,7 +60,7 @@ func TestEnableMessenger2(t *testing.T) {
 	}
 	context := &clusterd.Context{Executor: executor}
 
-	err := EnableMessenger2(context, "rook-ceph")
+	err := EnableMessenger2(context, AdminClusterInfo("mycluster"))
 	assert.NoError(t, err)
 }
 
@@ -73,7 +74,7 @@ func TestEnableReleaseOSDFunctionality(t *testing.T) {
 	}
 	context := &clusterd.Context{Executor: executor}
 
-	err := EnableReleaseOSDFunctionality(context, "rook-ceph", "nautilus")
+	err := EnableReleaseOSDFunctionality(context, AdminClusterInfo("mycluster"), "nautilus")
 	assert.NoError(t, err)
 }
 
@@ -90,7 +91,7 @@ func TestOkToStopDaemon(t *testing.T) {
 	context := &clusterd.Context{Executor: executor}
 
 	deployment := "rook-ceph-mon-a"
-	err := okToStopDaemon(context, deployment, "rook-ceph", "mon", "a")
+	err := okToStopDaemon(context, AdminClusterInfo("mycluster"), deployment, "mon", "a")
 	assert.NoError(t, err)
 
 	// Second test
@@ -103,7 +104,7 @@ func TestOkToStopDaemon(t *testing.T) {
 	context = &clusterd.Context{Executor: executor}
 
 	deployment = "rook-ceph-mgr-a"
-	err = okToStopDaemon(context, deployment, "rook-ceph", "mgr", "a")
+	err = okToStopDaemon(context, AdminClusterInfo("mycluster"), deployment, "mgr", "a")
 	assert.NoError(t, err)
 
 	// Third test
@@ -116,7 +117,7 @@ func TestOkToStopDaemon(t *testing.T) {
 	context = &clusterd.Context{Executor: executor}
 
 	deployment = "rook-ceph-dummy-a"
-	err = okToStopDaemon(context, deployment, "rook-ceph", "dummy", "a")
+	err = okToStopDaemon(context, AdminClusterInfo("mycluster"), deployment, "dummy", "a")
 	assert.NoError(t, err)
 }
 
@@ -124,7 +125,7 @@ func TestOkToContinue(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
 
-	err := OkToContinue(context, "rook-ceph", "rook-ceph-mon-a", "mon", "a") // mon is not checked on ok-to-continue so nil is expected
+	err := OkToContinue(context, AdminClusterInfo("mycluster"), "rook-ceph-mon-a", "mon", "a") // mon is not checked on ok-to-continue so nil is expected
 	assert.NoError(t, err)
 }
 
@@ -152,7 +153,7 @@ func TestDaemonMapEntry(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, dummyVersions.Mon, m)
 
-	m, err = daemonMapEntry(&dummyVersions, "dummy")
+	_, err = daemonMapEntry(&dummyVersions, "dummy")
 	assert.Error(t, err)
 }
 
@@ -249,4 +250,50 @@ func TestBuildHostListFromTree(t *testing.T) {
 
 	_, err = buildHostListFromTree(dummyEmptyNodeTree)
 	assert.NoError(t, err)
+}
+
+func TestGetRetryConfig(t *testing.T) {
+	testcases := []struct {
+		label           string
+		clusterInfo     *ClusterInfo
+		daemonType      string
+		expectedRetries int
+		expectedDelay   time.Duration
+	}{
+		{
+			label:           "case 1: mon daemon",
+			clusterInfo:     &ClusterInfo{},
+			daemonType:      "mon",
+			expectedRetries: 10,
+			expectedDelay:   60 * time.Second,
+		},
+		{
+			label:           "case 2: osd daemon with 5 minutes delay",
+			clusterInfo:     &ClusterInfo{OsdUpgradeTimeout: 5 * time.Minute},
+			daemonType:      "osd",
+			expectedRetries: 30,
+			expectedDelay:   10 * time.Second,
+		},
+		{
+			label:           "case 3: osd daemon with 10 minutes delay",
+			clusterInfo:     &ClusterInfo{OsdUpgradeTimeout: 10 * time.Minute},
+			daemonType:      "osd",
+			expectedRetries: 60,
+			expectedDelay:   10 * time.Second,
+		},
+		{
+			label:           "case 4: mds daemon",
+			clusterInfo:     &ClusterInfo{},
+			daemonType:      "mds",
+			expectedRetries: 10,
+			expectedDelay:   15 * time.Second,
+		},
+	}
+
+	for _, tc := range testcases {
+		actualRetries, actualDelay := getRetryConfig(tc.clusterInfo, tc.daemonType)
+
+		assert.Equal(t, tc.expectedRetries, actualRetries, "[%s] failed to get correct retry count", tc.label)
+		assert.Equalf(t, tc.expectedDelay, actualDelay, "[%s] failed to get correct delays between retries", tc.label)
+	}
 }

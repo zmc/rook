@@ -48,15 +48,14 @@ func init() {
 	operatorCmd.Flags().DurationVar(&mon.MonOutTimeout, "mon-out-timeout", mon.MonOutTimeout, "mon out timeout (duration)")
 
 	operatorCmd.Flags().BoolVar(&operator.EnableFlexDriver, "enable-flex-driver", true, "enable the rook flex driver")
-	operatorCmd.Flags().BoolVar(&operator.EnableDiscoveryDaemon, "enable-discovery-daemon", true, "enable the rook discovery daemon")
+	operatorCmd.Flags().BoolVar(&operator.EnableDiscoveryDaemon, "enable-discovery-daemon", false, "enable the rook discovery daemon")
 
 	// csi deployment templates
 	operatorCmd.Flags().StringVar(&csi.RBDPluginTemplatePath, "csi-rbd-plugin-template-path", csi.DefaultRBDPluginTemplatePath, "path to ceph-csi rbd plugin template")
-	operatorCmd.Flags().StringVar(&csi.RBDProvisionerSTSTemplatePath, "csi-rbd-provisioner-sts-template-path", csi.DefaultRBDProvisionerSTSTemplatePath, "path to ceph-csi rbd provisioner statefulset template")
+
 	operatorCmd.Flags().StringVar(&csi.RBDProvisionerDepTemplatePath, "csi-rbd-provisioner-dep-template-path", csi.DefaultRBDProvisionerDepTemplatePath, "path to ceph-csi rbd provisioner deployment template")
 
 	operatorCmd.Flags().StringVar(&csi.CephFSPluginTemplatePath, "csi-cephfs-plugin-template-path", csi.DefaultCephFSPluginTemplatePath, "path to ceph-csi cephfs plugin template")
-	operatorCmd.Flags().StringVar(&csi.CephFSProvisionerSTSTemplatePath, "csi-cephfs-provisioner-sts-template-path", csi.DefaultCephFSProvisionerSTSTemplatePath, "path to ceph-csi cephfs provisioner statefulset template")
 	operatorCmd.Flags().StringVar(&csi.CephFSProvisionerDepTemplatePath, "csi-cephfs-provisioner-dep-template-path", csi.DefaultCephFSProvisionerDepTemplatePath, "path to ceph-csi cephfs provisioner deployment template")
 
 	operatorCmd.Flags().BoolVar(&cluster.EnableMachineDisruptionBudget, "enable-machine-disruption-budget", false, "enable fencing controllers")

@@ -16,20 +16,19 @@ limitations under the License.
 package osd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -37,18 +36,21 @@ import (
 )
 
 func TestOrchestrationStatus(t *testing.T) {
+	ctx := context.TODO()
 	clientset := fake.NewSimpleClientset()
-	clusterInfo := &cephconfig.ClusterInfo{
+	clusterInfo := &cephclient.ClusterInfo{
+		Namespace:   "ns",
 		CephVersion: cephver.Nautilus,
 	}
-	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "myversion", cephv1.CephVersionSpec{},
-		rookv1.StorageScopeSpec{}, "", rookv1.Placement{}, rookv1.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
-	kv := k8sutil.NewConfigMapKVStore(c.Namespace, clientset, metav1.OwnerReference{})
+	context := &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}
+	spec := cephv1.ClusterSpec{}
+	c := New(context, clusterInfo, spec, "myversion")
+	kv := k8sutil.NewConfigMapKVStore(c.clusterInfo.Namespace, clientset, metav1.OwnerReference{})
 	nodeName := "mynode"
 	cmName := fmt.Sprintf(orchestrationStatusMapName, nodeName)
 
 	// status map should not exist yet
-	_, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(cmName, metav1.GetOptions{})
+	_, err := c.context.Clientset.CoreV1().ConfigMaps(c.clusterInfo.Namespace).Get(ctx, cmName, metav1.GetOptions{})
 	assert.True(t, errors.IsNotFound(err))
 
 	// update the status map with some status
@@ -56,7 +58,7 @@ func TestOrchestrationStatus(t *testing.T) {
 	UpdateNodeStatus(kv, nodeName, status)
 
 	// retrieve the status and verify it
-	statusMap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(cmName, metav1.GetOptions{})
+	statusMap, err := c.context.Clientset.CoreV1().ConfigMaps(c.clusterInfo.Namespace).Get(ctx, cmName, metav1.GetOptions{})
 	assert.Nil(t, err)
 	assert.NotNil(t, statusMap)
 	retrievedStatus := parseOrchestrationStatus(statusMap.Data)
@@ -65,14 +67,15 @@ func TestOrchestrationStatus(t *testing.T) {
 }
 
 func mockNodeOrchestrationCompletion(c *Cluster, nodeName string, statusMapWatcher *watch.FakeWatcher) {
+	ctx := context.TODO()
 	// if no valid osd node, don't need to check its status, return immediately
-	if len(c.DesiredStorage.Nodes) == 0 {
+	if len(c.spec.Storage.Nodes) == 0 {
 		return
 	}
 	for {
 		// wait for the node's orchestration status to change to "starting"
 		cmName := fmt.Sprintf(orchestrationStatusMapName, nodeName)
-		cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(cmName, metav1.GetOptions{})
+		cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.clusterInfo.Namespace).Get(ctx, cmName, metav1.GetOptions{})
 		if err == nil {
 			status := parseOrchestrationStatus(cm.Data)
 			if status != nil && status.Status == OrchestrationStatusStarting {
@@ -105,11 +108,12 @@ func mockNodeOrchestrationCompletion(c *Cluster, nodeName string, statusMapWatch
 }
 
 func waitForOrchestrationCompletion(c *Cluster, nodeName string, startCompleted *bool) {
+	ctx := context.TODO()
 	for {
 		if *startCompleted {
 			break
 		}
-		cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(orchestrationStatusMapName, metav1.GetOptions{})
+		cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.clusterInfo.Namespace).Get(ctx, orchestrationStatusMapName, metav1.GetOptions{})
 		if err == nil {
 			status := parseOrchestrationStatus(cm.Data)
 			if status != nil {

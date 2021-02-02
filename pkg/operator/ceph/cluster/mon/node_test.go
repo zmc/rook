@@ -17,6 +17,7 @@ limitations under the License.
 package mon
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
@@ -33,8 +35,9 @@ import (
 )
 
 func TestNodeAffinity(t *testing.T) {
+	ctx := context.TODO()
 	clientset := test.New(t, 4)
-	c := New(&clusterd.Context{Clientset: clientset}, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	c := New(&clusterd.Context{Clientset: clientset}, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 
 	c.spec.Placement = map[rookv1.KeyType]rookv1.Placement{}
@@ -56,27 +59,31 @@ func TestNodeAffinity(t *testing.T) {
 	}
 
 	// label nodes so they appear as not scheduable / invalid
-	node, _ := clientset.CoreV1().Nodes().Get("node0", metav1.GetOptions{})
+	node, _ := clientset.CoreV1().Nodes().Get(ctx, "node0", metav1.GetOptions{})
 	node.Labels = map[string]string{"label": "foo"}
-	clientset.CoreV1().Nodes().Update(node)
+	_, err := clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	assert.NoError(t, err)
 
-	node, _ = clientset.CoreV1().Nodes().Get("node1", metav1.GetOptions{})
+	node, _ = clientset.CoreV1().Nodes().Get(ctx, "node1", metav1.GetOptions{})
 	node.Labels = map[string]string{"label": "bar"}
-	clientset.CoreV1().Nodes().Update(node)
+	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	assert.NoError(t, err)
 
-	node, _ = clientset.CoreV1().Nodes().Get("node2", metav1.GetOptions{})
+	node, _ = clientset.CoreV1().Nodes().Get(ctx, "node2", metav1.GetOptions{})
 	node.Labels = map[string]string{"label": "baz"}
-	clientset.CoreV1().Nodes().Update(node)
+	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	assert.NoError(t, err)
 }
 
 // this tests can 3 mons with hostnetworking on the same host is rejected
 func TestHostNetworkSameNode(t *testing.T) {
 	namespace := "ns"
 	context, err := newTestStartCluster(t, namespace)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	// cluster host networking
-	c := newCluster(context, namespace, cephv1.NetworkSpec{HostNetwork: true}, true, v1.ResourceRequirements{})
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c := newCluster(context, namespace, true, v1.ResourceRequirements{})
+	c.spec.Network.HostNetwork = true
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 
 	// start a basic cluster
 	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
@@ -86,7 +93,7 @@ func TestHostNetworkSameNode(t *testing.T) {
 func TestPodMemory(t *testing.T) {
 	namespace := "ns"
 	context, err := newTestStartCluster(t, namespace)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	// Test memory limit alone
 	r := v1.ResourceRequirements{
 		Limits: v1.ResourceList{
@@ -94,11 +101,11 @@ func TestPodMemory(t *testing.T) {
 		},
 	}
 
-	c := newCluster(context, namespace, cephv1.NetworkSpec{}, true, r)
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c := newCluster(context, namespace, true, r)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 	// start a basic cluster
 	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
-	assert.Error(t, err)
+	assert.NoError(t, err)
 
 	// Test REQUEST == LIMIT
 	r = v1.ResourceRequirements{
@@ -110,11 +117,11 @@ func TestPodMemory(t *testing.T) {
 		},
 	}
 
-	c = newCluster(context, namespace, cephv1.NetworkSpec{}, true, r)
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c = newCluster(context, namespace, true, r)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 	// start a basic cluster
 	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
-	assert.Error(t, err)
+	assert.NoError(t, err)
 
 	// Test LIMIT != REQUEST but obviously LIMIT > REQUEST
 	r = v1.ResourceRequirements{
@@ -126,13 +133,13 @@ func TestPodMemory(t *testing.T) {
 		},
 	}
 
-	c = newCluster(context, namespace, cephv1.NetworkSpec{}, true, r)
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c = newCluster(context, namespace, true, r)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 	// start a basic cluster
 	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
-	assert.Error(t, err)
+	assert.NoError(t, err)
 
-	// Test valid case where pod resource is set approprietly
+	// Test valid case where pod resource is set appropriately
 	r = v1.ResourceRequirements{
 		Limits: v1.ResourceList{
 			v1.ResourceMemory: *resource.NewQuantity(1073741824, resource.BinarySI), // size in Bytes
@@ -142,31 +149,32 @@ func TestPodMemory(t *testing.T) {
 		},
 	}
 
-	c = newCluster(context, namespace, cephv1.NetworkSpec{}, true, r)
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c = newCluster(context, namespace, true, r)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 	// start a basic cluster
 	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	// Test no resources were specified on the pod
 	r = v1.ResourceRequirements{}
-	c = newCluster(context, namespace, cephv1.NetworkSpec{}, true, r)
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c = newCluster(context, namespace, true, r)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 	// start a basic cluster
 	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Nautilus, c.spec)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 }
 
 func TestHostNetwork(t *testing.T) {
 	clientset := test.New(t, 3)
-	c := New(&clusterd.Context{Clientset: clientset}, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	c := New(&clusterd.Context{Clientset: clientset}, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 
-	c.Network.HostNetwork = true
+	c.spec.Network.HostNetwork = true
 
 	monConfig := testGenMonConfig("c")
-	pod := c.makeMonPod(monConfig, false, "")
+	pod, err := c.makeMonPod(monConfig, false)
+	assert.NoError(t, err)
 	assert.NotNil(t, pod)
 	assert.Equal(t, true, pod.Spec.HostNetwork)
 	assert.Equal(t, v1.DNSClusterFirstWithHostNet, pod.Spec.DNSPolicy)
@@ -177,7 +185,8 @@ func TestHostNetwork(t *testing.T) {
 	assert.Equal(t, "arg not found: --public-bind-addr", message)
 
 	monConfig.Port = 6790
-	pod = c.makeMonPod(monConfig, false, "")
+	pod, err = c.makeMonPod(monConfig, false)
+	assert.NoError(t, err)
 	val, message = extractArgValue(pod.Spec.Containers[0].Args, "--public-addr")
 	assert.Equal(t, "2.4.6.3:6790", val, message)
 	assert.NotNil(t, pod)
@@ -197,9 +206,10 @@ func extractArgValue(args []string, name string) (string, string) {
 }
 
 func TestGetNodeInfoFromNode(t *testing.T) {
+	ctx := context.TODO()
 	clientset := test.New(t, 1)
-	node, err := clientset.CoreV1().Nodes().Get("node0", metav1.GetOptions{})
-	assert.Nil(t, err)
+	node, err := clientset.CoreV1().Nodes().Get(ctx, "node0", metav1.GetOptions{})
+	assert.NoError(t, err)
 	assert.NotNil(t, node)
 
 	node.Status = v1.NodeStatus{}
@@ -210,13 +220,13 @@ func TestGetNodeInfoFromNode(t *testing.T) {
 		},
 	}
 
-	var info *NodeInfo
-	info, err = getNodeInfoFromNode(*node)
+	var info *MonScheduleInfo
+	_, err = getNodeInfoFromNode(*node)
 	assert.NotNil(t, err)
 
 	node.Status.Addresses[0].Type = v1.NodeInternalIP
 	node.Status.Addresses[0].Address = "172.17.0.1"
 	info, err = getNodeInfoFromNode(*node)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, "172.17.0.1", info.Address)
 }

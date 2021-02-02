@@ -19,7 +19,8 @@ We welcome contributions! In the meantime, features that are not yet implemented
 ### Prerequisites
 
 - A Rook storage cluster must be configured and running in Kubernetes. In this example, it is assumed the cluster is in the `rook` namespace.
-- The following resources, or equivilant, need to be created:
+- The following resources, or equivalent, need to be created:
+  - [crd](/cluster/examples/kubernetes/ceph/crds.yaml)
   - [common](/cluster/examples/kubernetes/ceph/common.yaml)
   - [operator](/cluster/examples/kubernetes/ceph/operator.yaml)
   - [cluster](/cluster/examples/kubernetes/ceph/cluster-test.yaml)
@@ -53,7 +54,6 @@ spec:
     port: 80
     securePort: 443
     instances: 3
-    allNodes: false
 ```
 
 Now create the object store.

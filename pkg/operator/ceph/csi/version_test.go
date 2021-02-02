@@ -25,7 +25,11 @@ import (
 var (
 	testMinVersion         = CephCSIVersion{2, 0, 0}
 	testReleaseV210        = CephCSIVersion{2, 1, 0}
-	testVersionUnsupported = CephCSIVersion{2, 2, 0}
+	testReleaseV300        = CephCSIVersion{3, 0, 0}
+	testReleaseV320        = CephCSIVersion{3, 2, 0}
+	testReleaseV321        = CephCSIVersion{3, 2, 1}
+	testReleaseV330        = CephCSIVersion{3, 3, 0}
+	testVersionUnsupported = CephCSIVersion{4, 0, 0}
 )
 
 func TestIsAtLeast(t *testing.T) {
@@ -65,24 +69,61 @@ func TestIsAtLeast(t *testing.T) {
 
 	// Test version which is greater (bugfix)
 	version = CephCSIVersion{2, 2, 0}
-	ret = testMinVersion.isAtLeast(&version)
+	ret = testReleaseV210.isAtLeast(&version)
+	assert.Equal(t, false, ret)
+
+	// Test for 3.0.0
+	// Test version which is equal
+	ret = testReleaseV300.isAtLeast(&testReleaseV300)
+	assert.Equal(t, true, ret)
+
+	// Test version which is greater (minor)
+	version = CephCSIVersion{3, 1, 1}
+	ret = testReleaseV300.isAtLeast(&version)
+	assert.Equal(t, false, ret)
+
+	// Test version which is greater (bugfix)
+	version = CephCSIVersion{3, 2, 0}
+	ret = testReleaseV300.isAtLeast(&version)
 	assert.Equal(t, false, ret)
 }
 
 func TestSupported(t *testing.T) {
+	AllowUnsupported = false
 	ret := testMinVersion.Supported()
 	assert.Equal(t, true, ret)
 
-	ret = testReleaseV210.Supported()
+	ret = testMinVersion.Supported()
 	assert.Equal(t, true, ret)
 
 	ret = testVersionUnsupported.Supported()
 	assert.Equal(t, false, ret)
 }
 
+func TestSupportOMAPController(t *testing.T) {
+	AllowUnsupported = true
+	ret := testMinVersion.SupportsOMAPController()
+	assert.True(t, ret)
+
+	AllowUnsupported = false
+	ret = testMinVersion.SupportsOMAPController()
+	assert.False(t, ret)
+
+	ret = testReleaseV300.SupportsOMAPController()
+	assert.False(t, ret)
+
+	ret = testReleaseV320.SupportsOMAPController()
+	assert.True(t, ret)
+
+	ret = testReleaseV321.SupportsOMAPController()
+	assert.True(t, ret)
+
+	ret = testReleaseV330.SupportsOMAPController()
+	assert.True(t, ret)
+}
 func Test_extractCephCSIVersion(t *testing.T) {
-	expectedVersion := CephCSIVersion{2, 0, 0}
-	csiString := []byte(`Cephcsi Version: v2.0.0
+	expectedVersion := CephCSIVersion{3, 0, 0}
+	csiString := []byte(`Cephcsi Version: v3.0.0
 		Git Commit: e58d537a07ca0184f67d33db85bf6b4911624b44
 		Go Version: go1.12.15
 		Compiler: gc

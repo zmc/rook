@@ -17,11 +17,13 @@ limitations under the License.
 package clients
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -67,11 +69,15 @@ func (b *BlockOperation) CreateStorageClassAndPVC(csi bool, pvcNamespace, cluste
 	if err := b.k8sClient.ResourceOperation("apply", b.manifests.GetBlockStorageClassDef(csi, poolName, storageClassName, reclaimPolicy, clusterNamespace, systemNamespace)); err != nil {
 		return err
 	}
-	return b.k8sClient.ResourceOperation("apply", b.manifests.GetBlockPVCDef(blockName, pvcNamespace, storageClassName, mode, "1M"))
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetPVC(blockName, pvcNamespace, storageClassName, mode, "1M"))
 }
 
 func (b *BlockOperation) CreatePVC(namespace, claimName, storageClassName, mode, size string) error {
-	return b.k8sClient.ResourceOperation("apply", b.manifests.GetBlockPVCDef(claimName, namespace, storageClassName, mode, size))
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetPVC(claimName, namespace, storageClassName, mode, size))
+}
+
+func (b *BlockOperation) CreatePod(podName, claimName, namespace, mountPoint string, readOnly bool) error {
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetPod(podName, claimName, namespace, mountPoint, readOnly))
 }
 
 func (b *BlockOperation) CreateStorageClass(csi bool, poolName, storageClassName, reclaimPolicy, namespace string) error {
@@ -79,13 +85,44 @@ func (b *BlockOperation) CreateStorageClass(csi bool, poolName, storageClassName
 }
 
 func (b *BlockOperation) DeletePVC(namespace, claimName string) error {
+	ctx := context.TODO()
 	logger.Infof("deleting pvc %q from namespace %q", claimName, namespace)
-	return b.k8sClient.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(claimName, &metav1.DeleteOptions{})
+	return b.k8sClient.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, claimName, metav1.DeleteOptions{})
+}
+
+func (b *BlockOperation) CreatePVCRestore(namespace, claimName, snapshotName, storageClassName, mode, size string) error {
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetPVCRestore(claimName, snapshotName, namespace, storageClassName, mode, size))
+}
+
+func (b *BlockOperation) CreatePVCClone(namespace, cloneClaimName, parentClaimName, storageClassName, mode, size string) error {
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetPVCClone(cloneClaimName, parentClaimName, namespace, storageClassName, mode, size))
+}
+
+func (b *BlockOperation) CreateSnapshotClass(snapshotClassName, deletePolicy, namespace string) error {
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetBlockSnapshotClass(snapshotClassName, namespace, namespace, deletePolicy))
+}
+
+func (b *BlockOperation) DeleteSnapshotClass(snapshotClassName, deletePolicy, namespace string) error {
+	return b.k8sClient.ResourceOperation("delete", b.manifests.GetBlockSnapshotClass(snapshotClassName, namespace, namespace, deletePolicy))
+}
+
+func (b *BlockOperation) CreateSnapshot(snapshotName, claimName, snapshotClassName, namespace string) error {
+	return b.k8sClient.ResourceOperation("apply", b.manifests.GetSnapshot(snapshotName, claimName, snapshotClassName, namespace))
+}
+
+func (b *BlockOperation) DeleteSnapshot(snapshotName, claimName, snapshotClassName, namespace string) error {
+	return b.k8sClient.ResourceOperation("delete", b.manifests.GetSnapshot(snapshotName, claimName, snapshotClassName, namespace))
 }
 
 func (b *BlockOperation) DeleteStorageClass(storageClassName string) error {
+	ctx := context.TODO()
 	logger.Infof("deleting storage class %q", storageClassName)
-	return b.k8sClient.Clientset.StorageV1().StorageClasses().Delete(storageClassName, &metav1.DeleteOptions{})
+	err := b.k8sClient.Clientset.StorageV1().StorageClasses().Delete(ctx, storageClassName, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete storage class %q. %v", storageClassName, err)
+	}
+
+	return nil
 }
 
 // BlockDelete Function to delete a Block using Rook
@@ -104,9 +141,9 @@ func (b *BlockOperation) DeleteBlock(manifest string) (string, error) {
 }
 
 // List Function to list all the block images in all pools
-func (b *BlockOperation) ListAllImages(namespace string) ([]BlockImage, error) {
+func (b *BlockOperation) ListAllImages(clusterInfo *client.ClusterInfo) ([]BlockImage, error) {
 	// first list all the pools so that we can retrieve images from all pools
-	pools, err := client.ListPoolSummaries(b.k8sClient.MakeContext(), namespace)
+	pools, err := client.ListPoolSummaries(b.k8sClient.MakeContext(), clusterInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pools: %+v", err)
 	}
@@ -114,7 +151,7 @@ func (b *BlockOperation) ListAllImages(namespace string) ([]BlockImage, error) {
 	// for each pool, get further details about all the images in the pool
 	images := []BlockImage{}
 	for _, p := range pools {
-		cephImages, err := b.ListImagesInPool(namespace, p.Name)
+		cephImages, err := b.ListImagesInPool(clusterInfo, p.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get images from pool %s: %+v", p.Name, err)
 		}
@@ -124,10 +161,10 @@ func (b *BlockOperation) ListAllImages(namespace string) ([]BlockImage, error) {
 }
 
 // List Function to list all the block images in a pool
-func (b *BlockOperation) ListImagesInPool(namespace, poolName string) ([]BlockImage, error) {
+func (b *BlockOperation) ListImagesInPool(clusterInfo *client.ClusterInfo, poolName string) ([]BlockImage, error) {
 	// for each pool, get further details about all the images in the pool
 	images := []BlockImage{}
-	cephImages, err := client.ListImages(b.k8sClient.MakeContext(), namespace, poolName)
+	cephImages, err := client.ListImages(b.k8sClient.MakeContext(), clusterInfo, poolName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get images from pool %s: %+v", poolName, err)
 	}
@@ -146,9 +183,9 @@ func (b *BlockOperation) ListImagesInPool(namespace, poolName string) ([]BlockIm
 }
 
 // DeleteBlockImage Function to list all the blocks created/being managed by rook
-func (b *BlockOperation) DeleteBlockImage(image BlockImage, namespace string) error {
+func (b *BlockOperation) DeleteBlockImage(clusterInfo *client.ClusterInfo, image BlockImage) error {
 	context := b.k8sClient.MakeContext()
-	return client.DeleteImage(context, namespace, image.Name, image.PoolName)
+	return client.DeleteImage(context, clusterInfo, image.Name, image.PoolName)
 }
 
 // CreateClientPod starts a pod that should have a block PVC.

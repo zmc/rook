@@ -17,8 +17,6 @@ limitations under the License.
 package clusterdisruption
 
 import (
-	"math"
-
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
@@ -40,13 +38,9 @@ const (
 // odd      - floor((n+1)/2)
 func (r *ReconcileClusterDisruption) reconcileMonPDB(cephCluster *cephv1.CephCluster) error {
 	monCount := cephCluster.Spec.Mon.Count
-	minAvailable := int32(math.Floor(float64((monCount + 1) / 2)))
-	if monCount%2 == 0 {
-		logger.Error("mon count should be an odd number, setting effective maxUnvailable to 1")
-		minAvailable = int32(monCount - 1)
-	}
+	minAvailable := int32(float64((monCount + 1) / 2))
 	if monCount <= 2 {
-		logger.Error("managePodBudgets is set, but mon-count <= 2. Not creating a disruptionbudget for Mons")
+		logger.Debug("managePodBudgets is set, but mon-count <= 2. Not creating a disruptionbudget for Mons")
 		return nil
 	}
 	namespace := cephCluster.ObjectMeta.Namespace
@@ -63,9 +57,10 @@ func (r *ReconcileClusterDisruption) reconcileMonPDB(cephCluster *cephv1.CephClu
 			MinAvailable: &intstr.IntOrString{IntVal: minAvailable},
 		},
 	}
+
 	err := r.reconcileStaticPDB(pdbRequest, pdb)
 	if err != nil {
-		return errors.Wrap(err, "could not reconcile mon pdb")
+		return errors.Wrap(err, "failed to reconcile mon pdb")
 	}
 	return nil
 }

@@ -23,7 +23,7 @@ import (
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/test"
@@ -90,19 +90,19 @@ func TestDeploymentSpec(t *testing.T) {
 		TypeMeta: controllerTypeMeta,
 	},
 	}
-	cl := fake.NewFakeClientWithScheme(s, object...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 
 	r := &ReconcileCephNFS{
 		client:  cl,
 		scheme:  scheme.Scheme,
 		context: c,
-		clusterInfo: &cephconfig.ClusterInfo{
+		clusterInfo: &cephclient.ClusterInfo{
 			FSID:        "myfsid",
 			CephVersion: cephver.Nautilus,
 		},
 		cephClusterSpec: &cephv1.ClusterSpec{
 			CephVersion: cephv1.CephVersionSpec{
-				Image: "ceph/ceph:v14",
+				Image: "ceph/ceph:v15",
 			},
 		},
 	}
@@ -114,12 +114,13 @@ func TestDeploymentSpec(t *testing.T) {
 		ConfigConfigMap: configName,
 		DataPathMap: &config.DataPathMap{
 			HostDataDir:        "",                          // nfs daemon does not store data on host, ...
-			ContainerDataDir:   cephconfig.DefaultConfigDir, // does share data in containers using emptyDir, ...
+			ContainerDataDir:   cephclient.DefaultConfigDir, // does share data in containers using emptyDir, ...
 			HostLogAndCrashDir: "",                          // and does not log to /var/log/ceph dir nor creates crash dumps
 		},
 	}
 
-	d := r.makeDeployment(nfs, cfg)
+	d, err := r.makeDeployment(nfs, cfg)
+	assert.NoError(t, err)
 
 	// Deployment should have Ceph labels
 	optest.AssertLabelsContainRookRequirements(t, d.ObjectMeta.Labels, AppName)

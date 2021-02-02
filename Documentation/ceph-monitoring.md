@@ -18,10 +18,10 @@ contains a Prometheus instance, it will automatically discover Rooks scrape endp
 ## Prometheus Operator
 
 First the Prometheus operator needs to be started in the cluster so it can watch for our requests to start monitoring Rook and respond by deploying the correct Prometheus pods and configuration.
-A full explanation can be found in the [Prometheus operator repository on GitHub](https://github.com/coreos/prometheus-operator), but the quick instructions can be found here:
+A full explanation can be found in the [Prometheus operator repository on GitHub](https://github.com/prometheus-operator/prometheus-operator), but the quick instructions can be found here:
 
 ```console
-kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/v0.26.0/bundle.yaml
+kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/v0.40.0/bundle.yaml
 ```
 
 This will start the Prometheus operator, but before moving on, wait until the operator is in the `Running` state:
@@ -134,28 +134,28 @@ kubectl apply -f cluster.yaml
 
 The dashboards have been created by [@galexrt](https://github.com/galexrt). For feedback on the dashboards please reach out to him on the [Rook.io Slack](https://slack.rook.io).
 
-> **NOTE**: The dashboards are only compatible with Grafana 5.0.3 or higher.
+> **NOTE**: The dashboards are only compatible with Grafana 7.2.0 or higher.
 >
 > Also note that the dashboards are updated from time to time, to fix issues and improve them.
 
 The following Grafana dashboards are available:
 
 * [Ceph - Cluster](https://grafana.com/dashboards/2842)
-* [Ceph - OSD](https://grafana.com/dashboards/5336)
+* [Ceph - OSD (Single)](https://grafana.com/dashboards/5336)
 * [Ceph - Pools](https://grafana.com/dashboards/5342)
 
 ## Teardown
 
-To clean up all the artifacts created by the monitoring walkthrough, copy/paste the entire block below (note that errors about resources "not found" can be ignored):
+To clean up all the artifacts created by the monitoring walk-through, copy/paste the entire block below (note that errors about resources "not found" can be ignored):
 
 ```console
 kubectl delete -f service-monitor.yaml
 kubectl delete -f prometheus.yaml
 kubectl delete -f prometheus-service.yaml
-kubectl delete -f https://raw.githubusercontent.com/coreos/prometheus-operator/v0.26.0/bundle.yaml
+kubectl delete -f https://raw.githubusercontent.com/coreos/prometheus-operator/v0.40.0/bundle.yaml
 ```
 
-Then the rest of the instructions in the [Prometheus Operator docs](https://github.com/coreos/prometheus-operator#removal) can be followed to finish cleaning up.
+Then the rest of the instructions in the [Prometheus Operator docs](https://github.com/prometheus-operator/prometheus-operator#removal) can be followed to finish cleaning up.
 
 ## Special Cases
 
@@ -174,3 +174,8 @@ kubectl create -f csi-metrics-service-monitor.yaml
 ```
 
 This will create the service monitor to have promethues monitor CSI
+
+### Collecting RBD per-image IO statistics
+
+RBD per-image IO statistics collection is disabled by default. This can be enabled by setting `enableRBDStats: true` in the CephBlockPool spec.
+Prometheus does not need to be restarted after enabling it.

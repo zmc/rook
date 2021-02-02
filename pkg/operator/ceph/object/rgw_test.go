@@ -17,6 +17,7 @@ limitations under the License.
 package object
 
 import (
+	"context"
 	"io/ioutil"
 	"os"
 	"testing"
@@ -24,8 +25,10 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/clusterd"
-	config "github.com/rook/rook/pkg/daemon/ceph/config"
-	cephconfig "github.com/rook/rook/pkg/operator/ceph/config"
+
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -36,6 +39,7 @@ import (
 )
 
 func TestStartRGW(t *testing.T) {
+	ctx := context.TODO()
 	clientset := testop.New(t, 3)
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
@@ -48,29 +52,29 @@ func TestStartRGW(t *testing.T) {
 
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
-	info := testop.CreateConfigDir(1)
+	info := clienttest.CreateTestClusterInfo(1)
 	context := &clusterd.Context{Clientset: clientset, Executor: executor, ConfigDir: configDir}
 	store := simpleStore()
 	store.Spec.Gateway.Instances = 1
 	version := "v1.1.0"
-	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "my-fs", "rook-ceph", "/var/lib/rook/")
+	data := config.NewStatelessDaemonDataPathMap(config.RgwType, "my-fs", "rook-ceph", "/var/lib/rook/")
 
 	s := scheme.Scheme
 	object := []runtime.Object{&cephv1.CephObjectStore{}}
-	cl := fake.NewFakeClientWithScheme(s, object...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	r := &ReconcileCephObjectStore{client: cl, scheme: s}
 
 	// start a basic cluster
-	c := &clusterConfig{info, context, store, version, &cephv1.ClusterSpec{}, &metav1.OwnerReference{}, data, false, r.client, s, cephv1.NetworkSpec{}}
+	c := &clusterConfig{context, info, store, version, &cephv1.ClusterSpec{}, &metav1.OwnerReference{}, data, r.client, s}
 	err := c.startRGWPods(store.Name, store.Name, store.Name)
 	assert.Nil(t, err)
 
-	validateStart(t, c, clientset)
+	validateStart(ctx, t, c, clientset)
 }
 
-func validateStart(t *testing.T, c *clusterConfig, clientset *fclient.Clientset) {
+func validateStart(ctx context.Context, t *testing.T, c *clusterConfig, clientset *fclient.Clientset) {
 	rgwName := instanceName(c.store.Name) + "-a"
-	r, err := clientset.AppsV1().Deployments(c.store.Namespace).Get(rgwName, metav1.GetOptions{})
+	r, err := clientset.AppsV1().Deployments(c.store.Namespace).Get(ctx, rgwName, metav1.GetOptions{})
 	assert.Nil(t, err)
 	assert.Equal(t, rgwName, r.Name)
 }
@@ -99,15 +103,15 @@ func TestCreateObjectStore(t *testing.T) {
 	store := simpleStore()
 	clientset := testop.New(t, 3)
 	context := &clusterd.Context{Executor: executor, Clientset: clientset}
-	info := testop.CreateConfigDir(1)
-	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "my-fs", "rook-ceph", "/var/lib/rook/")
+	info := clienttest.CreateTestClusterInfo(1)
+	data := config.NewStatelessDaemonDataPathMap(config.RgwType, "my-fs", "rook-ceph", "/var/lib/rook/")
 
 	// create the pools
 	s := scheme.Scheme
 	object := []runtime.Object{&cephv1.CephObjectStore{}}
-	cl := fake.NewFakeClientWithScheme(s, object...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	r := &ReconcileCephObjectStore{client: cl, scheme: s}
-	c := &clusterConfig{info, context, store, "1.2.3.4", &cephv1.ClusterSpec{}, &metav1.OwnerReference{}, data, false, r.client, s, cephv1.NetworkSpec{}}
+	c := &clusterConfig{context, info, store, "1.2.3.4", &cephv1.ClusterSpec{}, &metav1.OwnerReference{}, data, r.client, s}
 	err := c.createOrUpdateStore(store.Name, store.Name, store.Name)
 	assert.Nil(t, err)
 }
@@ -124,20 +128,18 @@ func simpleStore() *cephv1.CephObjectStore {
 }
 
 func TestGenerateSecretName(t *testing.T) {
-	cl := fake.NewFakeClient([]runtime.Object{}...)
+	cl := fake.NewClientBuilder().Build()
 
 	// start a basic cluster
-	c := &clusterConfig{&config.ClusterInfo{},
-		&clusterd.Context{},
+	c := &clusterConfig{&clusterd.Context{},
+		&cephclient.ClusterInfo{},
 		&cephv1.CephObjectStore{ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "mycluster"}},
 		"v1.1.0",
 		&cephv1.ClusterSpec{},
 		&metav1.OwnerReference{},
-		&cephconfig.DataPathMap{},
-		false,
+		&config.DataPathMap{},
 		cl,
-		scheme.Scheme,
-		cephv1.NetworkSpec{}}
+		scheme.Scheme}
 	secret := c.generateSecretName("a")
 	assert.Equal(t, "rook-ceph-rgw-default-a-keyring", secret)
 }
@@ -153,4 +155,21 @@ func TestEmptyPoolSpec(t *testing.T) {
 
 	p = cephv1.PoolSpec{ErasureCoded: cephv1.ErasureCodedSpec{CodingChunks: 1}}
 	assert.False(t, emptyPool(p))
+}
+
+func TestBuildDomainNameAndEndpoint(t *testing.T) {
+	name := "my-store"
+	ns := "rook-ceph"
+	dns := BuildDomainName(name, ns)
+	assert.Equal(t, "rook-ceph-rgw-my-store.rook-ceph.svc", dns)
+
+	// non-secure endpoint
+	var port int32 = 80
+	ep := buildDNSEndpoint(dns, port, false)
+	assert.Equal(t, "http://rook-ceph-rgw-my-store.rook-ceph.svc:80", ep)
+
+	// Secure endpoint
+	var securePort int32 = 443
+	ep = buildDNSEndpoint(dns, securePort, true)
+	assert.Equal(t, "https://rook-ceph-rgw-my-store.rook-ceph.svc:443", ep)
 }

@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -39,7 +40,8 @@ import (
 const (
 	controllerName = "ceph-crashcollector-controller"
 	// AppName is the value to the "app" label for the ceph-crash pods
-	AppName = "rook-ceph-crashcollector"
+	AppName    = "rook-ceph-crashcollector"
+	prunerName = "rook-ceph-crashcollector-pruner"
 	// NodeNameLabel is a node name label
 	NodeNameLabel = "node_name"
 )
@@ -89,25 +91,24 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	logger.Debugf("watch for changes to the ceph-crash deployments")
 	err = c.Watch(
 		&source.Kind{Type: &appsv1.Deployment{}},
-		&handler.EnqueueRequestsFromMapFunc{
-			ToRequests: handler.ToRequestsFunc(func(obj handler.MapObject) []reconcile.Request {
-				deployment, ok := obj.Object.(*appsv1.Deployment)
-				if !ok {
-					return []reconcile.Request{}
-				}
-				labels := deployment.GetLabels()
-				appName, ok := labels[k8sutil.AppAttr]
-				if !ok || appName != AppName {
-					return []reconcile.Request{}
-				}
-				nodeName, ok := deployment.Spec.Template.ObjectMeta.Labels[NodeNameLabel]
-				if !ok {
-					return []reconcile.Request{}
-				}
-				req := reconcile.Request{NamespacedName: types.NamespacedName{Name: nodeName}}
-				return []reconcile.Request{req}
-			}),
-		},
+		handler.EnqueueRequestsFromMapFunc(handler.MapFunc(func(obj client.Object) []reconcile.Request {
+			deployment, ok := obj.(*appsv1.Deployment)
+			if !ok {
+				return []reconcile.Request{}
+			}
+			labels := deployment.GetLabels()
+			appName, ok := labels[k8sutil.AppAttr]
+			if !ok || appName != AppName {
+				return []reconcile.Request{}
+			}
+			nodeName, ok := deployment.Spec.Template.ObjectMeta.Labels[NodeNameLabel]
+			if !ok {
+				return []reconcile.Request{}
+			}
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: nodeName}}
+			return []reconcile.Request{req}
+		}),
+		),
 	)
 	if err != nil {
 		return errors.Wrap(err, "failed to watch for changes on the ceph-crash deployment")
@@ -117,23 +118,22 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	logger.Debugf("watch for changes to the ceph pod nodename and enqueue their nodes")
 	err = c.Watch(
 		&source.Kind{Type: &corev1.Pod{}},
-		&handler.EnqueueRequestsFromMapFunc{
-			ToRequests: handler.ToRequestsFunc(func(obj handler.MapObject) []reconcile.Request {
-				pod, ok := obj.Object.(*corev1.Pod)
-				if !ok {
-					return []reconcile.Request{}
-				}
-				nodeName := pod.Spec.NodeName
-				if nodeName == "" {
-					return []reconcile.Request{}
-				}
-				if isCephPod(pod.Labels, pod.Name) {
-					req := reconcile.Request{NamespacedName: types.NamespacedName{Name: nodeName}}
-					return []reconcile.Request{req}
-				}
+		handler.EnqueueRequestsFromMapFunc(handler.MapFunc(func(obj client.Object) []reconcile.Request {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
 				return []reconcile.Request{}
-			}),
-		},
+			}
+			nodeName := pod.Spec.NodeName
+			if nodeName == "" {
+				return []reconcile.Request{}
+			}
+			if isCephPod(pod.Labels, pod.Name) {
+				req := reconcile.Request{NamespacedName: types.NamespacedName{Name: nodeName}}
+				return []reconcile.Request{req}
+			}
+			return []reconcile.Request{}
+		}),
+		),
 		// only enqueue the update event if the pod moved nodes
 		predicate.Funcs{
 			UpdateFunc: func(event event.UpdateEvent) bool {

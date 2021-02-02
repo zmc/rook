@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/rook/rook/tests/framework/utils"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/api/errors"
 )
@@ -31,12 +32,10 @@ const (
 	VersionMaster = "master"
 
 	// test suite names
-	CassandraTestSuite   = "cassandra"
-	CephTestSuite        = "ceph"
-	CockroachDBTestSuite = "cockroachdb"
-	EdgeFSTestSuite      = "edgefs"
-	NFSTestSuite         = "nfs"
-	YugabyteDBTestSuite  = "yugabytedb"
+	CassandraTestSuite  = "cassandra"
+	CephTestSuite       = "ceph"
+	NFSTestSuite        = "nfs"
+	YugabyteDBTestSuite = "yugabytedb"
 )
 
 var (
@@ -69,6 +68,10 @@ func SkipTestSuite(name string) bool {
 }
 
 func SystemNamespace(namespace string) string {
+	if utils.IsPlatformOpenShift() {
+		logger.Infof("For openshift execution used system namespace: %s", namespace)
+		return namespace
+	}
 	return fmt.Sprintf("%s-system", namespace)
 }
 

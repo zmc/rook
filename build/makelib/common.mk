@@ -16,7 +16,13 @@
 .SUFFIXES:
 
 SHELL := /bin/bash
+ifneq (, $(shell command -v shasum))
 SHA256CMD := shasum -a 256
+else ifneq (, $(shell command -v sha256sum))
+SHA256CMD := sha256sum
+else
+$(error "please install 'shasum' or 'sha256sum'")
+endif
 
 ifeq ($(origin PLATFORM), undefined)
 ifeq ($(origin GOOS), undefined)
@@ -103,7 +109,7 @@ endif
 echo.%: ; @echo $* = $($*)
 
 # Select which images (backends) to make; default to all possible images
-IMAGES ?= ceph cockroachdb nfs cassandra edgefs yugabytedb
+IMAGES ?= ceph nfs cassandra yugabytedb
 
 COMMA := ,
 SPACE :=

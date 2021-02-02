@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	KeyMon       rook.KeyType = "mon"
-	KeyMgr       rook.KeyType = "mgr"
-	KeyOSD       rook.KeyType = "osd"
-	KeyRBDMirror rook.KeyType = "rbdmirror"
-	KeyRGW       rook.KeyType = "rgw"
-	KeyCleanup   rook.KeyType = "cleanup"
+	KeyMds        rook.KeyType = "mds"
+	KeyMon        rook.KeyType = "mon"
+	KeyMonArbiter rook.KeyType = "arbiter"
+	KeyMgr        rook.KeyType = "mgr"
+	KeyOSDPrepare rook.KeyType = "prepareosd"
+	KeyOSD        rook.KeyType = "osd"
+	KeyCleanup    rook.KeyType = "cleanup"
 )

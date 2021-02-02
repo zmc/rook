@@ -81,22 +81,23 @@ ceph-mon \
     --log-stderr-prefix=debug \
     --default-log-to-file=false \
     --default-mon-cluster-log-to-file=false \
-    --mon-host=$(ROOK_CEPH_MON_HOST) \
-    --mon-initial-members=$(ROOK_CEPH_MON_INITIAL_MEMBERS) \
+    --mon-host=$ROOK_CEPH_MON_HOST \
+    --mon-initial-members=$ROOK_CEPH_MON_INITIAL_MEMBERS \
     --id=b \
     --setuser=ceph \
     --setgroup=ceph \
     --foreground \
     --public-addr=10.100.13.242 \
     --setuser-match-path=/var/lib/ceph/mon/ceph-b/store.db \
-    --public-bind-addr=$(ROOK_POD_IP)
+    --public-bind-addr=$ROOK_POD_IP
 ```
 
-(be sure to remove the single quotes around the `--log-stderr-prefix` flag)
+(be sure to remove the single quotes around the `--log-stderr-prefix` flag and the parenthesis around the variables being passed ROOK_CEPH_MON_HOST, ROOK_CEPH_MON_INITIAL_MEMBERS and ROOK_POD_IP )
 
-Patch the `rook-ceph-mon-b` Deployment to run a sleep instead of the `ceph mon` command:
+Patch the `rook-ceph-mon-b` Deployment to stop this mon working without deleting the mon pod:
 
 ```console
+kubectl -n rook-ceph patch deployment rook-ceph-mon-b -p '[{"op":"remove", "path":"/spec/template/spec/containers/0/livenessProbe"}]'
 kubectl -n rook-ceph patch deployment rook-ceph-mon-b -p '{"spec": {"template": {"spec": {"containers": [{"name": "mon", "command": ["sleep", "infinity"], "args": []}]}}}}'
 ```
 
@@ -122,15 +123,15 @@ ceph-mon \
     --log-stderr-prefix=debug \
     --default-log-to-file=false \
     --default-mon-cluster-log-to-file=false \
-    --mon-host=$(ROOK_CEPH_MON_HOST) \
-    --mon-initial-members=$(ROOK_CEPH_MON_INITIAL_MEMBERS) \
+    --mon-host=$ROOK_CEPH_MON_HOST \
+    --mon-initial-members=$ROOK_CEPH_MON_INITIAL_MEMBERS \
     --id=b \
     --setuser=ceph \
     --setgroup=ceph \
     --foreground \
     --public-addr=10.100.13.242 \
     --setuser-match-path=/var/lib/ceph/mon/ceph-b/store.db \
-    --public-bind-addr=$(ROOK_POD_IP) \
+    --public-bind-addr=$ROOK_POD_IP \
     --extract-monmap=${monmap_path}
 
 # review the contents of the monmap
@@ -155,15 +156,15 @@ ceph-mon \
     --log-stderr-prefix=debug \
     --default-log-to-file=false \
     --default-mon-cluster-log-to-file=false \
-    --mon-host=$(ROOK_CEPH_MON_HOST) \
-    --mon-initial-members=$(ROOK_CEPH_MON_INITIAL_MEMBERS) \
+    --mon-host=$ROOK_CEPH_MON_HOST \
+    --mon-initial-members=$ROOK_CEPH_MON_INITIAL_MEMBERS \
     --id=b \
     --setuser=ceph \
     --setgroup=ceph \
     --foreground \
     --public-addr=10.100.13.242 \
     --setuser-match-path=/var/lib/ceph/mon/ceph-b/store.db \
-    --public-bind-addr=$(ROOK_POD_IP) \
+    --public-bind-addr=$ROOK_POD_IP \
     --inject-monmap=${monmap_path}
 ```
 
@@ -294,7 +295,7 @@ Assuming `dataHostPathData` is `/var/lib/rook`, and the `CephCluster` trying to 
         container# monmaptool --rm c monmap  # Repeat this pattern until all the old ceph-mons are removed
         container# monmaptool --rm d monmap
         container# monmaptool --rm e monmap
-        container# monmaptool --add a 10.77.2.216:6789 monmap   # Replace it with the rook-ceph-mon-a address you got from previous command.
+        container# monmaptool --addv a [v2:10.77.2.216:3300,v1:10.77.2.216:6789] monmap   # Replace it with the rook-ceph-mon-a address you got from previous command.
         container# ceph-mon --inject-monmap monmap --mon-data ./mon-a/data  # Replace monmap in ceph-mon db with our modified version.
         container# rm monmap
         container# exit
@@ -336,3 +337,21 @@ Assuming `dataHostPathData` is `/var/lib/rook`, and the `CephCluster` trying to 
 1. Bring the Rook Ceph operator back online by running `kubectl -n rook-ceph edit deploy/rook-ceph-operator` and set `replicas` to `1`.
 1. Watch the operator logs with `kubectl -n rook-ceph logs -f rook-ceph-operator-xxxxxxx`, and wait until the orchestration has settled.
 1. **STATE**: Now the new cluster should be up and running with authentication enabled. `ceph -s` output should not change much comparing to previous steps.
+
+## Backing up and restoring a cluster based on PVCs into a new Kubernetes cluster
+
+It is possible to migrate/restore an rook/ceph cluster from an existing Kubernetes cluster to a new one without resorting to SSH access or ceph tooling. This allows doing the migration using standard kubernetes resources only. This guide assumes the following
+1. You have a CephCluster that uses PVCs to persist mon and osd data. Let's call it the "old cluster"
+1. You can restore the PVCs as-is in the new cluster. Usually this is done by taking regular snapshots of the PVC volumes and using a tool that can re-create PVCs from these snapshots in the underlying cloud provider. Velero is one such tool. (https://github.com/vmware-tanzu/velero)
+1. You have regular backups of the secrets and configmaps in the rook-ceph namespace. Velero provides this functionality too.
+
+Do the following in the new cluster:
+1. Stop the rook operator by scaling the deployment `rook-ceph-operator` down to zero: `kubectl -n rook-ceph scale deployment rook-ceph-operator --replicas 0`
+and deleting the other deployments. An example command to do this is `k -n rook-ceph delete deployment -l operator!=rook`
+1. Restore the rook PVCs to the new cluster.
+1. Copy the keyring and fsid secrets from the old cluster: `rook-ceph-mgr-a-keyring`, `rook-ceph-mon`, `rook-ceph-mons-keyring`, `rook-ceph-osd-0-keyring`, ...
+1. Delete mon services and copy them from the old cluster: `rook-ceph-mon-a`, `rook-ceph-mon-b`, ... Note that simply re-applying won't work because the goal here is to restore the `clusterIP` in each service and this field is immutable in `Service` resources.
+1. Copy the endpoints configmap from the old cluster: `rook-ceph-mon-endpoints`
+1. Scale the rook operator up again : `kubectl -n rook-ceph scale deployment rook-ceph-operator --replicas 1`
+1. Wait until the reconciliation is over.
+

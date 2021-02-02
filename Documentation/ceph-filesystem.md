@@ -46,7 +46,7 @@ spec:
   dataPools:
     - replicated:
         size: 3
-  preservePoolsOnDelete: true
+  preserveFilesystemOnDelete: true
   metadataServer:
     activeCount: 1
     activeStandby: true
@@ -109,6 +109,8 @@ parameters:
   # in the same namespace as the cluster.
   csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
   csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
   csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
   csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
 
@@ -124,6 +126,25 @@ Create the storage class.
 
 ```console
 kubectl create -f cluster/examples/kubernetes/ceph/csi/cephfs/storageclass.yaml
+```
+
+## Mirroring
+
+Since Ceph Pacific, CephFS supports asynchronous replication of snapshots to a remote CephFS file system via cephfs-mirror tool. Snapshots are synchronized by mirroring snapshot data followed by creating a snapshot with the same name (for a given directory on the remote file system) as the snapshot being synchronized.
+It is generally useful when planning for Disaster Recovery.
+For clusters that are geographically distributed and stretching is not possible due to high latencies.
+
+```yaml
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: myfs
+  namespace: rook-ceph
+spec:
+...
+...
+  mirroring:
+    enabled: true
 ```
 
 ## Quotas
@@ -147,6 +168,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: cephfs-pvc
+  namespace: kube-system
 spec:
   accessModes:
   - ReadWriteMany
@@ -238,13 +260,13 @@ kubectl delete -f kube-registry.yaml
 
 To delete the filesystem components and backing data, delete the Filesystem CRD.
 
-> **WARNING: Data will be deleted if preservePoolsOnDelete=false**.
+> **WARNING: Data will be deleted if preserveFilesystemOnDelete=false**.
 
 ```console
 kubectl -n rook-ceph delete cephfilesystem myfs
 ```
 
-Note: If the "preservePoolsOnDelete" filesystem attribute is set to true, the above command won't delete the pools. Creating again the filesystem with the same CRD will reuse again the previous pools.
+Note: If the "preserveFilesystemOnDelete" filesystem attribute is set to true, the above command won't delete the filesystem. Recreating the same CRD will reuse the existing filesystem.
 
 ## Flex Driver
 

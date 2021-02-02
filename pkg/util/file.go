@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package util
 
 import (
@@ -21,6 +22,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/coreos/pkg/capnslog"
 )
@@ -32,7 +34,7 @@ func WriteFile(filePath string, contentBuffer bytes.Buffer) error {
 	if err := os.MkdirAll(dir, 0744); err != nil {
 		return fmt.Errorf("failed to create config file directory at %s: %+v", dir, err)
 	}
-	if err := ioutil.WriteFile(filePath, contentBuffer.Bytes(), 0644); err != nil {
+	if err := ioutil.WriteFile(filePath, contentBuffer.Bytes(), 0600); err != nil {
 		return fmt.Errorf("failed to write config file to %s: %+v", filePath, err)
 	}
 
@@ -47,4 +49,14 @@ func WriteFileToLog(logger *capnslog.PackageLogger, path string) {
 	}
 
 	logger.Infof("Config file %s:\n%s", path, string(contents))
+}
+
+// PathToProjectRoot returns the path to the root of the rook repo on the current host.
+// This is primarily useful for tests.
+func PathToProjectRoot() string {
+	_, path, _, _ := runtime.Caller(0) // get path to current file (<root>/pkg/util/file.go)
+	util := filepath.Dir(path)         // <root>/pkg/util
+	pkg := filepath.Dir(util)          // <root>/pkg
+	root := filepath.Dir(pkg)          // <root>
+	return root
 }

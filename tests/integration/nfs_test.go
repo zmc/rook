@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"k8s.io/apimachinery/pkg/util/version"
 )
 
 // *******************************************************
@@ -68,11 +69,17 @@ func (suite *NfsSuite) TearDownSuite() {
 }
 
 func (suite *NfsSuite) Setup() {
-	suite.namespace = "nfs-ns"
+	suite.namespace = "rook-nfs"
 	suite.systemNamespace = installer.SystemNamespace(suite.namespace)
 	suite.instanceCount = 1
 
 	k8shelper, err := utils.CreateK8sHelper(suite.T)
+	v := version.MustParseSemantic(k8shelper.GetK8sServerVersion())
+	if !v.AtLeast(version.MustParseSemantic("1.14.0")) {
+		logger.Info("Skipping NFS tests when not at least K8s v1.14")
+		suite.T().Skip()
+	}
+
 	require.NoError(suite.T(), err)
 	suite.k8shelper = k8shelper
 
@@ -114,12 +121,13 @@ func (suite *NfsSuite) TestNfsServerInstallation() {
 	podList, err := suite.rwClient.CreateWriteClient("nfs-pv-claim-bigger")
 	require.NoError(suite.T(), err)
 	assert.True(suite.T(), true, suite.checkReadData(podList))
-	suite.rwClient.Delete()
+	err = suite.rwClient.Delete()
+	assert.NoError(suite.T(), err)
 
 	// verify another smaller export is running OK
 	assert.True(suite.T(), true, suite.k8shelper.WaitUntilPVCIsBound("default", "nfs-pv-claim"))
 
-	defer suite.rwClient.Delete()
+	defer suite.rwClient.Delete() //nolint, delete a nfs consuming pod in rook
 	podList, err = suite.rwClient.CreateWriteClient("nfs-pv-claim")
 	require.NoError(suite.T(), err)
 	assert.True(suite.T(), true, suite.checkReadData(podList))

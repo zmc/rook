@@ -18,16 +18,27 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"os"
 	"strings"
 	"testing"
 
-	"github.com/pkg/errors"
+	"github.com/coreos/pkg/capnslog"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	rookclient "github.com/rook/rook/pkg/client/clientset/versioned/fake"
+	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/tevino/abool"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func TestValidateClient(t *testing.T) {
@@ -60,9 +71,6 @@ func TestValidateClient(t *testing.T) {
 }
 
 func TestGenerateClient(t *testing.T) {
-	clientset := testop.New(t, 1)
-	context := &clusterd.Context{Clientset: clientset}
-
 	p := &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client1", Namespace: "myns"},
 		Spec: cephv1.ClientSpec{
 			Caps: map[string]string{
@@ -73,14 +81,13 @@ func TestGenerateClient(t *testing.T) {
 		},
 	}
 
-	client, caps, err := genClientEntity(p, context)
+	client, caps := genClientEntity(p)
 	equal := bytes.Compare([]byte(client), []byte("client.client1"))
 	var res bool = equal == 0
 	assert.True(t, res)
 	assert.True(t, strings.Contains(strings.Join(caps, " "), "osd allow *"))
 	assert.True(t, strings.Contains(strings.Join(caps, " "), "mon allow rw"))
 	assert.True(t, strings.Contains(strings.Join(caps, " "), "mds allow rwx"))
-	assert.Nil(t, err)
 
 	// Fail if caps are empty
 	p2 := &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client2", Namespace: "myns"},
@@ -92,120 +99,214 @@ func TestGenerateClient(t *testing.T) {
 		},
 	}
 
-	client, _, err = genClientEntity(p2, context)
+	client, _ = genClientEntity(p2)
 	equal = bytes.Compare([]byte(client), []byte("client.client2"))
 	res = equal == 0
 	assert.True(t, res)
-	assert.NotNil(t, err)
 }
 
-func TestCreateClient(t *testing.T) {
-	clientset := testop.New(t, 1)
-	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfileArg string, args ...string) (string, error) {
-			logger.Infof("Command: %s %v", command, args)
-			if command == "ceph" && args[1] == "get-or-create-key" {
-				return `{"key":"AQC7ilJdAPijOBAABp+YAzg2QupRAWdnIh7w/Q=="}`, nil
-			}
-			return "", errors.Errorf("unexpected ceph command '%v'", args)
-		},
-	}
-	context := &clusterd.Context{Executor: executor, Clientset: clientset}
+func TestCephClientController(t *testing.T) {
+	ctx := context.TODO()
+	// Set DEBUG logging
+	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
+	os.Setenv("ROOK_LOG_LEVEL", "DEBUG")
 
-	p := &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client1", Namespace: "myns"},
+	//
+	// TEST 1 SETUP
+	//
+	// FAILURE because no CephCluster
+	//
+	logger.Info("RUN 1")
+	var (
+		name      = "my-client"
+		namespace = "rook-ceph"
+	)
+
+	// A Pool resource with metadata and spec.
+	cephClient := &cephv1.CephClient{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID("c47cac40-9bee-4d52-823b-ccd803ba5bfe"),
+		},
 		Spec: cephv1.ClientSpec{
 			Caps: map[string]string{
 				"osd": "allow *",
 				"mon": "allow *",
-				"mds": "allow *",
 			},
+		},
+		Status: &cephv1.CephClientStatus{
+			Phase: "",
 		},
 	}
 
-	exists, _ := clientExists(context, p)
-	assert.False(t, exists)
-	err := createClient(context, p)
-	assert.Nil(t, err)
-
-	// fail if caps are empty
-	p = &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client1", Namespace: "myns"},
-		Spec: cephv1.ClientSpec{
-			Caps: map[string]string{
-				"osd": "",
-				"mon": "",
-				"mds": "",
-			},
-		},
+	// Objects to track in the fake client.
+	object := []runtime.Object{
+		cephClient,
 	}
-	exists, _ = clientExists(context, p)
-	assert.False(t, exists)
-	err = createClient(context, p)
-	assert.NotNil(t, err)
-}
 
-func TestUpdateClient(t *testing.T) {
-	clientset := testop.New(t, 1)
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfileArg string, args ...string) (string, error) {
-			logger.Infof("Command: %s %v", command, args)
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			if args[0] == "status" {
+				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_ERR"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+			}
+
 			return "", nil
 		},
 	}
-	context := &clusterd.Context{Executor: executor, Clientset: clientset}
-	new := &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client1", Namespace: "myns"},
-		Spec: cephv1.ClientSpec{
-			Caps: map[string]string{
-				"osd": "allow *",
-				"mon": "allow *",
+	c := &clusterd.Context{
+		Executor:                   executor,
+		Clientset:                  testop.New(t, 1),
+		RookClientset:              rookclient.NewSimpleClientset(),
+		RequestCancelOrchestration: abool.New(),
+	}
+
+	// Register operator types with the runtime scheme.
+	s := scheme.Scheme
+	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephClient{}, &cephv1.CephClusterList{})
+
+	// Create a fake client to mock API calls.
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
+
+	// Create a ReconcileCephClient object with the scheme and fake client.
+	r := &ReconcileCephClient{
+		client:  cl,
+		scheme:  s,
+		context: c,
+	}
+
+	// Mock request to simulate Reconcile() being called on an event for a
+	// watched resource .
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+
+	res, err := r.Reconcile(ctx, req)
+	assert.NoError(t, err)
+	assert.True(t, res.Requeue)
+
+	//
+	// TEST 2:
+	//
+	// FAILURE we have a cluster but it's not ready
+	//
+	logger.Info("RUN 2")
+	cephCluster := &cephv1.CephCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      namespace,
+			Namespace: namespace,
+		},
+		Status: cephv1.ClusterStatus{
+			Phase: "",
+			CephVersion: &cephv1.ClusterVersion{
+				Version: "14.2.9-0",
+			},
+			CephStatus: &cephv1.CephStatus{
+				Health: "",
 			},
 		},
 	}
 
-	err := updateClient(context, new)
-	assert.Nil(t, err)
+	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{}, &cephv1.CephClusterList{})
 
-	new = &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client1", Namespace: "myns"},
-		Spec: cephv1.ClientSpec{
-			Caps: map[string]string{
-				"osd": "allow rw",
-				"mon": "allow rw",
-			},
+	object = append(object, cephCluster)
+	// Create a fake client to mock API calls.
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
+	// Create a ReconcileCephClient object with the scheme and fake client.
+	r = &ReconcileCephClient{
+		client:  cl,
+		scheme:  s,
+		context: c,
+	}
+	assert.True(t, res.Requeue)
+
+	//
+	// TEST 3:
+	//
+	// SUCCESS! The CephCluster is ready
+	//
+	logger.Info("RUN 3")
+	cephCluster.Status.Phase = cephv1.ConditionReady
+	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
+
+	objects := []runtime.Object{
+		cephClient,
+		cephCluster,
+	}
+	// Create a fake client to mock API calls.
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(objects...).Build()
+	c.Client = cl
+
+	executor = &exectest.MockExecutor{
+		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
+			if args[0] == "status" {
+				return `{"fsid":"c47cac40-9bee-4d52-823b-ccd803ba5bfe","health":{"checks":{},"status":"HEALTH_OK"},"pgmap":{"num_pgs":100,"pgs_by_state":[{"state_name":"active+clean","count":100}]}}`, nil
+			}
+			if args[0] == "auth" && args[1] == "get-or-create-key" {
+				return `{"key":"AQCvzWBeIV9lFRAAninzm+8XFxbSfTiPwoX50g=="}`, nil
+			}
+
+			return "", nil
 		},
 	}
+	c.Executor = executor
 
-	err = updateClient(context, new)
-	assert.Nil(t, err)
+	// Mock clusterInfo
+	secrets := map[string][]byte{
+		"fsid":         []byte(name),
+		"mon-secret":   []byte("monsecret"),
+		"admin-secret": []byte("adminsecret"),
+	}
+	secret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rook-ceph-mon",
+			Namespace: namespace,
+		},
+		Data: secrets,
+		Type: k8sutil.RookType,
+	}
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephBlockPoolList{})
+	// Create a ReconcileCephClient object with the scheme and fake client.
+	r = &ReconcileCephClient{
+		client:  cl,
+		scheme:  s,
+		context: c,
+	}
+
+	r = &ReconcileCephClient{
+		client:  cl,
+		scheme:  s,
+		context: c,
+	}
+
+	res, err = r.Reconcile(ctx, req)
+	assert.NoError(t, err)
+	assert.False(t, res.Requeue)
+
+	err = r.client.Get(context.TODO(), req.NamespacedName, cephClient)
+	assert.NoError(t, err)
+	assert.Equal(t, cephv1.ConditionReady, cephClient.Status.Phase)
+	assert.NotEmpty(t, cephClient.Status.Info["secretName"], cephClient.Status.Info)
+	cephClientSecret, err := c.Clientset.CoreV1().Secrets(namespace).Get(ctx, cephClient.Status.Info["secretName"], metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.NotEmpty(t, cephClientSecret.StringData)
 }
 
-func TestDeleteClient(t *testing.T) {
-	clientset := testop.New(t, 2)
-	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command, outfileArg string, args ...string) (string, error) {
-			logger.Infof("Command: %s %v", command, args)
-			if command == "ceph" && args[1] == "get-key" && args[2] == "client1" {
-				return `{"key":"AQC7ilJdAPijOBAABp+YAzg2QupRAWdnIh7w/Q=="}`, nil
-			}
-			if command == "ceph" && args[1] == "del" {
-				return "updated", nil
-			}
-			return "", errors.Errorf("unexpected ceph command '%v'", args)
+func TestBuildUpdateStatusInfo(t *testing.T) {
+	cephClient := &cephv1.CephClient{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "client-ocp",
 		},
+		Spec: cephv1.ClientSpec{},
 	}
-	context := &clusterd.Context{Executor: executor, Clientset: clientset}
 
-	// delete a client that exists
-	p := &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client1", Namespace: "myns"}}
-	exists, err := clientExists(context, p)
-	assert.Nil(t, err)
-	assert.True(t, exists)
-	err = deleteClient(context, p)
-	assert.Nil(t, err)
-
-	// succeed even if the client doesn't exist
-	p = &cephv1.CephClient{ObjectMeta: metav1.ObjectMeta{Name: "client2", Namespace: "myns"}}
-	exists, err = clientExists(context, p)
-	assert.NotNil(t, err)
-	assert.False(t, exists)
-	err = deleteClient(context, p)
-	assert.Nil(t, err)
+	statusInfo := generateStatusInfo(cephClient)
+	assert.NotEmpty(t, statusInfo["secretName"])
+	assert.Equal(t, "rook-ceph-client-client-ocp", statusInfo["secretName"])
 }

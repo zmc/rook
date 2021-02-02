@@ -17,9 +17,11 @@ limitations under the License.
 package mon
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -28,21 +30,23 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	testopk8s "github.com/rook/rook/pkg/operator/k8sutil/test"
 	"github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/tevino/abool"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
 func TestCheckHealth(t *testing.T) {
-
+	ctx := context.TODO()
 	var deploymentsUpdated *[]*apps.Deployment
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
@@ -55,29 +59,39 @@ func TestCheckHealth(t *testing.T) {
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
-		Clientset: clientset,
-		ConfigDir: configDir,
-		Executor:  executor,
+		Clientset:                  clientset,
+		ConfigDir:                  configDir,
+		Executor:                   executor,
+		RequestCancelOrchestration: abool.New(),
 	}
-	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
-	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
+	c := New(context, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	// clusterInfo is nil so we return err
+	err := c.checkHealth()
+	assert.NotNil(t, err)
+
+	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 0, AllowMultiplePerNode: true}, "myversion")
+	// mon count is 0 so we return err
+	err = c.checkHealth()
+	assert.NotNil(t, err)
+
+	c.spec.Mon.Count = 3
 	logger.Infof("initial mons: %v", c.ClusterInfo.Monitors)
 	c.waitForStart = false
 	defer os.RemoveAll(c.context.ConfigDir)
 
-	c.mapping.Node["f"] = &NodeInfo{
+	c.mapping.Schedule["f"] = &MonScheduleInfo{
 		Name:    "node0",
 		Address: "",
 	}
 	c.maxMonID = 4
 
 	// mock out the scheduler to return node0
-	scheduleMonitor = func(c *Cluster, mon *monConfig) (SchedulingResult, error) {
-		node, _ := clientset.CoreV1().Nodes().Get("node0", metav1.GetOptions{})
+	waitForMonitorScheduling = func(c *Cluster, d *apps.Deployment) (SchedulingResult, error) {
+		node, _ := clientset.CoreV1().Nodes().Get(ctx, "node0", metav1.GetOptions{})
 		return SchedulingResult{Node: node}, nil
 	}
 
-	err := c.checkHealth()
+	err = c.checkHealth()
 	assert.Nil(t, err)
 	logger.Infof("mons after checkHealth: %v", c.ClusterInfo.Monitors)
 	assert.ElementsMatch(t, []string{"rook-ceph-mon-a", "rook-ceph-mon-f"}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
@@ -95,9 +109,82 @@ func TestCheckHealth(t *testing.T) {
 		_, ok := c.ClusterInfo.Monitors[monName]
 		assert.True(t, ok, fmt.Sprintf("mon %s not found in monitor list. %v", monName, c.ClusterInfo.Monitors))
 	}
+
+	deployments, err := clientset.AppsV1().Deployments(c.Namespace).List(ctx, metav1.ListOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(deployments.Items))
+
+	// no orphan resources to remove
+	c.removeOrphanMonResources()
+
+	// We expect mons to exist: a, g, h
+	// Check that their PVCs are not garbage collected after we create fake PVCs
+	badMon := "c"
+	goodMons := []string{"a", "g", "h"}
+	c.spec.Mon.VolumeClaimTemplate = &v1.PersistentVolumeClaim{}
+	for _, name := range append(goodMons, badMon) {
+		m := &monConfig{ResourceName: "rook-ceph-mon-" + name, DaemonName: name}
+		pvc, err := c.makeDeploymentPVC(m, true)
+		assert.NoError(t, err)
+		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+		assert.NoError(t, err)
+	}
+
+	pvcs, err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).List(ctx, metav1.ListOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, 4, len(pvcs.Items))
+
+	// pvc "c" should be removed and the others should remain
+	c.removeOrphanMonResources()
+	pvcs, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).List(ctx, metav1.ListOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(pvcs.Items))
+	for _, pvc := range pvcs.Items {
+		found := false
+		for _, name := range goodMons {
+			if pvc.Name == "rook-ceph-mon-"+name {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, pvc.Name)
+	}
+}
+
+func TestScaleMonDeployment(t *testing.T) {
+	ctx := context.TODO()
+	clientset := test.New(t, 1)
+	context := &clusterd.Context{Clientset: clientset}
+	c := New(context, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 0, AllowMultiplePerNode: true}, "myversion")
+
+	name := "a"
+	c.spec.Mon.Count = 3
+	logger.Infof("initial mons: %v", c.ClusterInfo.Monitors[name])
+	monConfig := &monConfig{ResourceName: resourceName(name), DaemonName: name, DataPathMap: &config.DataPathMap{}}
+	d, err := c.makeDeployment(monConfig, false)
+	require.NoError(t, err)
+	_, err = clientset.AppsV1().Deployments(c.Namespace).Create(ctx, d, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	verifyMonReplicas(ctx, t, c, name, 1)
+	err = c.updateMonDeploymentReplica(name, false)
+	assert.NoError(t, err)
+	verifyMonReplicas(ctx, t, c, name, 0)
+
+	err = c.updateMonDeploymentReplica(name, true)
+	assert.NoError(t, err)
+	verifyMonReplicas(ctx, t, c, name, 1)
+}
+
+func verifyMonReplicas(ctx context.Context, t *testing.T, c *Cluster, name string, expected int32) {
+	d, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, resourceName("a"), metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, expected, *d.Spec.Replicas)
 }
 
 func TestCheckHealthNotFound(t *testing.T) {
+	ctx := context.TODO()
 	var deploymentsUpdated *[]*apps.Deployment
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
@@ -110,34 +197,36 @@ func TestCheckHealthNotFound(t *testing.T) {
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
-		Clientset: clientset,
-		ConfigDir: configDir,
-		Executor:  executor,
+		Clientset:                  clientset,
+		ConfigDir:                  configDir,
+		Executor:                   executor,
+		RequestCancelOrchestration: abool.New(),
 	}
-	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	c := New(context, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 2, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 	c.waitForStart = false
 	defer os.RemoveAll(c.context.ConfigDir)
 
-	c.mapping.Node["a"] = &NodeInfo{
+	c.mapping.Schedule["a"] = &MonScheduleInfo{
 		Name: "node0",
 	}
-	c.mapping.Node["b"] = &NodeInfo{
+	c.mapping.Schedule["b"] = &MonScheduleInfo{
 		Name: "node0",
 	}
 	c.maxMonID = 4
 
-	c.saveMonConfig()
+	err := c.saveMonConfig()
+	assert.NoError(t, err)
 
 	// Check if the two mons are found in the configmap
-	cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(ctx, EndpointConfigMapName, metav1.GetOptions{})
 	assert.Nil(t, err)
 	if cm.Data[EndpointDataKey] != "a=1.2.3.1:6789,b=1.2.3.2:6789" {
 		assert.Equal(t, "b=1.2.3.2:6789,a=1.2.3.1:6789", cm.Data[EndpointDataKey])
 	}
 
 	// Because the mon a isn't in the MonInQuorumResponse() this will create a new mon
-	delete(c.mapping.Node, "b")
+	delete(c.mapping.Schedule, "b")
 	err = c.checkHealth()
 	assert.Nil(t, err)
 	// No updates in unit tests w/ workaround
@@ -145,7 +234,7 @@ func TestCheckHealthNotFound(t *testing.T) {
 	testopk8s.ClearDeploymentsUpdated(deploymentsUpdated)
 
 	// recheck that the "not found" mon has been replaced with a new one
-	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(ctx, EndpointConfigMapName, metav1.GetOptions{})
 	assert.Nil(t, err)
 	if cm.Data[EndpointDataKey] != "a=1.2.3.1:6789,f=:6789" {
 		assert.Equal(t, "f=:6789,a=1.2.3.1:6789", cm.Data[EndpointDataKey])
@@ -166,11 +255,12 @@ func TestAddRemoveMons(t *testing.T) {
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
-		Clientset: clientset,
-		ConfigDir: configDir,
-		Executor:  executor,
+		Clientset:                  clientset,
+		ConfigDir:                  configDir,
+		Executor:                   executor,
+		RequestCancelOrchestration: abool.New(),
 	}
-	c := New(context, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	c := New(context, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 5, AllowMultiplePerNode: true}, "myversion")
 	c.maxMonID = 0 // "a" is max mon id
 	c.waitForStart = false
@@ -243,8 +333,8 @@ func TestAddOrRemoveExternalMonitor(t *testing.T) {
 	fakeResp.MonMap.Mons[0].PublicAddr = "172.17.0.4:3300"
 
 	// populate fake ClusterInfo
-	c := &Cluster{ClusterInfo: &cephconfig.ClusterInfo{}}
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c := &Cluster{ClusterInfo: &client.ClusterInfo{}}
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 
 	//
 	// TEST 1
@@ -261,7 +351,7 @@ func TestAddOrRemoveExternalMonitor(t *testing.T) {
 	// Now let's test the case where mon disappeared from the external cluster
 	// ClusterInfo still has them but they are gone from the monmap.
 	// Thus they should be removed from ClusterInfo
-	c.ClusterInfo = test.CreateConfigDir(3)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(3)
 	changed, err = c.addOrRemoveExternalMonitor(fakeResp)
 	assert.NoError(t, err)
 	assert.True(t, changed)
@@ -282,7 +372,7 @@ func TestAddOrRemoveExternalMonitor(t *testing.T) {
 		},
 	}
 	fakeResp.MonMap.Mons[1].PublicAddr = "172.17.0.5:3300"
-	c.ClusterInfo = test.CreateConfigDir(1)
+	c.ClusterInfo = clienttest.CreateTestClusterInfo(1)
 	changed, err = c.addOrRemoveExternalMonitor(fakeResp)
 	assert.NoError(t, err)
 	assert.True(t, changed)
@@ -291,6 +381,7 @@ func TestAddOrRemoveExternalMonitor(t *testing.T) {
 }
 
 func TestForceDeleteFailedMon(t *testing.T) {
+	ctx := context.TODO()
 	clientset := test.New(t, 1)
 	context := &clusterd.Context{
 		Clientset: clientset,
@@ -301,53 +392,54 @@ func TestForceDeleteFailedMon(t *testing.T) {
 	}
 
 	failedMonName := "a"
-	monToFail := createTestMonPod(t, clientset, c.Namespace, failedMonName)
-	createTestMonPod(t, clientset, c.Namespace, "b")
-	createTestMonPod(t, clientset, c.Namespace, "c")
+	monToFail := createTestMonPod(ctx, t, clientset, c.Namespace, failedMonName)
+	createTestMonPod(ctx, t, clientset, c.Namespace, "b")
+	createTestMonPod(ctx, t, clientset, c.Namespace, "c")
 
 	assert.NoError(t, c.restartMonIfStuckTerminating(failedMonName))
 
 	// The mon should still exist since it wasn't in a deleted state
-	p, err := context.Clientset.CoreV1().Pods(c.Namespace).Get(monToFail.Name, metav1.GetOptions{})
+	p, err := context.Clientset.CoreV1().Pods(c.Namespace).Get(ctx, monToFail.Name, metav1.GetOptions{})
 	assert.NoError(t, err)
 	assert.NotNil(t, p)
 
 	// Add a deletion timestamp to the pod
 	monToFail.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Update(&monToFail)
+	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Update(ctx, &monToFail, metav1.UpdateOptions{})
 	assert.NoError(t, err)
 
 	assert.NoError(t, c.restartMonIfStuckTerminating(failedMonName))
 
 	// The pod should still exist since the node is ready
-	p, err = context.Clientset.CoreV1().Pods(c.Namespace).Get(monToFail.Name, metav1.GetOptions{})
+	p, err = context.Clientset.CoreV1().Pods(c.Namespace).Get(ctx, monToFail.Name, metav1.GetOptions{})
 	assert.NoError(t, err)
 	assert.NotNil(t, p)
 
 	// Set the node to a not ready state
-	nodes, err := context.Clientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	nodes, err := context.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	assert.NoError(t, err)
 	for _, node := range nodes.Items {
 		node.Status.Conditions[0].Status = v1.ConditionFalse
-		_, err := context.Clientset.CoreV1().Nodes().Update(&node)
+		localnode := node
+		_, err := context.Clientset.CoreV1().Nodes().Update(ctx, &localnode, metav1.UpdateOptions{})
 		assert.NoError(t, err)
 	}
 
 	assert.NoError(t, c.restartMonIfStuckTerminating(failedMonName))
 
 	// The pod should be deleted since the pod is marked as deleted and the node is not ready
-	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Get(monToFail.Name, metav1.GetOptions{})
+	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Get(ctx, monToFail.Name, metav1.GetOptions{})
 	assert.Error(t, err)
-	assert.True(t, errors.IsNotFound(err))
+	assert.True(t, kerrors.IsNotFound(err))
 
 	// mons b and c should still exist
-	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Get("b-test", metav1.GetOptions{})
+	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Get(ctx, "b-test", metav1.GetOptions{})
 	assert.NoError(t, err)
-	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Get("c-test", metav1.GetOptions{})
+	_, err = context.Clientset.CoreV1().Pods(c.Namespace).Get(ctx, "c-test", metav1.GetOptions{})
 	assert.NoError(t, err)
 }
 
-func createTestMonPod(t *testing.T, clientset kubernetes.Interface, namespace, name string) v1.Pod {
+func createTestMonPod(ctx context.Context, t *testing.T, clientset kubernetes.Interface, namespace, name string) v1.Pod {
 	pod := v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name + "-test",
@@ -359,7 +451,32 @@ func createTestMonPod(t *testing.T, clientset kubernetes.Interface, namespace, n
 		},
 	}
 	pod.Spec.NodeName = "node0"
-	_, err := clientset.CoreV1().Pods(namespace).Create(&pod)
+	_, err := clientset.CoreV1().Pods(namespace).Create(ctx, &pod, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	return pod
+}
+
+func TestNewHealthChecker(t *testing.T) {
+	c := &Cluster{spec: cephv1.ClusterSpec{HealthCheck: cephv1.CephClusterHealthCheckSpec{}}}
+	time10s, _ := time.ParseDuration("10s")
+	c10s := &Cluster{spec: cephv1.ClusterSpec{HealthCheck: cephv1.CephClusterHealthCheckSpec{DaemonHealth: cephv1.DaemonHealthSpec{Monitor: cephv1.HealthCheckSpec{Interval: "10s"}}}}}
+
+	type args struct {
+		monCluster *Cluster
+	}
+	tests := []struct {
+		name string
+		args args
+		want *HealthChecker
+	}{
+		{"default-interval", args{c}, &HealthChecker{c, HealthCheckInterval}},
+		{"10s-interval", args{c10s}, &HealthChecker{c10s, time10s}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NewHealthChecker(tt.args.monCluster); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("NewHealthChecker() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

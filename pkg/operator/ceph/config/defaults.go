@@ -24,21 +24,14 @@ import (
 // DefaultFlags returns the default configuration flags Rook will set on the command line for all
 // calls to Ceph daemons and tools. Values specified here will not be able to be overridden using
 // the mon's central KV store, and that is (and should be) by intent.
-func DefaultFlags(fsid, mountedKeyringPath string, cephVersion version.CephVersion) []string {
+func DefaultFlags(fsid, mountedKeyringPath string) []string {
 	flags := []string{
 		// fsid unnecessary but is a safety to make sure daemons can only connect to their cluster
 		NewFlag("fsid", fsid),
 		NewFlag("keyring", mountedKeyringPath),
-		// For containers, we're expected to log everything to stderr
-		NewFlag("log-to-stderr", "true"),
-		NewFlag("err-to-stderr", "true"),
-		NewFlag("mon-cluster-log-to-stderr", "true"),
-		// differentiate debug text from audit text, and the space after 'debug' is critical
-		NewFlag("log-stderr-prefix", "debug "),
-		NewFlag("default-log-to-file", "false"),
-		NewFlag("default-mon-cluster-log-to-file", "false"),
 	}
 
+	flags = append(flags, LoggingFlags()...)
 	flags = append(flags, StoredMonHostEnvVarFlags()...)
 
 	return flags
@@ -49,12 +42,24 @@ func configOverride(who, option, value string) Option {
 	return Option{Who: who, Option: option, Value: value}
 }
 
+func LoggingFlags() []string {
+	return []string{
+		// For containers, we're expected to log everything to stderr
+		NewFlag("log-to-stderr", "true"),
+		NewFlag("err-to-stderr", "true"),
+		NewFlag("mon-cluster-log-to-stderr", "true"),
+		// differentiate debug text from audit text, and the space after 'debug' is critical
+		NewFlag("log-stderr-prefix", "debug "),
+		NewFlag("default-log-to-file", "false"),
+		NewFlag("default-mon-cluster-log-to-file", "false"),
+	}
+}
+
 // DefaultCentralizedConfigs returns the default configuration options Rook will set in Ceph's
 // centralized config store.
 func DefaultCentralizedConfigs(cephVersion version.CephVersion) []Option {
 	overrides := []Option{
 		configOverride("global", "mon allow pool delete", "true"),
-		configOverride("global", "log file", ""),
 		configOverride("global", "mon cluster log file", ""),
 	}
 

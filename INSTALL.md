@@ -174,8 +174,6 @@ storage provider that has integration tests:
 
 * `[test cassandra]`
 * `[test ceph]`
-* `[test cockroachdb]`
-* `[test edgefs]`
 * `[test nfs]`
 
 Since the majority of effort for a PR generally focuses on a single storage provider it will save time

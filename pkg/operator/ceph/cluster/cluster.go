@@ -18,25 +18,27 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"fmt"
+	"os/exec"
 	"path"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/pkg/errors"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
-	cephclient "github.com/rook/rook/pkg/operator/ceph/client"
+	"github.com/rook/rook/pkg/daemon/ceph/osd/kms"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/crash"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 	"github.com/rook/rook/pkg/operator/ceph/config"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
-	"github.com/rook/rook/pkg/operator/ceph/object/bucket"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
@@ -49,22 +51,23 @@ const (
 )
 
 type cluster struct {
-	Info                 *cephconfig.ClusterInfo
-	context              *clusterd.Context
-	Namespace            string
-	Spec                 *cephv1.ClusterSpec
-	crdName              string
-	condition            *cephv1.ClusterStatus
-	mons                 *mon.Cluster
-	initCompleted        bool
-	stopCh               chan struct{}
-	closedStopCh         bool
-	ownerRef             metav1.OwnerReference
-	orchestrationRunning bool
-	orchestrationNeeded  bool
-	orchMux              sync.Mutex
-	isUpgrade            bool
-	monitoringActivated  bool
+	ClusterInfo        *client.ClusterInfo
+	context            *clusterd.Context
+	Namespace          string
+	Spec               *cephv1.ClusterSpec
+	crdName            string
+	mons               *mon.Cluster
+	stopCh             chan struct{}
+	closedStopCh       bool
+	ownerRef           metav1.OwnerReference
+	isUpgrade          bool
+	watchersActivated  bool
+	monitoringChannels map[string]*clusterHealth
+}
+
+type clusterHealth struct {
+	stopChan          chan struct{}
+	monitoringRunning bool
 }
 
 func newCluster(c *cephv1.CephCluster, context *clusterd.Context, csiMutex *sync.Mutex, ownerRef *metav1.OwnerReference) *cluster {
@@ -72,41 +75,16 @@ func newCluster(c *cephv1.CephCluster, context *clusterd.Context, csiMutex *sync
 		// at this phase of the cluster creation process, the identity components of the cluster are
 		// not yet established. we reserve this struct which is filled in as soon as the cluster's
 		// identity can be established.
-		Info:      nil,
-		Namespace: c.Namespace,
-		Spec:      &c.Spec,
-		context:   context,
-		crdName:   c.Name,
-		stopCh:    make(chan struct{}),
-		ownerRef:  *ownerRef,
-		mons:      mon.New(context, c.Namespace, c.Spec.DataDirHostPath, c.Spec.Network, *ownerRef, csiMutex),
+		ClusterInfo:        client.AdminClusterInfo(c.Namespace),
+		Namespace:          c.Namespace,
+		Spec:               &c.Spec,
+		context:            context,
+		crdName:            c.Name,
+		monitoringChannels: make(map[string]*clusterHealth),
+		stopCh:             make(chan struct{}),
+		ownerRef:           *ownerRef,
+		mons:               mon.New(context, c.Namespace, c.Spec, *ownerRef, csiMutex),
 	}
-}
-
-func (c *cluster) createInstance(rookImage string, cephVersion cephver.CephVersion) error {
-	var err error
-
-	// Set orchestration lock, implying the orchestation is in progress
-	c.setOrchestrationNeeded()
-
-	// execute an orchestration until
-	// there are no more unapplied changes to the cluster definition and
-	// while no other goroutine is already running a cluster update
-	for c.checkSetOrchestrationStatus() == true {
-		if err != nil {
-			logger.Errorf("there was an orchestration error, but there is another orchestration pending; proceeding with next orchestration run (which may succeed). %v", err)
-		}
-		// Use a DeepCopy of the spec to avoid using an inconsistent data-set
-		spec := c.Spec.DeepCopy()
-
-		// Run ceph orchestration
-		err = c.doOrchestration(rookImage, cephVersion, spec)
-
-		// Orchestration is done, remove the lock
-		c.unsetOrchestrationStatus()
-	}
-
-	return err
 }
 
 func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVersion, spec *cephv1.ClusterSpec) error {
@@ -118,15 +96,22 @@ func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVers
 	}
 
 	// Start the mon pods
-	clusterInfo, err := c.mons.Start(c.Info, rookImage, cephVersion, *c.Spec)
+	clusterInfo, err := c.mons.Start(c.ClusterInfo, rookImage, cephVersion, *c.Spec)
 	if err != nil {
 		return errors.Wrap(err, "failed to start ceph monitors")
 	}
-	c.Info = clusterInfo
+	clusterInfo.OwnerRef = c.ownerRef
+	clusterInfo.SetName(c.crdName)
+	c.ClusterInfo = clusterInfo
 
 	// The cluster Identity must be established at this point
-	if !c.Info.IsInitialized(true) {
+	if !c.ClusterInfo.IsInitialized(true) {
 		return errors.New("the cluster identity was not established")
+	}
+
+	// Check whether we need to cancel the orchestration
+	if err := controller.CheckForCancelledOrchestration(c.context); err != nil {
+		return err
 	}
 
 	// Execute actions after the monitors are up and running
@@ -146,22 +131,24 @@ func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVers
 	}
 
 	// Start Ceph manager
-	mgrs := mgr.New(c.Info, c.context, c.Namespace, rookImage,
-		spec.CephVersion, cephv1.GetMgrPlacement(spec.Placement), cephv1.GetMgrAnnotations(c.Spec.Annotations),
-		spec.Network, spec.Dashboard, spec.Monitoring, spec.Mgr, cephv1.GetMgrResources(spec.Resources),
-		cephv1.GetMgrPriorityClassName(spec.PriorityClassNames), c.ownerRef, c.Spec.DataDirHostPath, c.Spec.SkipUpgradeChecks)
+	mgrs := mgr.New(c.context, c.ClusterInfo, *spec, rookImage)
 	err = mgrs.Start()
 	if err != nil {
 		return errors.Wrap(err, "failed to start ceph mgr")
 	}
 
 	// Start the OSDs
-	osds := osd.New(c.Info, c.context, c.Namespace, rookImage, spec.CephVersion, spec.Storage, spec.DataDirHostPath,
-		cephv1.GetOSDPlacement(spec.Placement), cephv1.GetOSDAnnotations(spec.Annotations), spec.Network,
-		cephv1.GetOSDResources(spec.Resources), cephv1.GetPrepareOSDResources(spec.Resources), cephv1.GetOSDPriorityClassName(spec.PriorityClassNames), c.ownerRef, c.Spec.SkipUpgradeChecks, c.Spec.ContinueUpgradeAfterChecksEvenIfNotHealthy)
+	osds := osd.New(c.context, c.ClusterInfo, *spec, rookImage)
 	err = osds.Start()
 	if err != nil {
 		return errors.Wrap(err, "failed to start ceph osds")
+	}
+
+	// If a stretch cluster, enable the arbiter after the OSDs are created with the CRUSH map
+	if c.Spec.IsStretchCluster() {
+		if err := c.mons.ConfigureArbiter(); err != nil {
+			return errors.Wrap(err, "failed to configure stretch arbiter")
+		}
 	}
 
 	logger.Infof("done reconciling ceph cluster in namespace %q", c.Namespace)
@@ -174,13 +161,11 @@ func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVers
 		c.isUpgrade = false
 	}
 
-	// Orchestration is done
-	c.initCompleted = true
-
 	return nil
 }
 
 func (c *ClusterController) initializeCluster(cluster *cluster, clusterObj *cephv1.CephCluster) error {
+	ctx := context.TODO()
 	cluster.Spec = &clusterObj.Spec
 
 	// Check if the dataDirHostPath is located in the disallowed paths list
@@ -192,8 +177,14 @@ func (c *ClusterController) initializeCluster(cluster *cluster, clusterObj *ceph
 		}
 	}
 
-	// The Ceph user the operator will use for management
-	cephUser := client.AdminUsername
+	clusterInfo, _, _, err := mon.LoadClusterInfo(c.context, cluster.Namespace)
+	if err != nil {
+		logger.Infof("clusterInfo not yet found, must be a new cluster")
+	} else {
+		clusterInfo.OwnerRef = cluster.ownerRef
+		clusterInfo.SetName(cluster.crdName)
+		cluster.ClusterInfo = clusterInfo
+	}
 
 	// Depending on the cluster type choose the correct orchestation
 	if cluster.Spec.External.Enable {
@@ -202,73 +193,33 @@ func (c *ClusterController) initializeCluster(cluster *cluster, clusterObj *ceph
 			config.ConditionExport(c.context, c.namespacedName, cephv1.ConditionFailure, v1.ConditionTrue, "ClusterFailure", "Failed to configure external ceph cluster")
 			return errors.Wrap(err, "failed to configure external ceph cluster")
 		}
-		cephUser = cluster.Info.ExternalCred.Username
 	} else {
 		// If the local cluster has already been configured, immediately start monitoring the cluster.
 		// Test if the cluster has already been configured if the mgr deployment has been created.
 		// If the mgr does not exist, the mons have never been verified to be in quorum.
 		opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", k8sutil.AppAttr, mgr.AppName)}
-		mgrDeployments, err := c.context.Clientset.AppsV1().Deployments(cluster.Namespace).List(opts)
-		if err == nil && len(mgrDeployments.Items) > 0 {
-			c.startClusterMonitoring(cluster, cephUser)
+		mgrDeployments, err := c.context.Clientset.AppsV1().Deployments(cluster.Namespace).List(ctx, opts)
+		if err == nil && len(mgrDeployments.Items) > 0 && cluster.ClusterInfo != nil {
+			c.configureCephMonitoring(cluster, clusterInfo)
 		}
 
-		err = c.configureLocalCephCluster(cluster, clusterObj)
+		err = c.configureLocalCephCluster(cluster)
 		if err != nil {
 			return errors.Wrap(err, "failed to configure local ceph cluster")
 		}
 	}
 
 	// Populate ClusterInfo with the last value
-	cluster.mons.ClusterInfo = cluster.Info
+	cluster.mons.ClusterInfo = cluster.ClusterInfo
 
 	// Start the monitoring if not already started
-	c.startClusterMonitoring(cluster, cephUser)
+	c.configureCephMonitoring(cluster, cluster.ClusterInfo)
 	return nil
 }
 
-func (c *ClusterController) startClusterMonitoring(cluster *cluster, cephUser string) {
-	if cluster.monitoringActivated == true {
-		// the cluster monitoring goroutines are already running
-		logger.Debugf("cluster is already being monitored for cluster %q", cluster.Namespace)
-		return
-	}
-
-	// enable the cluster monitoring goroutines once
-	logger.Infof("enabling cluster monitoring goroutines for cluster %q", cluster.Namespace)
-	cluster.monitoringActivated = true
-
-	// Start client CRD watcher
-	clientController := cephclient.NewClientController(c.context, cluster.Namespace)
-	clientController.StartWatch(cluster.stopCh)
-
-	// Start the object bucket provisioner
-	bucketProvisioner := bucket.NewProvisioner(c.context, cluster.Namespace, cephUser)
-	// If cluster is external, pass down the user to the bucket controller
-
-	// note: the error return below is ignored and is expected to be removed from the
-	//   bucket library's `NewProvisioner` function
-	bucketController, _ := bucket.NewBucketController(c.context.KubeConfig, bucketProvisioner)
-	go bucketController.Run(cluster.stopCh)
-
-	// Start mon health checker
-	healthChecker := mon.NewHealthChecker(cluster.mons, cluster.Spec)
-	go healthChecker.Check(cluster.stopCh)
-
-	if !cluster.Spec.External.Enable {
-		// Start the osd health checker only if running OSDs in the local ceph cluster
-		c.osdChecker = osd.NewOSDHealthMonitor(c.context, cluster.Namespace, cluster.Spec.RemoveOSDsIfOutAndSafeToRemove)
-		go c.osdChecker.Start(cluster.stopCh)
-	}
-
-	// Start the ceph status checker
-	cephChecker := newCephStatusChecker(c.context, cluster.Namespace, cephUser, c.namespacedName)
-	go cephChecker.checkCephStatus(cluster.stopCh)
-}
-
-func (c *ClusterController) configureLocalCephCluster(cluster *cluster, clusterObj *cephv1.CephCluster) error {
+func (c *ClusterController) configureLocalCephCluster(cluster *cluster) error {
 	// Cluster Spec validation
-	err := c.preClusterStartValidation(cluster, clusterObj)
+	err := c.preClusterStartValidation(cluster)
 	if err != nil {
 		return errors.Wrap(err, "failed to perform validation before cluster creation")
 	}
@@ -291,7 +242,7 @@ func (c *ClusterController) configureLocalCephCluster(cluster *cluster, clusterO
 	config.ConditionExport(c.context, c.namespacedName, cephv1.ConditionProgressing, v1.ConditionTrue, "ClusterProgressing", message)
 
 	// Run the orchestration
-	err = cluster.createInstance(c.rookImage, *cephVersion)
+	err = cluster.doOrchestration(c.rookImage, *cephVersion, cluster.Spec)
 	if err != nil {
 		config.ConditionExport(c.context, c.namespacedName, cephv1.ConditionFailure, v1.ConditionTrue, "ClusterFailure", "Failed to create cluster")
 		return errors.Wrap(err, "failed to create cluster")
@@ -304,10 +255,11 @@ func (c *ClusterController) configureLocalCephCluster(cluster *cluster, clusterO
 }
 
 func (c *cluster) notifyChildControllerOfUpgrade() error {
-	version := strings.Replace(c.Info.CephVersion.String(), " ", "-", -1)
+	ctx := context.TODO()
+	version := strings.Replace(c.ClusterInfo.CephVersion.String(), " ", "-", -1)
 
 	// List all child controllers
-	cephFilesystems, err := c.context.RookClientset.CephV1().CephFilesystems(c.Namespace).List(metav1.ListOptions{})
+	cephFilesystems, err := c.context.RookClientset.CephV1().CephFilesystems(c.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return errors.Wrap(err, "failed to list ceph filesystem CRs")
 	}
@@ -316,13 +268,14 @@ func (c *cluster) notifyChildControllerOfUpgrade() error {
 			cephFilesystem.Labels = map[string]string{}
 		}
 		cephFilesystem.Labels["ceph_version"] = version
-		_, err := c.context.RookClientset.CephV1().CephFilesystems(c.Namespace).Update(&cephFilesystem)
+		localCephFilesystem := cephFilesystem
+		_, err := c.context.RookClientset.CephV1().CephFilesystems(c.Namespace).Update(ctx, &localCephFilesystem, metav1.UpdateOptions{})
 		if err != nil {
 			return errors.Wrapf(err, "failed to update ceph filesystem CR %q with new label", cephFilesystem.Name)
 		}
 	}
 
-	cephObjectStores, err := c.context.RookClientset.CephV1().CephObjectStores(c.Namespace).List(metav1.ListOptions{})
+	cephObjectStores, err := c.context.RookClientset.CephV1().CephObjectStores(c.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return errors.Wrap(err, "failed to list ceph object store CRs")
 	}
@@ -331,13 +284,14 @@ func (c *cluster) notifyChildControllerOfUpgrade() error {
 			cephObjectStore.Labels = map[string]string{}
 		}
 		cephObjectStore.Labels["ceph_version"] = version
-		_, err := c.context.RookClientset.CephV1().CephObjectStores(c.Namespace).Update(&cephObjectStore)
+		localCephObjectStore := cephObjectStore
+		_, err := c.context.RookClientset.CephV1().CephObjectStores(c.Namespace).Update(ctx, &localCephObjectStore, metav1.UpdateOptions{})
 		if err != nil {
 			return errors.Wrapf(err, "failed to update ceph object store CR %q with new label", cephObjectStore.Name)
 		}
 	}
 
-	cephNFSes, err := c.context.RookClientset.CephV1().CephNFSes(c.Namespace).List(metav1.ListOptions{})
+	cephNFSes, err := c.context.RookClientset.CephV1().CephNFSes(c.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return errors.Wrap(err, "failed to list ceph nfs CRs")
 	}
@@ -346,9 +300,42 @@ func (c *cluster) notifyChildControllerOfUpgrade() error {
 			cephNFS.Labels = map[string]string{}
 		}
 		cephNFS.Labels["ceph_version"] = version
-		_, err := c.context.RookClientset.CephV1().CephNFSes(c.Namespace).Update(&cephNFS)
+		localCephNFS := cephNFS
+		_, err := c.context.RookClientset.CephV1().CephNFSes(c.Namespace).Update(ctx, &localCephNFS, metav1.UpdateOptions{})
 		if err != nil {
 			return errors.Wrapf(err, "failed to update ceph nfs CR %q with new label", cephNFS.Name)
+		}
+	}
+
+	cephRBDMirrors, err := c.context.RookClientset.CephV1().CephRBDMirrors(c.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return errors.Wrap(err, "failed to list ceph rbd-mirror CRs")
+	}
+	for _, cephRBDMirror := range cephRBDMirrors.Items {
+		if cephRBDMirror.Labels == nil {
+			cephRBDMirror.Labels = map[string]string{}
+		}
+		cephRBDMirror.Labels["ceph_version"] = version
+		localCephRBDMirror := cephRBDMirror
+		_, err := c.context.RookClientset.CephV1().CephRBDMirrors(c.Namespace).Update(ctx, &localCephRBDMirror, metav1.UpdateOptions{})
+		if err != nil {
+			return errors.Wrapf(err, "failed to update ceph rbd-mirror CR %q with new label", cephRBDMirror.Name)
+		}
+	}
+
+	cephFilesystemMirrors, err := c.context.RookClientset.CephV1().CephFilesystemMirrors(c.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return errors.Wrap(err, "failed to list cephfs mirror CRs")
+	}
+	for _, cephFilesystemMirror := range cephFilesystemMirrors.Items {
+		if cephFilesystemMirror.Labels == nil {
+			cephFilesystemMirror.Labels = map[string]string{}
+		}
+		cephFilesystemMirror.Labels["ceph_version"] = version
+		localCephFilesystemMirror := cephFilesystemMirror
+		_, err := c.context.RookClientset.CephV1().CephFilesystemMirrors(c.Namespace).Update(ctx, &localCephFilesystemMirror, metav1.UpdateOptions{})
+		if err != nil {
+			return errors.Wrapf(err, "failed to update ceph nfs CR %q with new label", cephFilesystemMirror.Name)
 		}
 	}
 
@@ -356,17 +343,27 @@ func (c *cluster) notifyChildControllerOfUpgrade() error {
 }
 
 // Validate the cluster Specs
-func (c *ClusterController) preClusterStartValidation(cluster *cluster, clusterObj *cephv1.CephCluster) error {
-
+func (c *ClusterController) preClusterStartValidation(cluster *cluster) error {
+	ctx := context.TODO()
 	if cluster.Spec.Mon.Count == 0 {
 		logger.Warningf("mon count should be at least 1, will use default value of %d", mon.DefaultMonCount)
 		cluster.Spec.Mon.Count = mon.DefaultMonCount
 	}
 	if cluster.Spec.Mon.Count%2 == 0 {
-		logger.Warningf("mon count is even (given: %d), should be uneven, continuing", cluster.Spec.Mon.Count)
+		return errors.Errorf("mon count %d cannot be even, must be odd to support a healthy quorum", cluster.Spec.Mon.Count)
+	}
+	if !cluster.Spec.Mon.AllowMultiplePerNode {
+		// Check that there are enough nodes to have a chance of starting the requested number of mons
+		nodes, err := c.context.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err == nil && len(nodes.Items) < cluster.Spec.Mon.Count {
+			return errors.Errorf("cannot start %d mons on %d node(s) when allowMultiplePerNode is false", cluster.Spec.Mon.Count, len(nodes.Items))
+		}
 	}
 	if len(cluster.Spec.Storage.Directories) != 0 {
 		logger.Warning("running osds on directory is not supported anymore, use devices instead.")
+	}
+	if err := validateStretchCluster(cluster); err != nil {
+		return err
 	}
 	if cluster.Spec.Network.IsMultus() {
 		_, isPublic := cluster.Spec.Network.Selectors[config.PublicNetworkSelectorKeyName]
@@ -382,8 +379,13 @@ func (c *ClusterController) preClusterStartValidation(cluster *cluster, clusterO
 				continue
 			}
 
+			multusNamespace, nad := config.GetMultusNamespace(cluster.Spec.Network.Selectors[selector])
+			if multusNamespace == "" {
+				multusNamespace = cluster.Namespace
+			}
+
 			// Get network attachment definition
-			_, err := c.context.NetworkClient.NetworkAttachmentDefinitions(cluster.Namespace).Get(cluster.Spec.Network.Selectors[selector], metav1.GetOptions{})
+			_, err := c.context.NetworkClient.NetworkAttachmentDefinitions(multusNamespace).Get(ctx, nad, metav1.GetOptions{})
 			if err != nil {
 				if kerrors.IsNotFound(err) {
 					return errors.Wrapf(err, "specified network attachment definition for selector %q does not exist", selector)
@@ -393,7 +395,151 @@ func (c *ClusterController) preClusterStartValidation(cluster *cluster, clusterO
 		}
 	}
 
+	// Validate on-PVC cluster encryption KMS settings
+	if cluster.Spec.Storage.IsOnPVCEncrypted() && cluster.Spec.Security.KeyManagementService.IsEnabled() {
+		// Validate the KMS details
+		err := kms.ValidateConnectionDetails(c.context, cluster.Spec, cluster.Namespace)
+		if err != nil {
+			return errors.Wrap(err, "failed to validate kms connection details")
+		}
+	}
+
 	logger.Debug("cluster spec successfully validated")
+	return nil
+}
+
+func validateStretchCluster(cluster *cluster) error {
+	if !cluster.Spec.IsStretchCluster() {
+		return nil
+	}
+	if len(cluster.Spec.Mon.StretchCluster.Zones) != 3 {
+		return errors.Errorf("expecting exactly three zones for the stretch cluster, but found %d", len(cluster.Spec.Mon.StretchCluster.Zones))
+	}
+	if cluster.Spec.Mon.Count != 3 && cluster.Spec.Mon.Count != 5 {
+		return errors.Errorf("invalid number of mons %d for a stretch cluster, expecting 5 (recommended) or 3 (minimal)", cluster.Spec.Mon.Count)
+	}
+	arbitersFound := 0
+	for _, zone := range cluster.Spec.Mon.StretchCluster.Zones {
+		if zone.Arbiter {
+			arbitersFound++
+		}
+		if zone.Name == "" {
+			return errors.New("missing zone name for the stretch cluster")
+		}
+	}
+	if arbitersFound != 1 {
+		return errors.Errorf("expecting to find exactly one arbiter zone, but found %d", arbitersFound)
+	}
+	return nil
+}
+
+func extractExitCode(err error) (int, bool) {
+	exitErr, ok := err.(*exec.ExitError)
+	if ok {
+		return exitErr.ExitCode(), true
+	}
+	return 0, false
+}
+
+func (c *cluster) createCrushRoot(newRoot string) error {
+	args := []string{"osd", "crush", "add-bucket", newRoot, "root"}
+	cephCmd := client.NewCephCommand(c.context, c.ClusterInfo, args)
+	_, err := cephCmd.Run()
+	if err != nil {
+		// returns zero if the bucket exists already, so any error is fatal
+		return errors.Wrap(err, "failed to create CRUSH root")
+	}
+
+	return nil
+}
+
+func (c *cluster) replaceDefaultReplicationRule(newRoot string) error {
+	args := []string{"osd", "crush", "rule", "rm", "replicated_rule"}
+	cephCmd := client.NewCephCommand(c.context, c.ClusterInfo, args)
+	_, err := cephCmd.Run()
+	if err != nil {
+		if code, ok := extractExitCode(err); ok && code == int(syscall.EBUSY) {
+			// we do not want to delete the replicated_rule if it’s in use,
+			// and we also do not care much. There are two possible causes:
+			// - the user has created this rule with the non-default CRUSH
+			//   root manually
+			// - the user is using this rule despite the rule using the default
+			//   CRUSH root
+			// in both cases, we cannot do anything about it either way and
+			// we’ll assume that the user knows what they’re doing.
+			logger.Warning("replicated_rule is in use, not replaced")
+			return nil
+		}
+		// the error does not refer to EBUSY -> return as error
+		return errors.Wrap(err, "failed to remove default replicated_rule")
+	}
+
+	args = []string{
+		"osd", "crush", "rule", "create-replicated",
+		"replicated_rule", newRoot, "host",
+	}
+	cephCmd = client.NewCephCommand(c.context, c.ClusterInfo, args)
+	_, err = cephCmd.Run()
+	if err != nil {
+		// returns zero if the rule exists already, so any error is fatal
+		return errors.Wrap(err, "failed to create new default replicated_rule")
+	}
+
+	return nil
+}
+
+func (c *cluster) removeDefaultCrushRoot() error {
+	args := []string{"osd", "crush", "rm", "default"}
+	cephCmd := client.NewCephCommand(c.context, c.ClusterInfo, args)
+	_, err := cephCmd.Run()
+	if err != nil {
+		if code, ok := extractExitCode(err); ok {
+			if code == int(syscall.ENOTEMPTY) || code == int(syscall.EBUSY) {
+				// we do not want to delete the default node if it’s in use,
+				// and we also do not care much. There are two more causes here:
+				// - a (non-root?) CRUSH node with the default label was created
+				//   automatically, e.g. from topology labels, and OSDs (or sub
+				//   nodes) have been placed in there. In this case, the node
+				//   obviously needs to be preserved.
+				// - the root=default CRUSH node is in use by a non-default
+				//   CRUSH rule
+				// - OSDs or subnodes have been placed under the root=default
+				//   CRUSH node
+				//
+				// in all cases, we cannot do anything about it either way and
+				// we’ll assume that the user knows what they’re doing.
+				logger.Debug("default is not empty or is still in use, not removed")
+				return nil
+			}
+		}
+		// the error does not refer to EBUSY or ENOTEMPTY -> return as error
+		return errors.Wrap(err, "failed to remove CRUSH node 'default'")
+	}
+	return nil
+}
+
+// Remove the default root=default and replicated_rule CRUSH objects which are created by Ceph on initial startup.
+// Those objects may interfere with the normal operation of the cluster.
+// Note that errors which indicate that the objects are in use are ignored and the objects will continue to exist in that case.
+func (c *cluster) replaceDefaultCrushMap(newRoot string) (err error) {
+	logger.Info("creating new CRUSH root if it does not exist")
+	err = c.createCrushRoot(newRoot)
+	if err != nil {
+		return errors.Wrap(err, "failed to create CRUSH root")
+	}
+
+	logger.Info("replacing default replicated_rule CRUSH rule for use of non-default CRUSH root")
+	err = c.replaceDefaultReplicationRule(newRoot)
+	if err != nil {
+		return errors.Wrap(err, "failed to replace default rule")
+	}
+
+	logger.Info("replacing default CRUSH node if applicable")
+	err = c.removeDefaultCrushRoot()
+	if err != nil {
+		return errors.Wrap(err, "failed to remove default CRUSH root")
+	}
+
 	return nil
 }
 
@@ -402,20 +548,30 @@ func (c *ClusterController) preClusterStartValidation(cluster *cluster, clusterO
 // Basically, it is executed between the monitors and the manager sequence
 func (c *cluster) postMonStartupActions() error {
 	// Create CSI Kubernetes Secrets
-	err := csi.CreateCSISecrets(c.context, c.Namespace, &c.ownerRef)
+	err := csi.CreateCSISecrets(c.context, c.ClusterInfo)
 	if err != nil {
 		return errors.Wrap(err, "failed to create csi kubernetes secrets")
 	}
 
 	// Create crash collector Kubernetes Secret
-	err = crash.CreateCrashCollectorSecret(c.context, c.Namespace, &c.ownerRef)
+	err = crash.CreateCrashCollectorSecret(c.context, c.ClusterInfo)
 	if err != nil {
 		return errors.Wrap(err, "failed to create crash collector kubernetes secret")
 	}
 
 	// Enable Ceph messenger 2 protocol on Nautilus
-	if err := client.EnableMessenger2(c.context, c.Namespace); err != nil {
+	if err := client.EnableMessenger2(c.context, c.ClusterInfo); err != nil {
 		return errors.Wrap(err, "failed to enable Ceph messenger version 2")
+	}
+
+	crushRoot := client.GetCrushRootFromSpec(c.Spec)
+	if crushRoot != "default" {
+		// Remove the root=default and replicated_rule which are created by
+		// default. Note that RemoveDefaultCrushMap ignores some types of errors
+		// internally
+		if err := c.replaceDefaultCrushMap(crushRoot); err != nil {
+			return errors.Wrap(err, "failed to remove default CRUSH map")
+		}
 	}
 
 	return nil

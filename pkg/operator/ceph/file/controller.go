@@ -27,7 +27,6 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
@@ -54,7 +53,7 @@ const (
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 
 // List of object resources to watch by the controller
-var objectsToWatch = []runtime.Object{
+var objectsToWatch = []client.Object{
 	&corev1.Secret{TypeMeta: metav1.TypeMeta{Kind: "Secret", APIVersion: corev1.SchemeGroupVersion.String()}},
 	&appsv1.Deployment{TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: appsv1.SchemeGroupVersion.String()}},
 }
@@ -73,7 +72,7 @@ type ReconcileCephFilesystem struct {
 	scheme          *runtime.Scheme
 	context         *clusterd.Context
 	cephClusterSpec *cephv1.ClusterSpec
-	clusterInfo     *cephconfig.ClusterInfo
+	clusterInfo     *cephclient.ClusterInfo
 }
 
 // Add creates a new CephFilesystem Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -86,8 +85,9 @@ func Add(mgr manager.Manager, context *clusterd.Context) error {
 func newReconciler(mgr manager.Manager, context *clusterd.Context) reconcile.Reconciler {
 	// Add the cephv1 scheme to the manager scheme so that the controller knows about it
 	mgrScheme := mgr.GetScheme()
-	cephv1.AddToScheme(mgr.GetScheme())
-
+	if err := cephv1.AddToScheme(mgr.GetScheme()); err != nil {
+		panic(err)
+	}
 	return &ReconcileCephFilesystem{
 		client:  mgr.GetClient(),
 		scheme:  mgrScheme,
@@ -120,6 +120,25 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		}
 	}
 
+	// Build Handler function to return the list of ceph filesystems
+	// This is used by the watchers below
+	handlerFunc, err := opcontroller.ObjectToCRMapper(mgr.GetClient(), &cephv1.CephFilesystemList{}, mgr.GetScheme())
+	if err != nil {
+		return err
+	}
+
+	// Watch for CephCluster Spec changes that we want to propagate to us
+	err = c.Watch(&source.Kind{Type: &cephv1.CephCluster{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       opcontroller.ClusterResource.Kind,
+			APIVersion: opcontroller.ClusterResource.APIVersion,
+		},
+	},
+	}, handler.EnqueueRequestsFromMapFunc(handlerFunc), opcontroller.WatchCephClusterPredicate())
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -127,8 +146,8 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 // and what is in the cephFilesystem.Spec
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCephFilesystem) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	// workaround because the rook logging mechanism is not compatible with the controller-runtime loggin interface
+func (r *ReconcileCephFilesystem) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
+	// workaround because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	reconcileResponse, err := r.reconcile(request)
 	if err != nil {
 		logger.Errorf("failed to reconcile %v", err)
@@ -148,6 +167,12 @@ func (r *ReconcileCephFilesystem) reconcile(request reconcile.Request) (reconcil
 		}
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, errors.Wrap(err, "failed to get cephFilesystem")
+	}
+
+	// Set a finalizer so we can do cleanup before the object goes away
+	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephFilesystem)
+	if err != nil {
+		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
 	}
 
 	// The CR was just created, initializing status fields
@@ -187,17 +212,11 @@ func (r *ReconcileCephFilesystem) reconcile(request reconcile.Request) (reconcil
 	r.clusterInfo = clusterInfo
 
 	// Populate CephVersion
-	currentCephVersion, err := cephclient.LeastUptodateDaemonVersion(r.context, r.clusterInfo.Name, opconfig.MonType)
+	currentCephVersion, err := cephclient.LeastUptodateDaemonVersion(r.context, r.clusterInfo, opconfig.MonType)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "failed to retrieve current ceph %q version", opconfig.MonType)
 	}
 	r.clusterInfo.CephVersion = currentCephVersion
-
-	// Set a finalizer so we can do cleanup before the object goes away
-	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephFilesystem)
-	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
-	}
 
 	// DELETE: the CR was deleted
 	if !cephFilesystem.GetDeletionTimestamp().IsZero() {
@@ -218,7 +237,7 @@ func (r *ReconcileCephFilesystem) reconcile(request reconcile.Request) (reconcil
 	}
 
 	// validate the filesystem settings
-	if err := validateFilesystem(r.context, cephFilesystem); err != nil {
+	if err := validateFilesystem(r.context, r.clusterInfo, r.cephClusterSpec, cephFilesystem); err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "invalid object filesystem %q arguments", cephFilesystem.Name)
 	}
 
@@ -240,7 +259,7 @@ func (r *ReconcileCephFilesystem) reconcile(request reconcile.Request) (reconcil
 
 func (r *ReconcileCephFilesystem) reconcileCreateFilesystem(cephFilesystem *cephv1.CephFilesystem) (reconcile.Result, error) {
 	if r.cephClusterSpec.External.Enable {
-		_, err := opcontroller.ValidateCephVersionsBetweenLocalAndExternalClusters(r.context, cephFilesystem.Namespace, r.clusterInfo.CephVersion)
+		_, err := opcontroller.ValidateCephVersionsBetweenLocalAndExternalClusters(r.context, r.clusterInfo)
 		if err != nil {
 			// This handles the case where the operator is running, the external cluster has been upgraded and a CR creation is called
 			// If that's a major version upgrade we fail, if it's a minor version, we continue, it's not ideal but not critical
@@ -255,9 +274,29 @@ func (r *ReconcileCephFilesystem) reconcileCreateFilesystem(cephFilesystem *ceph
 		return reconcile.Result{}, errors.Wrapf(err, "failed to get controller %q owner reference", cephFilesystem.Name)
 	}
 
-	err = createFilesystem(r.clusterInfo, r.context, *cephFilesystem, r.cephClusterSpec, *ref, r.cephClusterSpec.DataDirHostPath, r.scheme)
+	// preservePoolsOnDelete being set to true has data-loss concerns and is deprecated (see #6492).
+	// If preservePoolsOnDelete is set to true, assume the user means preserveFilesystemOnDelete instead.
+	if cephFilesystem.Spec.PreservePoolsOnDelete {
+		if !cephFilesystem.Spec.PreserveFilesystemOnDelete {
+			logger.Warning("preservePoolsOnDelete (currently set 'true') has been deprecated in favor of preserveFilesystemOnDelete (currently set 'false') due to data loss concerns so Rook will assume preserveFilesystemOnDelete 'true'")
+			cephFilesystem.Spec.PreserveFilesystemOnDelete = true
+		}
+	}
+
+	err = createFilesystem(r.context, r.clusterInfo, *cephFilesystem, r.cephClusterSpec, *ref, r.cephClusterSpec.DataDirHostPath, r.scheme)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "failed to create filesystem %q", cephFilesystem.Name)
+	}
+
+	// Enable mirroring if needed
+	if r.clusterInfo.CephVersion.IsAtLeastPacific() {
+		if cephFilesystem.Spec.Mirroring.Enabled {
+			// Enable the mgr module
+			err = cephclient.MgrEnableModule(r.context, r.clusterInfo, "mirroring", false)
+			if err != nil {
+				return reconcile.Result{}, errors.Wrap(err, "failed to enable mirroring mgr module")
+			}
+		}
 	}
 
 	return reconcile.Result{}, nil
@@ -270,7 +309,7 @@ func (r *ReconcileCephFilesystem) reconcileDeleteFilesystem(cephFilesystem *ceph
 		return errors.Wrapf(err, "failed to get controller %q owner reference", cephFilesystem.Name)
 	}
 
-	err = deleteFilesystem(r.clusterInfo, r.context, *cephFilesystem, r.cephClusterSpec, *ref, r.cephClusterSpec.DataDirHostPath, r.scheme)
+	err = deleteFilesystem(r.context, r.clusterInfo, *cephFilesystem, r.cephClusterSpec, *ref, r.cephClusterSpec.DataDirHostPath, r.scheme)
 	if err != nil {
 		return err
 	}

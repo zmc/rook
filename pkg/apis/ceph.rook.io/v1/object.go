@@ -19,3 +19,11 @@ package v1
 func (s *ObjectStoreSpec) IsMultisite() bool {
 	return s.Zone.Name != ""
 }
+
+func (s *ObjectStoreSpec) IsExternal() bool {
+	return len(s.Gateway.ExternalRgwEndpoints) != 0
+}
+
+func (s *ObjectRealmSpec) IsPullRealm() bool {
+	return s.Pull.Endpoint != ""
+}

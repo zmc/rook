@@ -20,33 +20,18 @@ import (
 	"fmt"
 
 	"path"
-	"path/filepath"
 
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 )
 
 const (
-	keyringFileName     = "keyring"
 	bootstrapOsdKeyring = "bootstrap-osd/ceph.keyring"
 )
 
-func getOSDRootDir(root string, osdID int) string {
-	return filepath.Join(root, fmt.Sprintf("osd%d", osdID))
-}
-
-// get the full path to the given OSD's config file
-func getOSDConfFilePath(osdDataPath, clusterName string) string {
-	return fmt.Sprintf("%s/%s.config", osdDataPath, clusterName)
-}
-
-// get the full path to the given OSD's keyring
-func getOSDKeyringPath(osdDataPath string) string {
-	return filepath.Join(osdDataPath, keyringFileName)
-}
-
 // create a keyring for the bootstrap-osd client, it gets a limited set of privileges
-func createOSDBootstrapKeyring(context *clusterd.Context, clusterName, rootDir string) error {
+func createOSDBootstrapKeyring(context *clusterd.Context, clusterInfo *client.ClusterInfo, rootDir string) error {
 	username := "client.bootstrap-osd"
 	keyringPath := path.Join(rootDir, bootstrapOsdKeyring)
 	access := []string{"mon", "allow profile bootstrap-osd"}
@@ -54,5 +39,5 @@ func createOSDBootstrapKeyring(context *clusterd.Context, clusterName, rootDir s
 		return fmt.Sprintf(bootstrapOSDKeyringTemplate, key)
 	}
 
-	return cephconfig.CreateKeyring(context, clusterName, username, keyringPath, access, keyringEval)
+	return cephclient.CreateKeyring(context, clusterInfo, username, keyringPath, access, keyringEval)
 }

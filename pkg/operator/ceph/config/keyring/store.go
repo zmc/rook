@@ -20,12 +20,13 @@ limitations under the License.
 package keyring
 
 import (
+	"context"
+
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,43 +35,23 @@ import (
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-cfg-keyring")
 
 const (
-	keyKeyName      = "key"
 	keyringFileName = "keyring"
 )
 
 // SecretStore is a helper to store Ceph daemon keyrings as Kubernetes secrets.
 type SecretStore struct {
-	context   *clusterd.Context
-	namespace string
-	ownerRef  *metav1.OwnerReference
+	context     *clusterd.Context
+	clusterInfo *client.ClusterInfo
+	ownerRef    *metav1.OwnerReference
 }
 
 // GetSecretStore returns a new SecretStore struct.
-func GetSecretStore(context *clusterd.Context, namespace string, ownerRef *metav1.OwnerReference) *SecretStore {
+func GetSecretStore(context *clusterd.Context, clusterInfo *client.ClusterInfo, ownerRef *metav1.OwnerReference) *SecretStore {
 	return &SecretStore{
-		context:   context,
-		namespace: namespace,
-		ownerRef:  ownerRef,
+		context:     context,
+		clusterInfo: clusterInfo,
+		ownerRef:    ownerRef,
 	}
-}
-
-// GetSecretStoreForDeployment returns a new SecretStore struct owned by the provided Deployment.
-func GetSecretStoreForDeployment(context *clusterd.Context, d *apps.Deployment) *SecretStore {
-	ownerRef := &metav1.OwnerReference{
-		UID:        d.UID,
-		APIVersion: "v1",
-		Kind:       "deployment",
-		Name:       d.GetName(),
-	}
-	return &SecretStore{
-		context:   context,
-		namespace: d.GetNamespace(),
-		ownerRef:  ownerRef,
-	}
-}
-
-func keySecretName(resourceName string) string {
-	return resourceName + "-key" // all keys named by suffixing key to the resource name
 }
 
 func keyringSecretName(resourceName string) string {
@@ -82,15 +63,15 @@ func keyringSecretName(resourceName string) string {
 // usually does not change.
 func (k *SecretStore) GenerateKey(user string, access []string) (string, error) {
 	// get-or-create-key for the user account
-	key, err := client.AuthGetOrCreateKey(k.context, k.namespace, user, access)
+	key, err := client.AuthGetOrCreateKey(k.context, k.clusterInfo, user, access)
 	if err != nil {
 		logger.Infof("Error getting or creating key for %q. "+
 			"Attempting to update capabilities in case the user already exists. %v", user, err)
-		uErr := client.AuthUpdateCaps(k.context, k.namespace, user, access)
+		uErr := client.AuthUpdateCaps(k.context, k.clusterInfo, user, access)
 		if uErr != nil {
 			return "", errors.Wrapf(err, "failed to get, create, or update auth key for %s", user)
 		}
-		key, uErr = client.AuthGetKey(k.context, k.namespace, user)
+		key, uErr = client.AuthGetKey(k.context, k.clusterInfo, user)
 		if uErr != nil {
 			return "", errors.Wrapf(err, "failed to get key after updating existing auth capabilities for %s", user)
 		}
@@ -104,7 +85,7 @@ func (k *SecretStore) CreateOrUpdate(resourceName string, keyring string) error 
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      keyringSecretName(resourceName),
-			Namespace: k.namespace,
+			Namespace: k.clusterInfo.Namespace,
 		},
 		StringData: map[string]string{
 			keyringFileName: keyring,
@@ -118,8 +99,9 @@ func (k *SecretStore) CreateOrUpdate(resourceName string, keyring string) error 
 
 // Delete deletes the keyring secret for the resource.
 func (k *SecretStore) Delete(resourceName string) error {
+	ctx := context.TODO()
 	secretName := keyringSecretName(resourceName)
-	err := k.context.Clientset.CoreV1().Secrets(k.namespace).Delete(secretName, &metav1.DeleteOptions{})
+	err := k.context.Clientset.CoreV1().Secrets(k.clusterInfo.Namespace).Delete(ctx, secretName, metav1.DeleteOptions{})
 	if err != nil && !kerrors.IsNotFound(err) {
 		logger.Warningf("failed to delete keyring secret for %q. user may need to delete the resource manually. %v", secretName, err)
 	}
@@ -129,12 +111,13 @@ func (k *SecretStore) Delete(resourceName string) error {
 
 // CreateSecret creates or update a kubernetes secret
 func (k *SecretStore) CreateSecret(secret *v1.Secret) error {
+	ctx := context.TODO()
 	secretName := secret.ObjectMeta.Name
-	_, err := k.context.Clientset.CoreV1().Secrets(k.namespace).Get(secretName, metav1.GetOptions{})
+	_, err := k.context.Clientset.CoreV1().Secrets(k.clusterInfo.Namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Debugf("creating secret for %s", secretName)
-			if _, err := k.context.Clientset.CoreV1().Secrets(k.namespace).Create(secret); err != nil {
+			if _, err := k.context.Clientset.CoreV1().Secrets(k.clusterInfo.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 				return errors.Wrapf(err, "failed to create secret for %s", secretName)
 			}
 			return nil
@@ -143,7 +126,7 @@ func (k *SecretStore) CreateSecret(secret *v1.Secret) error {
 	}
 
 	logger.Debugf("updating secret for %s", secretName)
-	if _, err := k.context.Clientset.CoreV1().Secrets(k.namespace).Update(secret); err != nil {
+	if _, err := k.context.Clientset.CoreV1().Secrets(k.clusterInfo.Namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 		return errors.Wrapf(err, "failed to update secret for %s", secretName)
 	}
 	return nil

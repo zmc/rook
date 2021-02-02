@@ -20,6 +20,7 @@ package objectuser
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/coreos/pkg/capnslog"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
@@ -88,6 +89,7 @@ var (
 )
 
 func TestCephObjectStoreUserController(t *testing.T) {
+	ctx := context.TODO()
 	// Set DEBUG logging
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
 
@@ -137,7 +139,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStoreUser{}, &cephv1.CephCluster{}, &cephv1.CephClusterList{})
 
 	// Create a fake client to mock API calls.
-	cl := fake.NewFakeClientWithScheme(s, object...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	// Create a ReconcileObjectStoreUser object with the scheme and fake client.
 	r := &ReconcileObjectStoreUser{client: cl, scheme: s, context: c}
 
@@ -150,7 +152,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		},
 	}
 	logger.Info("STARTING PHASE 1")
-	res, err := r.Reconcile(req)
+	res, err := r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 1 DONE")
@@ -174,11 +176,11 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	}
 	object = append(object, cephCluster)
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	// Create a ReconcileObjectStoreUser object with the scheme and fake client.
 	r = &ReconcileObjectStoreUser{client: cl, scheme: s, context: c}
 	logger.Info("STARTING PHASE 2")
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 2 DONE")
@@ -191,7 +193,6 @@ func TestCephObjectStoreUserController(t *testing.T) {
 
 	// Mock clusterInfo
 	secrets := map[string][]byte{
-		"cluster-name": []byte("foo-cluster"),
 		"fsid":         []byte(name),
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
@@ -204,7 +205,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		Data: secrets,
 		Type: k8sutil.RookType,
 	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	// Add ready status to the CephCluster
@@ -212,7 +213,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
 
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 
 	executor = &exectest.MockExecutor{
 		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
@@ -221,7 +222,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 			}
 			return "", nil
 		},
-		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+		MockExecuteCommandWithTimeout: func(timeout time.Duration, command string, args ...string) (string, error) {
 			if args[0] == "user" {
 				return userCreateJSON, nil
 			}
@@ -234,7 +235,7 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	r = &ReconcileObjectStoreUser{client: cl, scheme: s, context: c}
 
 	logger.Info("STARTING PHASE 3")
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 3 DONE")
@@ -253,20 +254,23 @@ func TestCephObjectStoreUserController(t *testing.T) {
 		TypeMeta: metav1.TypeMeta{
 			Kind: "CephObjectStore",
 		},
+		Status: &cephv1.ObjectStoreStatus{
+			Info: map[string]string{"endpoint": "http://rook-ceph-rgw-my-store.rook-ceph:80"},
+		},
 	}
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStore{})
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephObjectStoreList{})
 	object = append(object, cephObjectStore)
 
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	// Create a ReconcileObjectStoreUser object with the scheme and fake client.
 	r = &ReconcileObjectStoreUser{client: cl, scheme: s, context: c}
 
 	logger.Info("STARTING PHASE 4")
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: store, Namespace: namespace}, cephObjectStore)
 	assert.NoError(t, err, cephObjectStore)
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 4 DONE")
@@ -286,10 +290,26 @@ func TestCephObjectStoreUserController(t *testing.T) {
 	logger.Info("STARTING PHASE 5")
 	err = r.client.Create(context.TODO(), rgwPod)
 	assert.NoError(t, err)
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.False(t, res.Requeue)
 	err = r.client.Get(context.TODO(), req.NamespacedName, objectUser)
+	assert.NoError(t, err)
 	assert.Equal(t, "Ready", objectUser.Status.Phase, objectUser)
 	logger.Info("PHASE 5 DONE")
+}
+
+func TestBuildUpdateStatusInfo(t *testing.T) {
+	cephObjectStoreUser := &cephv1.CephObjectStoreUser{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: cephv1.ObjectStoreUserSpec{
+			Store: store,
+		},
+	}
+
+	statusInfo := generateStatusInfo(cephObjectStoreUser)
+	assert.NotEmpty(t, statusInfo["secretName"])
+	assert.Equal(t, "rook-ceph-object-user-my-store-my-user", statusInfo["secretName"])
 }

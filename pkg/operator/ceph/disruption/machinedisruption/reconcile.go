@@ -58,7 +58,7 @@ type MachineDisruptionReconciler struct {
 // which ensures that the machineDisruptionBudget for the rook ceph cluster is in correct state
 // The Controller will requeue the Request to be processed again if an error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *MachineDisruptionReconciler) Reconcile(request reconcile.Request) (reconcile.Result, error) {
+func (r *MachineDisruptionReconciler) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
 	// wrapping reconcile because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	result, err := r.reconcile(request)
 	if err != nil {
@@ -131,7 +131,8 @@ func (r *MachineDisruptionReconciler) reconcile(request reconcile.Request) (reco
 		mdb.Spec.MaxUnavailable = &maxUnavailable
 	}
 	// Check if the cluster is clean or not
-	_, isClean, err := cephClient.IsClusterClean(r.context.ClusterdContext, request.Namespace)
+	clusterInfo := cephClient.AdminClusterInfo(request.NamespacedName.Namespace)
+	_, isClean, err := cephClient.IsClusterClean(r.context.ClusterdContext, clusterInfo)
 	if err != nil {
 		maxUnavailable := int32(0)
 		mdb.Spec.MaxUnavailable = &maxUnavailable

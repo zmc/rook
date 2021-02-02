@@ -20,14 +20,9 @@ import (
 	"os"
 )
 
-// testEnvName gets the name of the test environment. In the CI it is "aws_1.18.x" or similar.
-func testEnvName() string {
-	return getEnvVarWithDefault("TEST_ENV_NAME", "localhost")
-}
-
 // testHelmPath gets the helm path
 func testHelmPath() string {
-	return getEnvVarWithDefault("TEST_HELM_PATH", "helm")
+	return getEnvVarWithDefault("TEST_HELM_PATH", "/tmp/rook-tests-scripts-helm/helm")
 }
 
 // TestLogCollectionLevel gets whether to collect all logs
@@ -42,28 +37,49 @@ func testStorageProvider() string {
 
 // TestIsOfficialBuild gets the storage provider for which tests should be run
 func TestIsOfficialBuild() bool {
-	return os.Getenv("TEST_IS_OFFICIAL_BUILD") == "true"
+	// PRs will set this to "false", but the official build will not set it, so we compare against "false"
+	return getEnvVarWithDefault("TEST_IS_OFFICIAL_BUILD", "") != "false"
+}
+
+func StorageClassName() string {
+	return getEnvVarWithDefault("TEST_STORAGE_CLASS", "")
+}
+
+func UsePVC() bool {
+	return StorageClassName() != ""
 }
 
 // baseTestDir gets the base test directory
-func baseTestDir() string {
-	// If the base test directory is actively set to empty (as in CI), we use the current working directory.
+func baseTestDir() (string, error) {
+	// If the base test directory is actively set to WORKING_DIR (as in CI),
+	// we use the current working directory.
 	val := getEnvVarWithDefault("TEST_BASE_DIR", "/data")
 	if val == "WORKING_DIR" {
-		val, _ = os.Getwd()
+		var err error
+		val, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
 	}
-	return val
+	return val, nil
 }
 
 // TestScratchDevice get the scratch device to be used for OSD
 func TestScratchDevice() string {
-	return getEnvVarWithDefault("TEST_SCRATCH_DEVICE", "/dev/xvdc")
+	return getEnvVarWithDefault("TEST_SCRATCH_DEVICE", "/dev/nvme0n1")
+}
+
+// getDeviceFilter get the device name used for OSD
+func getDeviceFilter() string {
+	return getEnvVarWithDefault("DEVICE_FILTER", `""`)
 }
 
 func getEnvVarWithDefault(env, defaultValue string) string {
 	val := os.Getenv(env)
 	if val == "" {
+		logger.Infof("test environment variable (default) %q=%q", env, defaultValue)
 		return defaultValue
 	}
+	logger.Infof("test environment variable %q=%q", env, val)
 	return val
 }

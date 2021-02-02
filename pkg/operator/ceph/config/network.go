@@ -18,7 +18,9 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
@@ -32,6 +34,8 @@ const (
 	PublicNetworkSelectorKeyName = "public"
 	// ClusterNetworkSelectorKeyName is the network selector key for the ceph cluster network
 	ClusterNetworkSelectorKeyName = "cluster"
+	// Whereabouts Ipam type
+	WhereaboutsIpamType = "whereabouts"
 )
 
 var (
@@ -39,7 +43,8 @@ var (
 	NetworkSelectors = []string{PublicNetworkSelectorKeyName, ClusterNetworkSelectorKeyName}
 )
 
-func generateNetworkSettings(context *clusterd.Context, namespace string, networkSelectors map[string]string) ([]Option, error) {
+func generateNetworkSettings(clusterdContext *clusterd.Context, namespace string, networkSelectors map[string]string) ([]Option, error) {
+	ctx := context.TODO()
 	cephNetworks := []Option{}
 
 	for _, selectorKey := range NetworkSelectors {
@@ -50,11 +55,15 @@ func generateNetworkSettings(context *clusterd.Context, namespace string, networ
 			continue
 		}
 
+		multusNamespace, nad := GetMultusNamespace(networkSelectors[selectorKey])
+		if multusNamespace == "" {
+			multusNamespace = namespace
+		}
 		// Get network attachment definition
-		netDefinition, err := context.NetworkClient.NetworkAttachmentDefinitions(namespace).Get(networkSelectors[selectorKey], metav1.GetOptions{})
+		netDefinition, err := clusterdContext.NetworkClient.NetworkAttachmentDefinitions(multusNamespace).Get(ctx, nad, metav1.GetOptions{})
 		if err != nil {
 			if kerrors.IsNotFound(err) {
-				return []Option{}, errors.Wrapf(err, "specified network attachment definition for selector %q does not exist", selectorKey)
+				return []Option{}, errors.Wrapf(err, "specified network attachment definition %q in namespace %q for selector %q does not exist", nad, namespace, selectorKey)
 			}
 			return []Option{}, errors.Wrapf(err, "failed to fetch network attachment definition for selector %q", selectorKey)
 		}
@@ -65,12 +74,30 @@ func generateNetworkSettings(context *clusterd.Context, namespace string, networ
 			return []Option{}, errors.Wrapf(err, "failed to get network attachment definition configuration for selector %q", selectorKey)
 		}
 
-		if netConfig.Ipam.Subnet != "" {
-			cephNetworks = append(cephNetworks, configOverride("global", fmt.Sprintf("%s_network", selectorKey), netConfig.Ipam.Subnet))
+		networkRange := getNetworkRange(netConfig)
+		if networkRange != "" {
+			cephNetworks = append(cephNetworks, configOverride("global", fmt.Sprintf("%s_network", selectorKey), networkRange))
 		} else {
 			return []Option{}, errors.Errorf("empty subnet from network attachment definition %q", networkSelectors[selectorKey])
 		}
 	}
 
 	return cephNetworks, nil
+}
+
+func GetMultusNamespace(nad string) (string, string) {
+	tmp := strings.Split(nad, "/")
+	if len(tmp) == 2 {
+		return tmp[0], tmp[1]
+	}
+	return "", nad
+}
+
+func getNetworkRange(netConfig k8sutil.NetworkAttachmentConfig) string {
+	if netConfig.Ipam.Subnet != "" {
+		return netConfig.Ipam.Subnet
+	} else if netConfig.Ipam.Range != "" && netConfig.Ipam.Type == WhereaboutsIpamType {
+		return netConfig.Ipam.Range
+	}
+	return ""
 }

@@ -19,7 +19,6 @@ package cluster
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -29,6 +28,8 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/agent/flexvolume/attachment"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/daemon/ceph/osd/kms"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
@@ -41,7 +42,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -52,30 +52,24 @@ import (
 
 const (
 	controllerName           = "ceph-cluster-controller"
-	crushConfigMapName       = "rook-crush-config"
-	crushmapCreatedKey       = "initialCrushMapCreated"
 	enableFlexDriver         = "ROOK_ENABLE_FLEX_DRIVER"
 	detectCephVersionTimeout = 15 * time.Minute
 )
 
 const (
 	// DefaultClusterName states the default name of the rook-cluster if not provided.
-	DefaultClusterName         = "rook-ceph"
-	clusterDeleteRetryInterval = 2 // seconds
-	clusterDeleteMaxRetries    = 15
-	disableHotplugEnv          = "ROOK_DISABLE_DEVICE_HOTPLUG"
-	minStoreResyncPeriod       = 10 * time.Hour // the minimum duration for forced Store resyncs.
+	DefaultClusterName = "rook-ceph"
+	disableHotplugEnv  = "ROOK_DISABLE_DEVICE_HOTPLUG"
 )
 
 var (
-	logger        = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
-	finalizerName = fmt.Sprintf("%s.%s", opcontroller.ClusterResource.Name, opcontroller.ClusterResource.Group)
+	logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 	// disallowedHostDirectories directories which are not allowed to be used
 	disallowedHostDirectories = []string{"/etc/ceph", "/rook", "/var/log/ceph"}
 )
 
 // List of object resources to watch by the controller
-var objectsToWatch = []runtime.Object{
+var objectsToWatch = []client.Object{
 	&appsv1.Deployment{TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: appsv1.SchemeGroupVersion.String()}},
 	&corev1.Service{TypeMeta: metav1.TypeMeta{Kind: "Service", APIVersion: corev1.SchemeGroupVersion.String()}},
 	&corev1.Secret{TypeMeta: metav1.TypeMeta{Kind: "Secret", APIVersion: corev1.SchemeGroupVersion.String()}},
@@ -97,7 +91,6 @@ type ClusterController struct {
 	operatorConfigCallbacks []func() error
 	addClusterCallbacks     []func() error
 	csiConfigMutex          *sync.Mutex
-	nodeStore               cache.Store
 	osdChecker              *osd.OSDHealthMonitor
 	client                  client.Client
 	namespacedName          types.NamespacedName
@@ -113,20 +106,22 @@ type ReconcileCephCluster struct {
 
 // Add creates a new CephCluster Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
-func Add(mgr manager.Manager, context *clusterd.Context, clusterController *ClusterController) error {
-	return add(mgr, newReconciler(mgr, context, clusterController), context)
+func Add(mgr manager.Manager, ctx *clusterd.Context, clusterController *ClusterController) error {
+	return add(mgr, newReconciler(mgr, ctx, clusterController), ctx)
 }
 
 // newReconciler returns a new reconcile.Reconciler
-func newReconciler(mgr manager.Manager, context *clusterd.Context, clusterController *ClusterController) reconcile.Reconciler {
+func newReconciler(mgr manager.Manager, ctx *clusterd.Context, clusterController *ClusterController) reconcile.Reconciler {
 	// Add the cephv1 scheme to the manager scheme so that the controller knows about it
 	mgrScheme := mgr.GetScheme()
-	cephv1.AddToScheme(mgr.GetScheme())
+	if err := cephv1.AddToScheme(mgr.GetScheme()); err != nil {
+		panic(err)
+	}
 
 	return &ReconcileCephCluster{
 		client:            mgr.GetClient(),
 		scheme:            mgrScheme,
-		context:           context,
+		context:           ctx,
 		clusterController: clusterController,
 	}
 }
@@ -147,7 +142,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler, context *clusterd.Context)
 			},
 		},
 		&handler.EnqueueRequestForObject{},
-		opcontroller.WatchControllerPredicate())
+		watchControllerPredicate(context))
 	if err != nil {
 		return err
 	}
@@ -170,7 +165,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler, context *clusterd.Context)
 
 	// Build Handler function to return the list of ceph clusters
 	// This is used by the watchers below
-	handerFunc, err := opcontroller.ObjectToCRMapper(mgr.GetClient(), &cephv1.CephClusterList{}, mgr.GetScheme())
+	handlerFunc, err := opcontroller.ObjectToCRMapper(mgr.GetClient(), &cephv1.CephClusterList{}, mgr.GetScheme())
 	if err != nil {
 		return err
 	}
@@ -185,7 +180,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler, context *clusterd.Context)
 				},
 			},
 		},
-		&handler.EnqueueRequestsFromMapFunc{ToRequests: handerFunc},
+		handler.EnqueueRequestsFromMapFunc(handlerFunc),
 		predicateForNodeWatcher(mgr.GetClient(), context))
 	if err != nil {
 		return err
@@ -205,7 +200,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler, context *clusterd.Context)
 					},
 				},
 			},
-			&handler.EnqueueRequestsFromMapFunc{ToRequests: handerFunc},
+			handler.EnqueueRequestsFromMapFunc(handlerFunc),
 			predicateForHotPlugCMWatcher(mgr.GetClient()))
 		if err != nil {
 			return err
@@ -221,8 +216,8 @@ func add(mgr manager.Manager, r reconcile.Reconciler, context *clusterd.Context)
 // and what is in the cephCluster.Spec
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCephCluster) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	// workaround because the rook logging mechanism is not compatible with the controller-runtime loggin interface
+func (r *ReconcileCephCluster) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
+	// workaround because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	reconcileResponse, err := r.reconcile(request)
 	if err != nil {
 		logger.Errorf("failed to reconcile. %v", err)
@@ -368,27 +363,51 @@ func (c *ClusterController) requestClusterDelete(cluster *cephv1.CephCluster) (r
 
 	logger.Infof("delete event for cluster %q in namespace %q", cluster.Name, cluster.Namespace)
 
-	if cluster, ok := c.clusterMap[cluster.Namespace]; ok && !cluster.closedStopCh {
-		// close the goroutines watching the health of the cluster (mons, osds, ceph status, etc)
-		close(cluster.stopCh)
-		cluster.closedStopCh = true
-	}
-
-	err := c.checkIfVolumesExist(cluster)
-	if err != nil {
-		config.ConditionExport(c.context, c.namespacedName, cephv1.ConditionDeleting, v1.ConditionTrue, "ClusterDeleting", "Failed to delete cluster")
-		logger.Errorf("cannot delete cluster. %v", err)
-		return opcontroller.WaitForRequeueIfFinalizerBlocked, false
-	}
-
 	if cluster, ok := c.clusterMap[cluster.Namespace]; ok {
-		delete(c.clusterMap, cluster.Namespace)
+		// if not already stopped, stop clientcontroller and bucketController
+		if !cluster.closedStopCh {
+			close(cluster.stopCh)
+			cluster.closedStopCh = true
+		}
+
+		// close the goroutines watching the health of the cluster (mons, osds, ceph status)
+		for _, daemon := range monitorDaemonList {
+			if monitoring, ok := cluster.monitoringChannels[daemon]; ok && monitoring.monitoringRunning {
+				close(cluster.monitoringChannels[daemon].stopChan)
+				cluster.monitoringChannels[daemon].monitoringRunning = false
+			}
+		}
+	}
+
+	if cluster.Spec.CleanupPolicy.AllowUninstallWithVolumes {
+		logger.Info("skipping check for existing PVs as allowUninstallWithVolumes is set to true")
+	} else {
+		err := c.checkIfVolumesExist(cluster)
+		if err != nil {
+			config.ConditionExport(c.context, c.namespacedName, cephv1.ConditionDeleting, v1.ConditionTrue, "ClusterDeleting", "Failed to delete cluster")
+			logger.Errorf("failed to check if volumes exist. %v", err)
+			return opcontroller.WaitForRequeueIfFinalizerBlocked, false
+		}
 	}
 
 	// Only valid when the cluster is not external
 	if cluster.Spec.External.Enable {
 		purgeExternalCluster(c.context.Clientset, cluster.Namespace)
 		return reconcile.Result{}, true
+	}
+
+	// If the StorageClass retain policy of an encrypted cluster with KMS is Delete we also delete the keys
+	if cluster.Spec.Storage.IsOnPVCEncrypted() && cluster.Spec.Security.KeyManagementService.IsEnabled() {
+		// Delete keys from KMS
+		err := c.deleteOSDEncryptionKeyFromKMS(cluster)
+		if err != nil {
+			logger.Errorf("failed to delete osd encryption keys from kms. %v", err)
+			return reconcile.Result{}, true
+		}
+	}
+
+	if cluster, ok := c.clusterMap[cluster.Namespace]; ok {
+		delete(c.clusterMap, cluster.Namespace)
 	}
 
 	return reconcile.Result{}, true
@@ -456,7 +475,8 @@ func (c *ClusterController) csiVolumesAllowForDeletion(cluster *cephv1.CephClust
 }
 
 func (c *ClusterController) checkPVPresentInCluster(drivers []string, clusterID string) (bool, error) {
-	pv, err := c.context.Clientset.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
+	ctx := context.TODO()
+	pv, err := c.context.Clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return false, errors.Wrapf(err, "failed to list PV")
 	}
@@ -515,6 +535,42 @@ func removeFinalizer(client client.Client, name types.NamespacedName) error {
 	err = opcontroller.RemoveFinalizer(client, cephCluster)
 	if err != nil {
 		return errors.Wrap(err, "failed to remove finalizer")
+	}
+
+	return nil
+}
+
+func (c *ClusterController) deleteOSDEncryptionKeyFromKMS(currentCluster *cephv1.CephCluster) error {
+	// If the operator was stopped and we enter this code, the map is empty
+	if _, ok := c.clusterMap[currentCluster.Namespace]; !ok {
+		c.clusterMap[currentCluster.Namespace] = &cluster{ClusterInfo: &cephclient.ClusterInfo{Namespace: currentCluster.Namespace}}
+	}
+
+	// Fetch PVCs
+	osdPVCs, _, err := osd.GetExistingPVCs(c.context, currentCluster.Namespace)
+	if err != nil {
+		return errors.Wrap(err, "failed to list osd pvc")
+	}
+
+	// Initialize the KMS code
+	kmsConfig := kms.NewConfig(c.context, &currentCluster.Spec, c.clusterMap[currentCluster.Namespace].ClusterInfo)
+
+	// If token auth is used by the KMS we set it as an env variable
+	if currentCluster.Spec.Security.KeyManagementService.IsTokenAuthEnabled() {
+		err := kms.SetTokenToEnvVar(c.context, currentCluster.Spec.Security.KeyManagementService.TokenSecretName, kmsConfig.Provider, currentCluster.Namespace)
+		if err != nil {
+			return errors.Wrapf(err, "failed to fetch kms token secret %q", currentCluster.Spec.Security.KeyManagementService.TokenSecretName)
+		}
+	}
+
+	// Delete each PV KEK
+	for _, osdPVC := range osdPVCs {
+		// Generate and store the encrypted key in whatever KMS is configured
+		err = kmsConfig.DeleteSecret(osdPVC.Name)
+		if err != nil {
+			logger.Errorf("failed to delete secret. %v", err)
+			continue
+		}
 	}
 
 	return nil

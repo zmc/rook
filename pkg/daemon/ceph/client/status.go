@@ -62,10 +62,12 @@ type HealthStatus struct {
 }
 
 type CheckMessage struct {
-	Severity string `json:"severity"`
-	Summary  struct {
-		Message string `json:"message"`
-	} `json:"summary"`
+	Severity string  `json:"severity"`
+	Summary  Summary `json:"summary"`
+}
+
+type Summary struct {
+	Message string `json:"message"`
 }
 
 type MonMap struct {
@@ -142,9 +144,9 @@ type Fsmap struct {
 	UpStandby int `json:"up:standby"`
 }
 
-func Status(context *clusterd.Context, clusterName string) (CephStatus, error) {
+func Status(context *clusterd.Context, clusterInfo *ClusterInfo) (CephStatus, error) {
 	args := []string{"status"}
-	cmd := NewCephCommand(context, clusterName, args)
+	cmd := NewCephCommand(context, clusterInfo, args)
 	buf, err := cmd.Run()
 	if err != nil {
 		return CephStatus{}, errors.Wrapf(err, "failed to get status. %s", string(buf))
@@ -158,13 +160,16 @@ func Status(context *clusterd.Context, clusterName string) (CephStatus, error) {
 	return status, nil
 }
 
-func StatusWithUser(context *clusterd.Context, clusterName, userName string) (CephStatus, error) {
+func StatusWithUser(context *clusterd.Context, clusterInfo *ClusterInfo) (CephStatus, error) {
 	args := []string{"status", "--format", "json"}
-	command, args := FinalizeCephCommandArgs("ceph", args, context.ConfigDir, clusterName, userName)
+	command, args := FinalizeCephCommandArgs("ceph", clusterInfo, args, context.ConfigDir)
 
 	buf, err := context.Executor.ExecuteCommandWithOutput(command, args...)
 	if err != nil {
-		return CephStatus{}, errors.Wrapf(err, "failed to get status. %s", string(buf))
+		if buf != "" {
+			return CephStatus{}, errors.Wrapf(err, "failed to get status. %s", string(buf))
+		}
+		return CephStatus{}, errors.Wrap(err, "failed to get ceph status")
 	}
 
 	var status CephStatus
@@ -179,8 +184,8 @@ func StatusWithUser(context *clusterd.Context, clusterName, userName string) (Ce
 // msg describes the state of the PGs
 // clean is true if the cluster is clean
 // err is not nil if getting the status failed.
-func IsClusterClean(context *clusterd.Context, clusterName string) (string, bool, error) {
-	status, err := Status(context, clusterName)
+func IsClusterClean(context *clusterd.Context, clusterInfo *ClusterInfo) (string, bool, error) {
+	status, err := Status(context, clusterInfo)
 	if err != nil {
 		return "unable to get PG health", false, err
 	}
@@ -195,8 +200,8 @@ func IsClusterClean(context *clusterd.Context, clusterName string) (string, bool
 // groups are in the active+clean state). It returns nil if the cluster is clean.
 // Using IsClusterClean is recommended if you want to differentiate between a failure of the status query and
 // an unclean cluster.
-func IsClusterCleanError(context *clusterd.Context, clusterName string) error {
-	msg, clean, err := IsClusterClean(context, clusterName)
+func IsClusterCleanError(context *clusterd.Context, clusterInfo *ClusterInfo) error {
+	msg, clean, err := IsClusterClean(context, clusterInfo)
 	if err != nil {
 		return err
 	}
@@ -228,7 +233,7 @@ func isClusterClean(status CephStatus) (string, bool) {
 }
 
 // getMDSRank returns the rank of a given MDS
-func getMDSRank(status CephStatus, clusterName, fsName string) (int, error) {
+func getMDSRank(status CephStatus, fsName string) (int, error) {
 	// dummy rank
 	mdsRank := -1000
 	for r := range status.Fsmap.ByRank {
@@ -248,14 +253,14 @@ func getMDSRank(status CephStatus, clusterName, fsName string) (int, error) {
 	return mdsRank, nil
 }
 
-// MdsActiveOrStandbyReplay returns wether a given MDS is active or in standby
-func MdsActiveOrStandbyReplay(context *clusterd.Context, clusterName, fsName string) error {
-	status, err := Status(context, clusterName)
+// MdsActiveOrStandbyReplay returns whether a given MDS is active or in standby
+func MdsActiveOrStandbyReplay(context *clusterd.Context, clusterInfo *ClusterInfo, fsName string) error {
+	status, err := Status(context, clusterInfo)
 	if err != nil {
 		return errors.Wrap(err, "failed to get ceph status")
 	}
 
-	mdsRank, err := getMDSRank(status, clusterName, fsName)
+	mdsRank, err := getMDSRank(status, fsName)
 	if err != nil {
 		return errors.Cause(err)
 	}
@@ -276,8 +281,8 @@ func MdsActiveOrStandbyReplay(context *clusterd.Context, clusterName, fsName str
 
 // IsCephHealthy verifies Ceph is healthy, useful when performing an upgrade
 // check if it's a minor or major upgrade... too!
-func IsCephHealthy(context *clusterd.Context, clusterName string) bool {
-	cephStatus, err := Status(context, clusterName)
+func IsCephHealthy(context *clusterd.Context, clusterInfo *ClusterInfo) bool {
+	cephStatus, err := Status(context, clusterInfo)
 	if err != nil {
 		logger.Errorf("failed to detect if Ceph is healthy. failed to get ceph status. %v", err)
 		return false

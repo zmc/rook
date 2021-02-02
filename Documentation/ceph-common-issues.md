@@ -1,6 +1,6 @@
 ---
-title: Ceph Common Issues
-weight: 10600
+title: Common Issues
+weight: 11120
 indent: true
 ---
 
@@ -27,6 +27,9 @@ If after trying the suggestions found on this page and the problem is not resolv
 * [Flex storage class versus Ceph CSI storage class](#flex-storage-class-versus-ceph-csi-storage-class)
 * [A worker node using RBD devices hangs up](#a-worker-node-using-rbd-devices-hangs-up)
 * [Too few PGs per OSD warning is shown](#too-few-pgs-per-osd-warning-is-shown)
+* [LVM metadata can be corrupted with OSD on LV-backed PVC](#lvm-metadata-can-be-corrupted-with-osd-on-lv-backed-pvc)
+* [OSD prepare job fails due to low aio-max-nr setting](#osd-prepare-job-fails-due-to-low-aio-max-nr-setting)
+* [Failed to create CRDs](#failed-to-create-crds)
 
 ## Troubleshooting Techniques
 
@@ -582,7 +585,7 @@ $ kubectl -n rook-ceph delete pod -l app=rook-ceph-operator
 
 ## Node hangs after reboot
 
-This issue is fixed in `cephcsi:v2.0.1` and newer.
+This issue is fixed in Rook v1.3 or later.
 
 ### Symptoms
 
@@ -721,7 +724,7 @@ Let's say you want to enable logging for `mon.a`, but only for this daemon.
 Using the toolbox or from inside the operator run:
 
 ```console
-ceph config daemon mon.a log_to_file true
+ceph config set mon.a log_to_file true
 ```
 
 This will activate logging on the filesystem, you will be able to find logs in `dataDirHostPath/$NAMESPACE/log`, so typically this would mean `/var/lib/rook/rook-ceph/log`.
@@ -754,7 +757,7 @@ Also, if you are in the need of specific features and wonder if CSI is capable o
 
 ### Investigation
 
-This hapens when the following conditions are satisfied.
+This happens when the following conditions are satisfied.
 
 - The problematic RBD device and the corresponding OSDs are co-located.
 - There is an XFS filesystem on top of this device.
@@ -800,3 +803,41 @@ You can bypass this problem by using ext4 or any other filesystems rather than X
 The meaning of this warning is written in [the document](https://docs.ceph.com/docs/master/rados/operations/health-checks#too-few-pgs).
 However, in many cases it is benign. For more information, please see [the blog entry](http://ceph.com/community/new-luminous-pg-overdose-protection/).
 Please refer to [Configuring Pools](ceph-advanced-configuration.md#configuring-pools) if you want to know the proper `pg_num` of pools and change these values.
+
+## LVM metadata can be corrupted with OSD on LV-backed PVC
+
+### Symptoms
+
+There is a critical flaw in OSD on LV-backed PVC. LVM metadata can be corrupted if both the host and OSD container modify it simultaneously. For example, the administrator might modify it on the host, while the OSD initialization process in a container could modify it too. In addition, if `lvmetad` is running, the possibility of occurrence gets higher. In this case, the change of LVM metadata in OSD container is not reflected to LVM metadata cache in host for a while.
+
+If you still decide to configure an OSD on LVM, please keep the following in mind to reduce the probability of this issue.
+
+### Solution
+
+- Disable `lvmetad.`
+- Avoid configuration of LVs from the host. In addition, don't touch the VGs and physical volumes that back these LVs.
+- Avoid incrementing the `count` field of `storageClassDeviceSets` and create a new LV that backs an OSD simultaneously.
+
+You can know whether the above-mentioned tag exists with the command: `sudo lvs -o lv_name,lv_tags`. If the `lv_tag` field is empty in an LV corresponding to the OSD lv_tags, this OSD encountered the problem. In this case, please [retire this OSD](ceph-osd-mgmt.md#remove-an-osd) or replace with other new OSD before restarting.
+
+This problem doesn't happen in newly created LV-backed PVCs because OSD container doesn't modify LVM metadata anymore. The existing lvm mode OSDs work continuously even thought upgrade your Rook. However, using the raw mode OSDs is recommended because of the above-mentioned problem. You can replace the existing OSDs with raw mode OSDs by retiring them and adding new OSDs one by one. See the documents [Remove an OSD](ceph-osd-mgmt.md#remove-an-osd) and [Add an OSD on a PVC](ceph-osd-mgmt.md#add-an-osd-on-a-pvc).
+
+## OSD prepare job fails due to low aio-max-nr setting
+
+If the Kernel is configured with a low [aio-max-nr setting](https://www.kernel.org/doc/Documentation/sysctl/fs.txt), the OSD prepare job might fail with the following error:
+
+```text
+exec: stderr: 2020-09-17T00:30:12.145+0000 7f0c17632f40 -1 bdev(0x56212de88700 /var/lib/ceph/osd/ceph-0//block) _aio_start io_setup(2) failed with EAGAIN; try increasing /proc/sys/fs/aio-max-nr
+```
+
+To overcome this, you need to increase the value of `fs.aio-max-nr` of your sysctl configuration (typically `/etc/sysctl.conf`).
+You can do this with your favorite configuration management system.
+
+Alternatively, you can have a [DaemonSet](https://github.com/rook/rook/issues/6279#issuecomment-694390514) to apply the configuration for you on all your nodes.
+
+## Failed to create CRDs
+If you are using Kubernetes version is v1.15 or older, you will see an error like this:
+```
+unable to recognize "STDIN": no matches for kind "CustomResourceDefinition" in version "apiextensions.k8s.io/v1"
+```
+You need to create the CRDs found in `cluster/examples/kubernetes/ceph/pre-k8s-1.16`. Note that these pre-1.16 `apiextensions.k8s.io/v1beta1` CRDs are deprecated in k8s v1.16 and will no longer be supported from k8s v1.22.

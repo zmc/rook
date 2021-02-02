@@ -17,18 +17,21 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	testop "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestStore(t *testing.T) {
+	ctxt := context.TODO()
 	clientset := testop.New(t, 1)
 	ctx := &clusterd.Context{
 		Clientset: clientset,
@@ -38,8 +41,8 @@ func TestStore(t *testing.T) {
 
 	s := GetStore(ctx, ns, &owner)
 
-	assertConfigStore := func(ci *cephconfig.ClusterInfo) {
-		sec, e := clientset.CoreV1().Secrets(ns).Get(StoreName, metav1.GetOptions{})
+	assertConfigStore := func(ci *cephclient.ClusterInfo) {
+		sec, e := clientset.CoreV1().Secrets(ns).Get(ctxt, StoreName, metav1.GetOptions{})
 		assert.NoError(t, e)
 		mh := strings.Split(sec.StringData["mon_host"], ",")                    // list of mon ip:port pairs in cluster
 		assert.Equal(t, len(ci.Monitors)*2, len(mh), ci.Monitors["a"].Endpoint) // we need to pass x2 since we split on "," above and that returns msgr1 and msgr2 addresses
@@ -60,13 +63,15 @@ func TestStore(t *testing.T) {
 		}
 	}
 
-	i1 := testop.CreateConfigDir(1) // cluster w/ one mon
-	i3 := testop.CreateConfigDir(3) // same cluster w/ 3 mons
+	i1 := clienttest.CreateTestClusterInfo(1) // cluster w/ one mon
+	i3 := clienttest.CreateTestClusterInfo(3) // same cluster w/ 3 mons
 
-	s.CreateOrUpdate(i1)
+	err := s.CreateOrUpdate(i1)
+	assert.NoError(t, err)
 	assertConfigStore(i1)
 
-	s.CreateOrUpdate(i3)
+	err = s.CreateOrUpdate(i3)
+	assert.NoError(t, err)
 	assertConfigStore(i3)
 }
 
@@ -79,7 +84,8 @@ func TestEnvVarsAndFlags(t *testing.T) {
 	owner := metav1.OwnerReference{}
 
 	s := GetStore(ctx, ns, &owner)
-	s.CreateOrUpdate(testop.CreateConfigDir(3))
+	err := s.CreateOrUpdate(clienttest.CreateTestClusterInfo(3))
+	assert.NoError(t, err)
 
 	v := StoredMonHostEnvVars()
 	f := StoredMonHostEnvVarFlags()

@@ -16,6 +16,7 @@ limitations under the License.
 package ceph
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -25,7 +26,7 @@ import (
 	"time"
 
 	"github.com/rook/rook/pkg/clusterd"
-	cephtest "github.com/rook/rook/pkg/daemon/ceph/test"
+	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -68,7 +69,8 @@ func TestInitLoadRBDModSingleMajor(t *testing.T) {
 	context := &clusterd.Context{
 		Executor: executor,
 	}
-	NewVolumeManager(context)
+	_, err := NewVolumeManager(context)
+	assert.NoError(t, err)
 	assert.True(t, modInfoCalled)
 	assert.True(t, modprobeCalled)
 }
@@ -96,12 +98,14 @@ func TestInitLoadRBDModNoSingleMajor(t *testing.T) {
 	context := &clusterd.Context{
 		Executor: executor,
 	}
-	NewVolumeManager(context)
+	_, err := NewVolumeManager(context)
+	assert.NoError(t, err)
 	assert.True(t, modInfoCalled)
 	assert.True(t, modprobeCalled)
 }
 
 func TestAttach(t *testing.T) {
+	ctx := context.TODO()
 	clientset := test.New(t, 3)
 	clusterNamespace := "testCluster"
 	configDir, _ := ioutil.TempDir("", "")
@@ -112,14 +116,15 @@ func TestAttach(t *testing.T) {
 		},
 	}
 	cm.Name = "rook-ceph-mon-endpoints"
-	clientset.CoreV1().ConfigMaps(clusterNamespace).Create(cm)
+	_, err := clientset.CoreV1().ConfigMaps(clusterNamespace).Create(ctx, cm, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	runCount := 1
 
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if strings.Contains(command, "ceph-authtool") {
-				err := cephtest.CreateConfigDir(path.Join(configDir, clusterNamespace))
+				err := clienttest.CreateConfigDir(path.Join(configDir, clusterNamespace))
 				assert.Nil(t, err)
 			}
 			return "", nil
@@ -155,8 +160,8 @@ func TestAttach(t *testing.T) {
 			called:   0,
 		},
 	}
-	mon.CreateOrLoadClusterInfo(context, clusterNamespace, &metav1.OwnerReference{})
-
+	_, _, _, err = mon.CreateOrLoadClusterInfo(context, clusterNamespace, &metav1.OwnerReference{})
+	assert.NoError(t, err)
 	devicePath, err := vm.Attach("image1", "testpool", "admin", "never-gonna-give-you-up", clusterNamespace)
 	assert.Equal(t, "/dev/rbd3", devicePath)
 	assert.Nil(t, err)
@@ -188,6 +193,7 @@ func TestAttachAlreadyExists(t *testing.T) {
 }
 
 func TestDetach(t *testing.T) {
+	ctx := context.TODO()
 	clientset := test.New(t, 3)
 	clusterNamespace := "testCluster"
 	configDir, _ := ioutil.TempDir("", "")
@@ -198,12 +204,13 @@ func TestDetach(t *testing.T) {
 		},
 	}
 	cm.Name = "rook-ceph-mon-endpoints"
-	clientset.CoreV1().ConfigMaps(clusterNamespace).Create(cm)
+	_, err := clientset.CoreV1().ConfigMaps(clusterNamespace).Create(ctx, cm, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if strings.Contains(command, "ceph-authtool") {
-				err := cephtest.CreateConfigDir(path.Join(configDir, clusterNamespace))
+				err := clienttest.CreateConfigDir(path.Join(configDir, clusterNamespace))
 				assert.Nil(t, err)
 			}
 			return "", nil
@@ -234,12 +241,14 @@ func TestDetach(t *testing.T) {
 			called:   0,
 		},
 	}
-	mon.CreateOrLoadClusterInfo(context, clusterNamespace, &metav1.OwnerReference{})
-	err := vm.Detach("image1", "testpool", "admin", "", clusterNamespace, false)
+	_, _, _, err = mon.CreateOrLoadClusterInfo(context, clusterNamespace, &metav1.OwnerReference{})
+	assert.NoError(t, err)
+	err = vm.Detach("image1", "testpool", "admin", "", clusterNamespace, false)
 	assert.Nil(t, err)
 }
 
 func TestDetachCustomKeyring(t *testing.T) {
+	ctx := context.TODO()
 	clientset := test.New(t, 3)
 	clusterNamespace := "testCluster"
 	configDir, _ := ioutil.TempDir("", "")
@@ -250,12 +259,13 @@ func TestDetachCustomKeyring(t *testing.T) {
 		},
 	}
 	cm.Name = "rook-ceph-mon-endpoints"
-	clientset.CoreV1().ConfigMaps(clusterNamespace).Create(cm)
+	_, err := clientset.CoreV1().ConfigMaps(clusterNamespace).Create(ctx, cm, metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if strings.Contains(command, "ceph-authtool") {
-				err := cephtest.CreateConfigDir(path.Join(configDir, clusterNamespace))
+				err := clienttest.CreateConfigDir(path.Join(configDir, clusterNamespace))
 				assert.Nil(t, err)
 			}
 			return "", nil
@@ -286,8 +296,9 @@ func TestDetachCustomKeyring(t *testing.T) {
 			called:   0,
 		},
 	}
-	mon.CreateOrLoadClusterInfo(context, clusterNamespace, &metav1.OwnerReference{})
-	err := vm.Detach("image1", "testpool", "user1", "", clusterNamespace, false)
+	_, _, _, err = mon.CreateOrLoadClusterInfo(context, clusterNamespace, &metav1.OwnerReference{})
+	assert.NoError(t, err)
+	err = vm.Detach("image1", "testpool", "user1", "", clusterNamespace, false)
 	assert.Nil(t, err)
 }
 

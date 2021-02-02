@@ -47,8 +47,8 @@ func ConditionExport(context *clusterd.Context, namespaceName types.NamespacedNa
 
 // setCondition updates the conditions of the cluster custom resource
 func setCondition(c *clusterd.Context, namespaceName types.NamespacedName, newCondition cephv1.Condition) {
-	cluster := &cephv1.CephCluster{}
-	err := c.Client.Get(context.TODO(), namespaceName, cluster)
+	ctx := context.TODO()
+	cluster, err := c.RookClientset.CephV1().CephClusters(namespaceName.Namespace).Get(ctx, namespaceName.Name, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Errorf("no CephCluster could not be found. %+v", err)
@@ -86,10 +86,10 @@ func setCondition(c *clusterd.Context, namespaceName types.NamespacedName, newCo
 			cluster.Status.State = state
 		}
 		cluster.Status.Message = newCondition.Message
-		logger.Infof("CephCluster %q status: %q. %q", namespaceName.Namespace, cluster.Status.Phase, cluster.Status.Message)
+		logger.Debugf("CephCluster %q status: %q. %q", namespaceName.Namespace, cluster.Status.Phase, cluster.Status.Message)
 	}
 
-	err = c.Client.Update(context.TODO(), cluster)
+	err = c.Client.Status().Update(context.TODO(), cluster)
 	if err != nil {
 		logger.Errorf("failed to update cluster condition to %+v. %v", newCondition, err)
 	}
@@ -146,6 +146,7 @@ func checkConditionFalse(context *clusterd.Context, namespaceName types.Namespac
 		reason = "UpgradeCompleted"
 		message = "Cluster upgrading is completed"
 	} else {
+		tempCondition = cephv1.ConditionProgressing
 		reason = "ProgressingCompleted"
 		message = "Cluster progression is completed"
 	}

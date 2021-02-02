@@ -27,7 +27,7 @@ import (
 )
 
 // StartOperatorSettingsWatch starts the operator settings watcher
-func (c *ClusterController) StartOperatorSettingsWatch(namespace string, stopCh chan struct{}) {
+func (c *ClusterController) StartOperatorSettingsWatch(stopCh chan struct{}) {
 	operatorNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
 	// watch for "rook-ceph-operator-config" ConfigMap
 	k8sutil.StartOperatorSettingsWatch(c.context, operatorNamespace, opcontroller.OperatorSettingConfigMapName,
@@ -37,14 +37,17 @@ func (c *ClusterController) StartOperatorSettingsWatch(namespace string, stopCh 
 				return
 			}
 			c.operatorConfigChange(newObj)
-			return
 		}, nil, stopCh)
 }
 
 // StopWatch stop watchers
 func (c *ClusterController) StopWatch() {
 	for _, cluster := range c.clusterMap {
-		close(cluster.stopCh)
+		// check channel is open before closing
+		if !cluster.closedStopCh {
+			close(cluster.stopCh)
+			cluster.closedStopCh = true
+		}
 	}
 	c.clusterMap = make(map[string]*cluster)
 }
@@ -62,5 +65,4 @@ func (c *ClusterController) operatorConfigChange(obj interface{}) {
 			logger.Errorf("%v", err)
 		}
 	}
-	return
 }

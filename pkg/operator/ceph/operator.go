@@ -18,6 +18,7 @@ limitations under the License.
 package operator
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -38,7 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/sig-storage-lib-external-provisioner/controller"
+	"sigs.k8s.io/sig-storage-lib-external-provisioner/v6/controller"
 )
 
 // volume provisioner constant
@@ -113,13 +114,26 @@ func (o *Operator) Run() error {
 		return errors.Errorf("rook operator namespace is not provided. expose it via downward API in the rook operator manifest file using environment variable %q", k8sutil.PodNamespaceEnvVar)
 	}
 
+	// creating a context
+	stopContext, stopFunc := context.WithCancel(context.Background())
+	defer stopFunc()
+
+	rookDiscover := discover.New(o.context.Clientset)
 	if EnableDiscoveryDaemon {
-		rookDiscover := discover.New(o.context.Clientset)
 		if err := rookDiscover.Start(o.operatorNamespace, o.rookImage, o.securityAccount, true); err != nil {
 			return errors.Wrap(err, "failed to start device discovery daemonset")
 		}
+	} else {
+		if err := rookDiscover.Stop(stopContext, o.operatorNamespace); err != nil {
+			return errors.Wrap(err, "failed to stop device discovery daemonset")
+		}
 	}
 
+	logger.Debug("checking for admission controller secrets")
+	err := StartControllerIfSecretPresent(stopContext, o.context, o.rookImage)
+	if err != nil {
+		return errors.Wrap(err, "failed to start webhook")
+	}
 	serverVersion, err := o.context.Clientset.Discovery().ServerVersion()
 	if err != nil {
 		return errors.Wrap(err, "failed to get server version")
@@ -140,7 +154,7 @@ func (o *Operator) Run() error {
 				volumeProvisioner,
 				serverVersion.GitVersion,
 			)
-			go pc.Run(stopChan)
+			go pc.Run(stopContext)
 			logger.Infof("rook-provisioner %q started using %q flex vendor dir", name, vendor)
 		}
 	}
@@ -156,10 +170,10 @@ func (o *Operator) Run() error {
 
 	// Start the controller-runtime Manager.
 	mgrErrorChan := make(chan error)
-	go o.startManager(namespaceToWatch, stopChan, mgrErrorChan)
+	go o.startManager(namespaceToWatch, stopContext, mgrErrorChan)
 
 	// Start the operator setting watcher
-	go o.clusterController.StartOperatorSettingsWatch(namespaceToWatch, stopChan)
+	go o.clusterController.StartOperatorSettingsWatch(stopChan)
 
 	// Signal handler to stop the operator
 	for {
@@ -218,13 +232,8 @@ func (o *Operator) updateDrivers() error {
 		return errors.Wrap(err, "failed to configure CSI parameters")
 	}
 
-	if !csi.CSIEnabled() {
-		logger.Infof("CSI driver is not enabled")
-		return nil
-	}
-
-	if serverVersion.Major < csi.KubeMinMajor || serverVersion.Major == csi.KubeMinMajor && serverVersion.Minor < csi.KubeMinMinor {
-		logger.Infof("CSI drivers only supported in K8s 1.13 or newer. version=%s", serverVersion.String())
+	if serverVersion.Major < csi.KubeMinMajor || serverVersion.Major == csi.KubeMinMajor && serverVersion.Minor < csi.ProvDeploymentSuppVersion {
+		logger.Infof("CSI drivers only supported in K8s 1.14 or newer. version=%s", serverVersion.String())
 		// disable csi control variables to disable other csi functions
 		csi.EnableRBD = false
 		csi.EnableCephFS = false
@@ -251,27 +260,29 @@ func (o *Operator) updateDrivers() error {
 		return errors.Wrap(err, "invalid csi params")
 	}
 
-	go csi.ValidateAndStartDrivers(o.context.Clientset, o.operatorNamespace, o.rookImage, o.securityAccount, serverVersion, ownerRef)
+	go csi.ValidateAndConfigureDrivers(o.context, o.operatorNamespace, o.rookImage, o.securityAccount, serverVersion, ownerRef)
 	return nil
 }
 
 // getDeploymentOwnerReference returns an OwnerReference to the rook-ceph-operator deployment
 func getDeploymentOwnerReference(clientset kubernetes.Interface, namespace string) (*metav1.OwnerReference, error) {
+	ctx := context.TODO()
 	var deploymentRef *metav1.OwnerReference
 	podName := os.Getenv(k8sutil.PodNameEnvVar)
-	pod, err := clientset.CoreV1().Pods(namespace).Get(podName, metav1.GetOptions{})
+	pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not find pod %q to find deployment owner reference", podName)
 	}
 	for _, podOwner := range pod.OwnerReferences {
 		if podOwner.Kind == "ReplicaSet" {
-			replicaset, err := clientset.AppsV1().ReplicaSets(namespace).Get(podOwner.Name, metav1.GetOptions{})
+			replicaset, err := clientset.AppsV1().ReplicaSets(namespace).Get(ctx, podOwner.Name, metav1.GetOptions{})
 			if err != nil {
 				return nil, errors.Wrapf(err, "could not find replicaset %q to find deployment owner reference", podOwner.Name)
 			}
 			for _, replicasetOwner := range replicaset.OwnerReferences {
 				if replicasetOwner.Kind == "Deployment" {
-					deploymentRef = &replicasetOwner
+					localreplicasetOwner := replicasetOwner
+					deploymentRef = &localreplicasetOwner
 				}
 			}
 		}

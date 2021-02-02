@@ -17,11 +17,13 @@ limitations under the License.
 package keyring
 
 import (
+	"context"
 	"path"
 	"testing"
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -48,7 +50,7 @@ func TestGenerateKey(t *testing.T) {
 	}
 	ns := "rook-ceph"
 	owner := metav1.OwnerReference{}
-	s := GetSecretStore(ctx, ns, &owner)
+	s := GetSecretStore(ctx, &client.ClusterInfo{Namespace: ns}, &owner)
 
 	generateKey = "generatedsecretkey"
 	failGenerateKey = false
@@ -70,16 +72,17 @@ func TestGenerateKey(t *testing.T) {
 }
 
 func TestKeyringStore(t *testing.T) {
+	ctxt := context.TODO()
 	clientset := testop.New(t, 1)
 	ctx := &clusterd.Context{
 		Clientset: clientset,
 	}
-	ns := "rook-ceph"
 	owner := metav1.OwnerReference{}
-	k := GetSecretStore(ctx, ns, &owner)
+	ns := "rook-ceph"
+	k := GetSecretStore(ctx, &client.ClusterInfo{Namespace: ns}, &owner)
 
 	assertKeyringData := func(keyringName, expectedKeyring string) {
-		s, e := clientset.CoreV1().Secrets(ns).Get(keyringName, metav1.GetOptions{})
+		s, e := clientset.CoreV1().Secrets(ns).Get(ctxt, keyringName, metav1.GetOptions{})
 		assert.NoError(t, e)
 		assert.Equal(t, 1, len(s.StringData))
 		assert.Equal(t, expectedKeyring, s.StringData["keyring"])
@@ -87,26 +90,30 @@ func TestKeyringStore(t *testing.T) {
 	}
 
 	assertDoesNotExist := func(keyringName string) {
-		_, e := clientset.CoreV1().Secrets(ns).Get(keyringName, metav1.GetOptions{})
+		_, e := clientset.CoreV1().Secrets(ns).Get(ctxt, keyringName, metav1.GetOptions{})
 		assert.True(t, kerrors.IsNotFound(e))
 	}
 
 	// create first key
-	k.CreateOrUpdate("test-resource", "qwertyuiop")
+	err := k.CreateOrUpdate("test-resource", "qwertyuiop")
+	assert.NoError(t, err)
 	assertKeyringData("test-resource-keyring", "qwertyuiop")
 
 	// create second key
-	k.CreateOrUpdate("second-resource", "asdfghjkl")
+	err = k.CreateOrUpdate("second-resource", "asdfghjkl")
+	assert.NoError(t, err)
 	assertKeyringData("test-resource-keyring", "qwertyuiop")
 	assertKeyringData("second-resource-keyring", "asdfghjkl")
 
 	// update a key
-	k.CreateOrUpdate("second-resource", "lkjhgfdsa")
+	err = k.CreateOrUpdate("second-resource", "lkjhgfdsa")
+	assert.NoError(t, err)
 	assertKeyringData("test-resource-keyring", "qwertyuiop")
 	assertKeyringData("second-resource-keyring", "lkjhgfdsa")
 
 	// delete a key
-	k.Delete("test-resource")
+	err = k.Delete("test-resource")
+	assert.NoError(t, err)
 	assertDoesNotExist("test-resource-keyring")
 	assertKeyringData("second-resource-keyring", "lkjhgfdsa")
 }
@@ -116,11 +123,12 @@ func TestResourceVolumeAndMount(t *testing.T) {
 	ctx := &clusterd.Context{
 		Clientset: clientset,
 	}
-	ns := "rook-ceph"
 	owner := metav1.OwnerReference{}
-	k := GetSecretStore(ctx, ns, &owner)
-	k.CreateOrUpdate("test-resource", "qwertyuiop")
-	k.CreateOrUpdate("second-resource", "asdfgyhujkl")
+	k := GetSecretStore(ctx, &client.ClusterInfo{Namespace: "ns"}, &owner)
+	err := k.CreateOrUpdate("test-resource", "qwertyuiop")
+	assert.NoError(t, err)
+	err = k.CreateOrUpdate("second-resource", "asdfgyhujkl")
+	assert.NoError(t, err)
 
 	v := Volume().Resource("test-resource")
 	m := VolumeMount().Resource("test-resource")

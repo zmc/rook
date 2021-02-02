@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/pkg/errors"
 	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	yugabytedbv1alpha1 "github.com/rook/rook/pkg/apis/yugabytedb.rook.io/v1alpha1"
 	"github.com/rook/rook/pkg/clusterd"
@@ -71,7 +72,7 @@ const (
 	envPodIP                    = "POD_IP"
 	envPodIPVal                 = "status.podIP"
 	envPodNameVal               = "metadata.name"
-	yugabyteDBImageName         = "yugabytedb/yugabyte:2.0.10.0-b4"
+	yugabyteDBImageName         = "yugabytedb/yugabyte:2.2.2.0-b15"
 	podCPULimitDefault          = "2"
 	masterMemLimitDefault       = "2Gi"
 	tserverMemLimitDefault      = "4Gi"
@@ -174,22 +175,27 @@ func validateClusterSpec(spec yugabytedbv1alpha1.YBClusterSpec) error {
 		return err
 	}
 
-	if &spec.Master.VolumeClaimTemplate == nil {
+	if &spec.Master.VolumeClaimTemplate == nil { //nolint, ok to ignore this test
 		return fmt.Errorf("VolumeClaimTemplate unavailable in Master spec.")
 	}
 
-	if &spec.TServer.VolumeClaimTemplate == nil {
+	if &spec.TServer.VolumeClaimTemplate == nil { //nolint, ok to ignore this test
 		return fmt.Errorf("VolumeClaimTemplate unavailable in TServer spec.")
 	}
 
-	validateResourceSpec(spec.Master.Resource, false)
-	validateResourceSpec(spec.TServer.Resource, true)
+	if err := validateResourceSpec(spec.Master.Resource, false); err != nil {
+		return errors.Wrap(err, "failed to validate resource spec")
+	}
+
+	if err := validateResourceSpec(spec.TServer.Resource, true); err != nil {
+		return errors.Wrap(err, "failed to validate resource spec")
+	}
 
 	return nil
 }
 
 func validateResourceSpec(resourceSpec v1.ResourceRequirements, isTServer bool) error {
-	if (&resourceSpec.Requests == nil || len(resourceSpec.Requests) != 0) && (&resourceSpec.Limits == nil || len(resourceSpec.Limits) != 0) {
+	if (&resourceSpec.Requests == nil || len(resourceSpec.Requests) != 0) && (&resourceSpec.Limits == nil || len(resourceSpec.Limits) != 0) { //nolint, ok to ignore this test
 		reqCPU, reqOk := resourceSpec.Requests[v1.ResourceCPU]
 		limCPU, limOk := resourceSpec.Limits[v1.ResourceCPU]
 		podName := "Master"
@@ -373,7 +379,7 @@ func createMasterContainerCommand(namespace, serviceName string, masterCompleteN
 		"--logtostderr",
 	}
 
-	if &resources.Limits != nil {
+	if &resources.Limits != nil { //nolint, ok to ignore this test
 		if memLimit, ok := getMemoryLimitBytes(resources); ok {
 			command = append(command, fmt.Sprintf("--memory_limit_hard_bytes=%d", memLimit))
 		}
@@ -395,7 +401,7 @@ func createTServerContainerCommand(namespace, serviceName, masterServiceName str
 		"--logtostderr",
 	}
 
-	if &resources.Limits != nil {
+	if &resources.Limits != nil { //nolint, ok to ignore this test
 		if memLimit, ok := getMemoryLimitBytes(resources); ok {
 			command = append(command, fmt.Sprintf("--memory_limit_hard_bytes=%d", memLimit))
 		}
@@ -478,7 +484,7 @@ func (c *cluster) addCRNameSuffix(str string) string {
 func getResourceSpec(resourceSpec v1.ResourceRequirements, isTServerStatefulset bool) v1.ResourceRequirements {
 	resources := resourceSpec
 
-	if &resources == nil {
+	if &resources == nil { //nolint, ok to ignore this test
 		resources = v1.ResourceRequirements{
 			Requests: make(map[v1.ResourceName]resource.Quantity),
 			Limits:   make(map[v1.ResourceName]resource.Quantity),
@@ -495,13 +501,13 @@ func getResourceSpec(resourceSpec v1.ResourceRequirements, isTServerStatefulset 
 		memoryLimit = tserverMemLimitDefault
 	}
 
-	if &resources.Requests == nil || len(resources.Requests) == 0 {
+	if &resources.Requests == nil || len(resources.Requests) == 0 { //nolint, ok to ignore this test
 		resources.Requests = make(map[v1.ResourceName]resource.Quantity)
 		resources.Requests[v1.ResourceCPU] = resource.MustParse(podCPULimitDefault)
 		resources.Requests[v1.ResourceMemory] = resource.MustParse(memoryLimit)
 	}
 
-	if &resources.Limits == nil || len(resources.Limits) == 0 {
+	if &resources.Limits == nil || len(resources.Limits) == 0 { //nolint, ok to ignore this test
 		resources.Limits = make(map[v1.ResourceName]resource.Quantity)
 		resources.Limits[v1.ResourceCPU] = resource.MustParse(podCPULimitDefault)
 		resources.Limits[v1.ResourceMemory] = resource.MustParse(memoryLimit)

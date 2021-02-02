@@ -17,7 +17,19 @@ limitations under the License.
 package v1
 
 const (
-	// DeleteDataDirOnHostsConfirmation represents the validation to destry dataDirHostPath
+	// SanitizeDataSourceZero uses /dev/zero as sanitize source
+	SanitizeDataSourceZero SanitizeDataSourceProperty = "zero"
+
+	// SanitizeDataSourceRandom uses `shred's default entropy source
+	SanitizeDataSourceRandom SanitizeDataSourceProperty = "random"
+
+	// SanitizeMethodComplete will sanitize everything on the disk
+	SanitizeMethodComplete SanitizeMethodProperty = "complete"
+
+	// SanitizeMethodQuick will sanitize metadata only on the disk
+	SanitizeMethodQuick SanitizeMethodProperty = "quick"
+
+	// DeleteDataDirOnHostsConfirmation represents the validation to destroy dataDirHostPath
 	DeleteDataDirOnHostsConfirmation CleanupConfirmationProperty = "yes-really-destroy-data"
 )
 
@@ -26,6 +38,10 @@ func (c *CleanupPolicySpec) HasDataDirCleanPolicy() bool {
 	return c.Confirmation == DeleteDataDirOnHostsConfirmation
 }
 
-func (c *CleanupConfirmationProperty) String() string {
+func (c *SanitizeMethodProperty) String() string {
+	return string(*c)
+}
+
+func (c *SanitizeDataSourceProperty) String() string {
 	return string(*c)
 }

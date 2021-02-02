@@ -26,6 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	// publicNetworkSelectorKeyName is the network selector key for the ceph public network
+	publicNetworkSelectorKeyName = "public"
+)
+
 // NetworkAttachmentConfig represents the configuration of the NetworkAttachmentDefinitions object
 type NetworkAttachmentConfig struct {
 	CniVersion string `json:"cniVersion"`
@@ -35,6 +40,7 @@ type NetworkAttachmentConfig struct {
 	Ipam       struct {
 		Type       string `json:"type"`
 		Subnet     string `json:"subnet"`
+		Range      string `json:"range"`
 		RangeStart string `json:"rangeStart"`
 		RangeEnd   string `json:"rangeEnd"`
 		Routes     []struct {
@@ -44,64 +50,6 @@ type NetworkAttachmentConfig struct {
 	} `json:"ipam"`
 }
 
-// parseMultusSelector will parse short and JSON form of individual multus
-// network attachment selection annotation. Valid JSON will be unmarshalled and
-// return as is, while invalid JSON will be tried using
-// <namespace>/<name>@<interface> short syntax.
-func parseMultusSelector(selector string) (map[string]string, error) {
-	rawMap := make(map[string]string)
-
-	err := json.Unmarshal([]byte(selector), &rawMap)
-
-	if err != nil {
-		// it can be in short form
-		nsEndIndex := strings.IndexAny(selector, "/")
-		if nsEndIndex != -1 {
-			rawMap["namespace"] = selector[:nsEndIndex]
-		}
-
-		ifStartIndex := strings.LastIndexAny(selector, "@")
-		if ifStartIndex != -1 && len(selector)-ifStartIndex > 1 {
-			rawMap["interface"] = selector[ifStartIndex+1:]
-		}
-
-		if nsEndIndex != -1 && ifStartIndex != -1 && ifStartIndex-nsEndIndex > 1 {
-			rawMap["name"] = selector[nsEndIndex+1 : ifStartIndex]
-		} else if nsEndIndex == -1 && ifStartIndex != -1 {
-			rawMap["name"] = selector[:ifStartIndex]
-		} else if nsEndIndex != -1 && ifStartIndex == -1 {
-			rawMap["name"] = selector[nsEndIndex+1:]
-		}
-	}
-
-	if name, ok := rawMap["name"]; !ok || name == "" {
-		return nil, fmt.Errorf("parseMultusSelector: missing name")
-	}
-
-	return rawMap, nil
-}
-
-// GetMultusIfName return a network interface name that multus will assign when
-// connected to the multus network.
-func GetMultusIfName(selector string) (string, error) {
-	multusMap, _ := parseMultusSelector(selector)
-	var ifName string
-
-	if name, ok := multusMap["interfaceRequest"]; ok {
-		ifName = name
-	}
-	if name, ok := multusMap["interface"]; ok {
-		ifName = name
-	}
-
-	// fail selector without interface name
-	if ifName == "" {
-		return "", fmt.Errorf("GetMultusIfname: missing interface")
-	}
-
-	return ifName, nil
-}
-
 // ApplyMultus apply multus selector to Pods
 // Multus supports short and json syntax, use only one kind at a time.
 func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
@@ -109,7 +57,7 @@ func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 	shortSyntax := false
 	jsonSyntax := false
 
-	for _, ns := range net.Selectors {
+	for k, ns := range net.Selectors {
 		var multusMap map[string]string
 		err := json.Unmarshal([]byte(ns), &multusMap)
 
@@ -119,7 +67,14 @@ func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 			shortSyntax = true
 		}
 
-		v = append(v, string(ns))
+		isCsi := strings.Contains(objectMeta.Labels["app"], "csi-")
+		if isCsi {
+			if k == publicNetworkSelectorKeyName {
+				v = append(v, string(ns))
+			}
+		} else {
+			v = append(v, string(ns))
+		}
 	}
 
 	if shortSyntax && jsonSyntax {

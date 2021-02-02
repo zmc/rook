@@ -8,7 +8,7 @@ apiVersion: ceph.rook.io/v1
 kind: CephFilesystem
 metadata:
   name: myfs
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:cluster
 spec:
   # The metadata pool spec. Must use replication.
   metadataPool:
@@ -21,7 +21,7 @@ spec:
       compression_mode: none
         # gives a hint (%) to Ceph in terms of expected consumption of the total cluster capacity of a given pool
       # for more info: https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size
-      #target_size_ratio: .5
+      #target_size_ratio: ".5"
   # The list of data pool specs. Can use replication or erasure coding.
   dataPools:
     - failureDomain: host
@@ -30,18 +30,15 @@ spec:
         # Disallow setting pool with replica 1, this could lead to data loss without recovery.
         # Make sure you're *ABSOLUTELY CERTAIN* that is what you want
         requireSafeReplicaSize: true
-        # gives a hint (%) to Ceph in terms of expected consumption of the total cluster capacity of a given pool
-        # for more info: https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size
-        #targetSizeRatio: .5
       parameters:
         # Inline compression mode for the data pool
         # Further reference: https://docs.ceph.com/docs/nautilus/rados/configuration/bluestore-config-ref/#inline-compression
         compression_mode: none
           # gives a hint (%) to Ceph in terms of expected consumption of the total cluster capacity of a given pool
         # for more info: https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size
-        #target_size_ratio: .5
-  # Whether to preserve metadata and data pools on filesystem deletion
-  preservePoolsOnDelete: true
+        #target_size_ratio: ".5"
+  # Whether to preserve filesystem after CephFilesystem CRD deletion
+  preserveFilesystemOnDelete: true
   # The metadata service (mds) configuration
   metadataServer:
     # The number of active MDS instances
@@ -50,6 +47,8 @@ spec:
     # If false, standbys will be available, but will not have a warm cache.
     activeStandby: true
     # The affinity rules to apply to the mds deployment
+  mirroring:
+    enabled: false
     placement:
     #  nodeAffinity:
     #    requiredDuringSchedulingIgnoredDuringExecution:
@@ -89,6 +88,9 @@ spec:
               topologyKey: topology.kubernetes.io/zone
     # A key/value list of annotations
     annotations:
+    #  key: value
+    # A key/value list of labels
+    labels:
     #  key: value
     resources:
     # The requests and limits set here, allow the filesystem MDS Pod(s) to use half of one CPU core and 1 gigabyte of memory

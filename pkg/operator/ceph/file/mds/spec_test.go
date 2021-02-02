@@ -21,11 +21,12 @@ import (
 
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/operator/ceph/config"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 
 	cephtest "github.com/rook/rook/pkg/operator/ceph/test"
@@ -58,7 +59,7 @@ func testDeploymentObject(t *testing.T, network cephv1.NetworkSpec) (*apps.Deplo
 			},
 		},
 	}
-	clusterInfo := &cephconfig.ClusterInfo{
+	clusterInfo := &cephclient.ClusterInfo{
 		FSID:        "myfsid",
 		CephVersion: cephver.Nautilus,
 	}
@@ -82,7 +83,7 @@ func testDeploymentObject(t *testing.T, network cephv1.NetworkSpec) (*apps.Deplo
 		ResourceName: "rook-ceph-mds-myfs-a",
 		DataPathMap:  config.NewStatelessDaemonDataPathMap(config.MdsType, "myfs-a", "rook-ceph", "/var/lib/rook/"),
 	}
-	return c.makeDeployment(mdsTestConfig), nil
+	return c.makeDeployment(mdsTestConfig)
 }
 
 func TestPodSpecs(t *testing.T) {
@@ -100,6 +101,10 @@ func TestPodSpecs(t *testing.T) {
 	podTemplate.RunFullSuite(config.MdsType, "myfs-a", "rook-ceph-mds", "ns", "ceph/ceph:testversion",
 		"500", "250", "4337", "2169", /* resources */
 		"my-priority-class")
+
+	// assert --public-addr is appended to args
+	assert.Contains(t, d.Spec.Template.Spec.Containers[0].Args,
+		config.NewFlag("public-addr", controller.ContainerEnvVarReference(podIPEnvVar)))
 }
 
 func TestHostNetwork(t *testing.T) {
@@ -108,4 +113,8 @@ func TestHostNetwork(t *testing.T) {
 
 	assert.Equal(t, true, d.Spec.Template.Spec.HostNetwork)
 	assert.Equal(t, v1.DNSClusterFirstWithHostNet, d.Spec.Template.Spec.DNSPolicy)
+
+	// assert --public-addr is not appended to args
+	assert.NotContains(t, d.Spec.Template.Spec.Containers[0].Args,
+		config.NewFlag("public-addr", controller.ContainerEnvVarReference(podIPEnvVar)))
 }

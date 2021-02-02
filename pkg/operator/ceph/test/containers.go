@@ -91,7 +91,8 @@ func (ct *ContainersTester) AssertEnvVarsContainCephRequirements() {
 		if !isCephCommand(c.Command) {
 			continue // don't consider containers that aren't Ceph commands
 		}
-		assert.Subset(ct.t, varNames(&c), requiredEnvVars)
+		localcontainer := c
+		assert.Subset(ct.t, varNames(&localcontainer), requiredEnvVars)
 		for _, e := range c.Env {
 			// For the required env vars, make sure they are sourced as expected
 			switch e.Name {
@@ -131,6 +132,8 @@ func (ct *ContainersTester) AssertEnvVarsContainCephRequirements() {
 					"POD_CPU_REQUEST env var does not have the appropriate source:", e)
 			}
 		}
+		vars := FindDuplicateEnvVars(c)
+		assert.Equal(ct.t, 0, len(vars), fmt.Sprintf("found duplicate env vars: %v", vars))
 	}
 }
 
@@ -139,7 +142,8 @@ func (ct *ContainersTester) AssertEnvVarsContainCephRequirements() {
 // the value.
 func (ct *ContainersTester) AssertArgReferencesMatchEnvVars() {
 	for _, c := range ct.containers {
-		assert.Subset(ct.t, varNames(&c), argEnvReferences(&c),
+		localcontainer := c
+		assert.Subset(ct.t, varNames(&localcontainer), argEnvReferences(&localcontainer),
 			"container: "+c.Name,
 			"references to env vars in args do not match env vars",
 			"args:", c.Args, "envs:", c.Env)
@@ -182,7 +186,7 @@ func isCephCommand(command []string) bool {
 func argEnvReferences(c *v1.Container) []string {
 	argRefSet := map[string]bool{}
 	for _, a := range c.Args {
-		argRefRegex, e := regexp.Compile("\\$\\(([a-zA-Z][a-zA-Z0-9_]*)\\)")
+		argRefRegex, e := regexp.Compile(`\$\(([a-zA-Z][a-zA-Z0-9_]*)\)`)
 		if e != nil {
 			panic("could not compile argument reference regexp")
 		}
@@ -209,7 +213,8 @@ func varNames(c *v1.Container) []string {
 func (ct *ContainersTester) allNonrequiredArgEnvReferences() []string {
 	allSet := map[string]bool{}
 	for _, c := range ct.containers {
-		for _, r := range argEnvReferences(&c) {
+		localcontainer := c
+		for _, r := range argEnvReferences(&localcontainer) {
 			allSet[r] = true
 		}
 	}
@@ -228,7 +233,8 @@ func (ct *ContainersTester) allNonrequiredArgEnvReferences() []string {
 func (ct *ContainersTester) allNonrequiredVarNames() []string {
 	allSet := map[string]bool{}
 	for _, c := range ct.containers {
-		for _, v := range varNames(&c) {
+		localcontainer := c
+		for _, v := range varNames(&localcontainer) {
 			allSet[v] = true
 		}
 	}
@@ -242,4 +248,18 @@ func (ct *ContainersTester) allNonrequiredVarNames() []string {
 		}
 	}
 	return all
+}
+
+// FindDuplicateEnvVars finds duplicated environment variables and return the variable name list.
+func FindDuplicateEnvVars(container v1.Container) []string {
+	var duplicateEnvVars []string
+	envVars := map[string]string{}
+	for _, v := range container.Env {
+		_, ok := envVars[v.Name]
+		if ok {
+			duplicateEnvVars = append(duplicateEnvVars, v.Name)
+		}
+		envVars[v.Name] = v.Value
+	}
+	return duplicateEnvVars
 }

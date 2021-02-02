@@ -23,13 +23,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestAnnotationMerge(t *testing.T) {
+func TestAnnotationsMerge(t *testing.T) {
 	// No annotations defined
 	testAnnotations := rook.AnnotationsSpec{}
 	a := GetOSDAnnotations(testAnnotations)
 	assert.Nil(t, a)
 
-	// Only a specific component annotation without "all"
+	// Only a specific component annotations without "all"
 	testAnnotations = rook.AnnotationsSpec{
 		"mgr":       {"mgrkey": "mgrval"},
 		"mon":       {"monkey": "monval"},
@@ -45,9 +45,6 @@ func TestAnnotationMerge(t *testing.T) {
 	assert.Equal(t, 1, len(a))
 	a = GetOSDAnnotations(testAnnotations)
 	assert.Equal(t, "osdval", a["osdkey"])
-	assert.Equal(t, 1, len(a))
-	a = GetRGWAnnotations(testAnnotations)
-	assert.Equal(t, "rgwval", a["rgwkey"])
 	assert.Equal(t, 1, len(a))
 
 	// No annotations matching the component

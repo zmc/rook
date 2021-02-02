@@ -19,36 +19,87 @@ package nfs
 import (
 	"fmt"
 
+	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
+	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 )
 
 const (
-	userID = "admin"
+	keyringTemplate = `
+[%s]
+        key = %s
+        caps mon = "allow r"
+        caps osd = "%s"
+`
 )
+
+func getNFSUserID(nodeID string) string {
+	return fmt.Sprintf("nfs-ganesha.%s", nodeID)
+}
+
+func getNFSClientID(n *cephv1.CephNFS, name string) string {
+	return fmt.Sprintf("client.%s", getNFSUserID(getNFSNodeID(n, name)))
+}
 
 func getNFSNodeID(n *cephv1.CephNFS, name string) string {
 	return fmt.Sprintf("%s.%s", n.Name, name)
 }
 
-func getGaneshaConfigObject(nodeID string) string {
-	return fmt.Sprintf("conf-%s", nodeID)
+func getGaneshaConfigObject(n *cephv1.CephNFS, version cephver.CephVersion, name string) string {
+	/* Exports created with Dashboard will not be affected by change in config object name.
+	 * As it looks for ganesha config object just by 'conf-'. Exports cannot be created by using
+	 * volume/nfs plugin in Octopus version. Because the ceph rook module is broken.
+	 */
+	if version.IsAtLeastOctopus() {
+		return fmt.Sprintf("conf-nfs.%s", n.Name)
+	}
+	return fmt.Sprintf("conf-%s", getNFSNodeID(n, name))
 }
 
-func getRadosURL(n *cephv1.CephNFS, nodeID string) string {
+func getRadosURL(n *cephv1.CephNFS, version cephver.CephVersion, name string) string {
 	url := fmt.Sprintf("rados://%s/", n.Spec.RADOS.Pool)
 
 	if n.Spec.RADOS.Namespace != "" {
 		url += n.Spec.RADOS.Namespace + "/"
 	}
 
-	url += getGaneshaConfigObject(nodeID)
+	url += getGaneshaConfigObject(n, version, name)
 	return url
 }
 
-func getGaneshaConfig(n *cephv1.CephNFS, name string) string {
+func (r *ReconcileCephNFS) generateKeyring(n *cephv1.CephNFS, name string) error {
+	osdCaps := fmt.Sprintf("allow rw pool=%s", n.Spec.RADOS.Pool)
+	if n.Spec.RADOS.Namespace != "" {
+		osdCaps = fmt.Sprintf("%s namespace=%s", osdCaps, n.Spec.RADOS.Namespace)
+	}
+
+	caps := []string{"mon", "allow r", "osd", osdCaps}
+	user := getNFSClientID(n, name)
+
+	// Get owner reference
+	ref, err := opcontroller.GetControllerObjectOwnerReference(n, r.scheme)
+	if err != nil || ref == nil {
+		return errors.Wrapf(err, "failed to get controller %q owner reference", n.Name)
+	}
+
+	s := keyring.GetSecretStore(r.context, r.clusterInfo, ref)
+
+	key, err := s.GenerateKey(user, caps)
+	if err != nil {
+		return errors.Wrapf(err, "failed to create user %s", user)
+	}
+
+	keyring := fmt.Sprintf(keyringTemplate, user, key, osdCaps)
+	return s.CreateOrUpdate(instanceName(n, name), keyring)
+}
+
+func getGaneshaConfig(n *cephv1.CephNFS, version cephver.CephVersion, name string) string {
 	nodeID := getNFSNodeID(n, name)
-	url := getRadosURL(n, nodeID)
+	userID := getNFSUserID(nodeID)
+	url := getRadosURL(n, version, name)
 	return `
 NFS_CORE_PARAM {
 	Enable_NLM = false;
@@ -58,8 +109,6 @@ NFS_CORE_PARAM {
 
 MDCACHE {
 	Dir_Chunk = 0;
-	NParts = 1;
-	Cache_Size = 1;
 }
 
 EXPORT_DEFAULTS {
@@ -73,7 +122,7 @@ NFSv4 {
 }
 
 RADOS_KV {
-	ceph_conf = '` + cephconfig.DefaultConfigFilePath() + `';
+	ceph_conf = '` + cephclient.DefaultConfigFilePath() + `';
 	userid = ` + userID + `;
 	nodeid = ` + nodeID + `;
 	pool = "` + n.Spec.RADOS.Pool + `";
@@ -81,7 +130,7 @@ RADOS_KV {
 }
 
 RADOS_URLS {
-	ceph_conf = '` + cephconfig.DefaultConfigFilePath() + `';
+	ceph_conf = '` + cephclient.DefaultConfigFilePath() + `';
 	userid = ` + userID + `;
 	watch_url = '` + url + `';
 }

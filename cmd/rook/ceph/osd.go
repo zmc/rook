@@ -17,8 +17,8 @@ limitations under the License.
 package ceph
 
 import (
+	"encoding/json"
 	"os"
-	"strconv"
 	"strings"
 
 	"k8s.io/client-go/kubernetes"
@@ -51,15 +51,16 @@ var osdStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Starts the osd daemon", // OSDs that were provisioned by ceph-volume
 }
+var osdRemoveCmd = &cobra.Command{
+	Use:   "remove",
+	Short: "Removes a set of OSDs from the cluster",
+}
 
 var (
 	osdDataDeviceFilter     string
 	osdDataDevicePathFilter string
 	ownerRefID              string
-	mountSourcePath         string
-	mountPath               string
 	osdID                   int
-	copyBinariesPath        string
 	osdStoreType            string
 	osdStringID             string
 	osdUUID                 string
@@ -67,6 +68,8 @@ var (
 	pvcBackedOSD            bool
 	blockPath               string
 	lvBackedPV              bool
+	driveGroups             string
+	osdIDsToRemove          string
 )
 
 func addOSDFlags(command *cobra.Command) {
@@ -74,6 +77,7 @@ func addOSDFlags(command *cobra.Command) {
 	addOSDConfigFlags(provisionCmd)
 
 	// flags specific to provisioning
+	provisionCmd.Flags().StringVar(&driveGroups, "drive-groups", "", "JSON marshalled specification of Ceph Drive Groups")
 	provisionCmd.Flags().StringVar(&cfg.devices, "data-devices", "", "comma separated list of devices to use for storage")
 	provisionCmd.Flags().StringVar(&osdDataDeviceFilter, "data-device-filter", "", "a regex filter for the device names to use, or \"all\"")
 	provisionCmd.Flags().StringVar(&osdDataDevicePathFilter, "data-device-path-filter", "", "a regex filter for the device path names to use")
@@ -93,10 +97,14 @@ func addOSDFlags(command *cobra.Command) {
 	osdStartCmd.Flags().StringVar(&blockPath, "block-path", "", "Block path for the OSD created by ceph-volume")
 	osdStartCmd.Flags().BoolVar(&lvBackedPV, "lv-backed-pv", false, "Whether the PV located on LV")
 
+	// flags for removing OSDs that are unhealthy or otherwise should be purged from the cluster
+	osdRemoveCmd.Flags().StringVar(&osdIDsToRemove, "osd-ids", "", "OSD IDs to remove from the cluster")
+
 	// add the subcommands to the parent osd command
 	osdCmd.AddCommand(osdConfigCmd,
 		provisionCmd,
-		osdStartCmd)
+		osdStartCmd,
+		osdRemoveCmd)
 }
 
 func addOSDConfigFlags(command *cobra.Command) {
@@ -110,6 +118,7 @@ func addOSDConfigFlags(command *cobra.Command) {
 	command.Flags().StringVar(&cfg.storeConfig.StoreType, "osd-store", "", "type of backing OSD store to use (bluestore or filestore)")
 	command.Flags().IntVar(&cfg.storeConfig.OSDsPerDevice, "osds-per-device", 1, "the number of OSDs per device")
 	command.Flags().BoolVar(&cfg.storeConfig.EncryptedDevice, "encrypted-device", false, "whether to encrypt the OSD with dmcrypt")
+	command.Flags().StringVar(&cfg.storeConfig.DeviceClass, "osd-crush-device-class", "", "The device class for all OSDs configured on this node")
 }
 
 func init() {
@@ -119,10 +128,12 @@ func init() {
 	flags.SetFlagsFromEnv(osdConfigCmd.Flags(), rook.RookEnvVarPrefix)
 	flags.SetFlagsFromEnv(provisionCmd.Flags(), rook.RookEnvVarPrefix)
 	flags.SetFlagsFromEnv(osdStartCmd.Flags(), rook.RookEnvVarPrefix)
+	flags.SetFlagsFromEnv(osdRemoveCmd.Flags(), rook.RookEnvVarPrefix)
 
 	osdConfigCmd.RunE = writeOSDConfig
 	provisionCmd.RunE = prepareOSD
 	osdStartCmd.RunE = startOSD
+	osdRemoveCmd.RunE = removeOSDs
 }
 
 // Start the osd daemon if provisioned by ceph-volume
@@ -149,7 +160,7 @@ func verifyConfigFlags(configCmd *cobra.Command) error {
 	if err := flags.VerifyRequiredFlags(configCmd, required); err != nil {
 		return err
 	}
-	required = []string{"cluster-name", "mon-endpoints", "mon-secret", "admin-secret"}
+	required = []string{"mon-endpoints", "mon-secret", "ceph-username", "ceph-secret"}
 	if err := flags.VerifyRequiredFlags(osdCmd, required); err != nil {
 		return err
 	}
@@ -173,6 +184,14 @@ func writeOSDConfig(cmd *cobra.Command, args []string) error {
 func prepareOSD(cmd *cobra.Command, args []string) error {
 	if err := verifyConfigFlags(provisionCmd); err != nil {
 		return err
+	}
+
+	var dgs osdcfg.DriveGroupBlobs
+	if driveGroups != "" {
+		err := json.Unmarshal([]byte(driveGroups), &dgs)
+		if err != nil {
+			return errors.Wrap(err, "failed to unmarshal Ceph Drive Groups spec")
+		}
 	}
 
 	var dataDevices []osddaemon.DesiredDevice
@@ -209,9 +228,10 @@ func prepareOSD(cmd *cobra.Command, args []string) error {
 	logger.Infof("crush location of osd: %s", crushLocation)
 
 	forceFormat := false
-	ownerRef := opcontroller.ClusterOwnerRef(clusterInfo.Name, ownerRefID)
-	kv := k8sutil.NewConfigMapKVStore(clusterInfo.Name, context.Clientset, ownerRef)
-	agent := osddaemon.NewAgent(context, dataDevices, cfg.metadataDevice, forceFormat,
+	ownerRef := opcontroller.ClusterOwnerRef(clusterInfo.Namespace, ownerRefID)
+	clusterInfo.OwnerRef = ownerRef
+	kv := k8sutil.NewConfigMapKVStore(clusterInfo.Namespace, context.Clientset, ownerRef)
+	agent := osddaemon.NewAgent(context, dgs, dataDevices, cfg.metadataDevice, forceFormat,
 		cfg.storeConfig, &clusterInfo, cfg.nodeName, kv, cfg.pvcBacked)
 
 	err = osddaemon.Provision(context, agent, crushLocation)
@@ -230,6 +250,29 @@ func prepareOSD(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// Purge the desired OSDs from the cluster
+func removeOSDs(cmd *cobra.Command, args []string) error {
+	required := []string{"osd-ids"}
+	if err := flags.VerifyRequiredFlags(osdRemoveCmd, required); err != nil {
+		return err
+	}
+	required = []string{"mon-endpoints", "ceph-username", "ceph-secret"}
+	if err := flags.VerifyRequiredFlags(osdCmd, required); err != nil {
+		return err
+	}
+
+	commonOSDInit(osdRemoveCmd)
+
+	context := createContext()
+
+	// Run OSD remove sequence
+	err := osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","))
+	if err != nil {
+		rook.TerminateFatal(err)
+	}
+	return nil
+}
+
 func commonOSDInit(cmd *cobra.Command) {
 	rook.SetLogLevel()
 	rook.LogStartupInfo(cmd.Flags())
@@ -242,7 +285,9 @@ func getLocation(clientset kubernetes.Interface) (string, error) {
 	// get the value the operator instructed to use as the host name in the CRUSH map
 	hostNameLabel := os.Getenv("ROOK_CRUSHMAP_HOSTNAME")
 
-	loc, err := oposd.GetLocationWithNode(clientset, os.Getenv(k8sutil.NodeNameEnvVar), hostNameLabel)
+	rootLabel := os.Getenv(oposd.CrushRootVarName)
+
+	loc, err := oposd.GetLocationWithNode(clientset, os.Getenv(k8sutil.NodeNameEnvVar), rootLabel, hostNameLabel)
 	if err != nil {
 		return "", err
 	}
@@ -253,41 +298,32 @@ func updateLocationWithNodeLabels(location *[]string, nodeLabels map[string]stri
 	oposd.UpdateLocationWithNodeLabels(location, nodeLabels)
 }
 
-// Parse the devices, which are comma separated. A colon indicates a non-default number of osds per device
-// or a non collocated metadata device.
-// For example, one osd will be created on each of sda and sdb, with 5 osds on the nvme01 device.
-//   sda:1:::,sdb:1:::,nvme01:5:::
-// For example, 3 osds will use sdb SSD for db and 3 osds will use sdc SSD for db.
-//   sdd:1:::sdb,sde:1:::sdb,sdf:1:::sdb,sdg:1:::sdc,sdh:1:::sdc,sdi:1:::sdc
+// Parse the devices, which are sent as a JSON-marshalled list of device IDs with a StorageConfig spec
 func parseDevices(devices string) ([]osddaemon.DesiredDevice, error) {
+	if devices == "" {
+		return []osddaemon.DesiredDevice{}, nil
+	}
+
+	configuredDevices := []osdcfg.ConfiguredDevice{}
+	err := json.Unmarshal([]byte(devices), &configuredDevices)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to JSON unmarshal configured devices (%q)", devices)
+	}
+
 	var result []osddaemon.DesiredDevice
-	parsed := strings.Split(devices, ",")
-	for _, device := range parsed {
-		parts := strings.Split(device, ":")
-		d := osddaemon.DesiredDevice{Name: parts[0], OSDsPerDevice: 1}
-		if len(parts) > 1 {
-			count, err := strconv.Atoi(parts[1])
-			if err != nil {
-				return nil, errors.Wrapf(err, "error parsing count from devices (%q)", devices)
-			}
-			if count < 1 {
-				return nil, errors.Errorf("osds per device should be greater than 0 (%q)", parts[1])
-			}
-			d.OSDsPerDevice = count
+	for _, cd := range configuredDevices {
+		d := osddaemon.DesiredDevice{
+			Name: cd.ID,
 		}
-		if len(parts) > 2 && parts[2] != "" {
-			size, err := strconv.Atoi(parts[2])
-			if err != nil {
-				return nil, errors.Wrapf(err, "error DatabaseSizeMB (%q) to int", parts[2])
-			}
-			d.DatabaseSizeMB = size
+		d.OSDsPerDevice = cd.StoreConfig.OSDsPerDevice
+		d.DatabaseSizeMB = cd.StoreConfig.DatabaseSizeMB
+		d.DeviceClass = cd.StoreConfig.DeviceClass
+		d.MetadataDevice = cd.StoreConfig.MetadataDevice
+
+		if d.OSDsPerDevice < 1 {
+			return nil, errors.Errorf("osds per device should be greater than 0 (%q)", d.OSDsPerDevice)
 		}
-		if len(parts) > 3 && parts[3] != "" {
-			d.DeviceClass = parts[3]
-		}
-		if len(parts) > 4 {
-			d.MetadataDevice = parts[4]
-		}
+
 		result = append(result, d)
 	}
 

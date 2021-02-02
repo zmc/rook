@@ -18,6 +18,7 @@ limitations under the License.
 package k8sutil
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -31,6 +32,7 @@ import (
 )
 
 func createNode(nodeName string, condition v1.NodeConditionType, clientset *fake.Clientset) error {
+	ctx := context.TODO()
 	node := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: nodeName,
@@ -43,7 +45,7 @@ func createNode(nodeName string, condition v1.NodeConditionType, clientset *fake
 			},
 		},
 	}
-	_, err := clientset.CoreV1().Nodes().Create(node)
+	_, err := clientset.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
 	return err
 }
 
@@ -75,9 +77,7 @@ func TestValidNode(t *testing.T) {
 
 func testNode(taints []v1.Taint) v1.Node {
 	n := v1.Node{}
-	for _, t := range taints {
-		n.Spec.Taints = append(n.Spec.Taints, t)
-	}
+	n.Spec.Taints = append(n.Spec.Taints, taints...)
 	return n
 }
 
@@ -87,10 +87,6 @@ func taintReservedForRook() v1.Taint {
 
 func taintReservedForOther() v1.Taint {
 	return v1.Taint{Key: "reservedForNOTRook", Effect: v1.TaintEffectNoSchedule}
-}
-
-func taintCordoned() v1.Taint {
-	return v1.Taint{Key: v1.TaintNodeUnschedulable, Effect: v1.TaintEffectNoSchedule}
 }
 
 func taintAllWellKnown() []v1.Taint {
@@ -208,11 +204,12 @@ func TestNodeIsReady(t *testing.T) {
 }
 
 func TestGetRookNodesMatchingKubernetesNodes(t *testing.T) {
+	ctx := context.TODO()
 	clientset := optest.New(t, 3) // create nodes 0, 1, and 2
 	rookNodes := []rookv1.Node{}
 
 	getNode := func(name string) v1.Node {
-		n, err := clientset.CoreV1().Nodes().Get(name, metav1.GetOptions{})
+		n, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
 		assert.NoError(t, err)
 		return *n
 	}
@@ -253,10 +250,11 @@ func TestGetRookNodesMatchingKubernetesNodes(t *testing.T) {
 }
 
 func TestRookNodesMatchingKubernetesNodes(t *testing.T) {
+	ctx := context.TODO()
 	clientset := optest.New(t, 3) // create nodes 0, 1, and 2
 
 	getNode := func(name string) v1.Node {
-		n, err := clientset.CoreV1().Nodes().Get(name, metav1.GetOptions{})
+		n, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
 		assert.NoError(t, err)
 		return *n
 	}
@@ -403,12 +401,12 @@ func TestTopologyLabels(t *testing.T) {
 
 	// load all the expected labels
 	nodeLabels = map[string]string{
-		"topology.kubernetes.io/region": "r1",
-		"topology.kubernetes.io/zone":   "z1",
-		"kubernetes.io/hostname":        "myhost",
-		"topology.rook.io/rack":         "rack1",
-		"topology.rook.io/row":          "row1",
-		"topology.rook.io/datacenter":   "d1",
+		corev1.LabelZoneRegionStable:        "r1",
+		corev1.LabelZoneFailureDomainStable: "z1",
+		"kubernetes.io/hostname":            "myhost",
+		"topology.rook.io/rack":             "rack1",
+		"topology.rook.io/row":              "row1",
+		"topology.rook.io/datacenter":       "d1",
 	}
 	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
 	assert.Equal(t, 6, len(topology))
@@ -431,10 +429,10 @@ func TestTopologyLabels(t *testing.T) {
 
 	// ensure deprecated k8s labels are overridden
 	nodeLabels = map[string]string{
-		"topology.kubernetes.io/region": "r1",
-		"topology.kubernetes.io/zone":   "z1",
-		corev1.LabelZoneRegion:          "oldregion",
-		corev1.LabelZoneFailureDomain:   "oldzone",
+		corev1.LabelZoneRegionStable:        "r1",
+		corev1.LabelZoneFailureDomainStable: "z1",
+		corev1.LabelZoneRegion:              "oldregion",
+		corev1.LabelZoneFailureDomain:       "oldzone",
 	}
 	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
 	assert.Equal(t, 2, len(topology))
@@ -447,4 +445,52 @@ func TestTopologyLabels(t *testing.T) {
 	}
 	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
 	assert.Equal(t, 0, len(topology))
+}
+
+func TestGetNotReadyKubernetesNodes(t *testing.T) {
+	ctx := context.TODO()
+	clientset := optest.New(t, 0)
+
+	//when there is no node
+	nodes, err := GetNotReadyKubernetesNodes(clientset)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(nodes))
+
+	//when all the nodes are in ready state
+	clientset = optest.New(t, 2)
+	nodes, err = GetNotReadyKubernetesNodes(clientset)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(nodes))
+
+	//when there is a not ready node
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "failed",
+		},
+		Status: v1.NodeStatus{
+			Conditions: []v1.NodeCondition{
+				{
+					Type: v1.NodeReady, Status: v1.ConditionFalse,
+				},
+			},
+		},
+	}
+	_, err = clientset.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	nodes, err = GetNotReadyKubernetesNodes(clientset)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(nodes))
+
+	// when all the nodes are not ready
+	allNodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	assert.NoError(t, err)
+	for _, n := range allNodes.Items {
+		n.Status.Conditions[0].Status = v1.ConditionFalse
+		updateNode := n
+		_, err := clientset.CoreV1().Nodes().Update(ctx, &updateNode, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+	}
+	nodes, err = GetNotReadyKubernetesNodes(clientset)
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(nodes))
 }

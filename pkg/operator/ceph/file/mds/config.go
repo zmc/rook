@@ -17,6 +17,7 @@ limitations under the License.
 package mds
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -38,11 +39,12 @@ caps mds = "allow"
 )
 
 func (c *Cluster) generateKeyring(m *mdsConfig) (string, error) {
+	ctx := context.TODO()
 	user := fmt.Sprintf("mds.%s", m.DaemonID)
 	access := []string{"osd", "allow *", "mds", "allow", "mon", "allow profile mds"}
 
 	// At present
-	s := keyring.GetSecretStore(c.context, c.fs.Namespace, &c.ownerRef)
+	s := keyring.GetSecretStore(c.context, c.clusterInfo, &c.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {
@@ -50,7 +52,7 @@ func (c *Cluster) generateKeyring(m *mdsConfig) (string, error) {
 	}
 
 	// Delete legacy key store for upgrade from Rook v0.9.x to v1.0.x
-	err = c.context.Clientset.CoreV1().Secrets(c.fs.Namespace).Delete(m.ResourceName, &metav1.DeleteOptions{})
+	err = c.context.Clientset.CoreV1().Secrets(c.fs.Namespace).Delete(ctx, m.ResourceName, metav1.DeleteOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Debugf("legacy mds key %s is already removed", m.ResourceName)
@@ -64,7 +66,7 @@ func (c *Cluster) generateKeyring(m *mdsConfig) (string, error) {
 }
 
 func (c *Cluster) setDefaultFlagsMonConfigStore(mdsID string) error {
-	monStore := config.GetMonStore(c.context, c.fs.Namespace)
+	monStore := config.GetMonStore(c.context, c.clusterInfo)
 	who := fmt.Sprintf("mds.%s", mdsID)
 	configOptions := make(map[string]string)
 

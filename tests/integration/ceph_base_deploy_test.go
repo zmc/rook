@@ -40,12 +40,12 @@ const (
 	// These versions are for running a minimal test suite for more efficient tests across different versions of K8s
 	// instead of running all suites on all versions
 	// To run on multiple versions, add a comma separate list such as 1.16.0,1.17.0
-	flexDriverMinimalTestVersion      = "1.14.0"
-	cephMasterSuiteMinimalTestVersion = "1.15.0"
-	multiClusterMinimalTestVersion    = "1.15.0"
-	helmMinimalTestVersion            = "1.16.0"
-	upgradeMinimalTestVersion         = "1.17.0"
-	smokeSuiteMinimalTestVersion      = "1.18.0"
+	flexDriverMinimalTestVersion      = "1.15.0"
+	cephMasterSuiteMinimalTestVersion = "1.16.0"
+	multiClusterMinimalTestVersion    = "1.16.0"
+	helmMinimalTestVersion            = "1.17.0"
+	upgradeMinimalTestVersion         = "1.18.0"
+	smokeSuiteMinimalTestVersion      = "1.19.0"
 )
 
 var (
@@ -162,13 +162,12 @@ func StartTestCluster(t func() *testing.T, cluster *TestCluster) (*TestCluster, 
 	return cluster, kh
 }
 
-// SetUpRook is a wrapper for setting up rook
+// Setup is a wrapper for setting up rook
 func (op *TestCluster) Setup() {
 	// Turn on DEBUG logging
 	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
-
 	isRookInstalled, err := op.installer.InstallRook(op.namespace, op.storeType, op.usePVC, op.storageClassName,
-		cephv1.MonSpec{Count: op.mons, AllowMultiplePerNode: true}, false /* startWithAllNodes */, op.rbdMirrorWorkers, op.skipOSDCreation)
+		cephv1.MonSpec{Count: op.mons, AllowMultiplePerNode: true}, false /* startWithAllNodes */, op.rbdMirrorWorkers, op.skipOSDCreation, op.rookVersion)
 
 	if !isRookInstalled || err != nil {
 		logger.Errorf("Rook was not installed successfully: %v", err)
@@ -184,7 +183,7 @@ func (op *TestCluster) Setup() {
 // SetInstallData updates the installer helper based on the version of Rook desired
 func (op *TestCluster) SetInstallData(version string) {}
 
-// TearDownRook is a wrapper for tearDown after Suite
+// Teardown is a wrapper for tearDown after Suite
 func (op *TestCluster) Teardown() {
 	op.installer.UninstallRook(op.namespace)
 }

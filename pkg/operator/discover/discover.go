@@ -18,6 +18,7 @@ limitations under the License.
 package discover
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -46,6 +47,7 @@ const (
 	discoverDaemonsetTolerationKeyEnv     = "DISCOVER_TOLERATION_KEY"
 	discoverDaemonsetTolerationsEnv       = "DISCOVER_TOLERATIONS"
 	discoverDaemonSetNodeAffinityEnv      = "DISCOVER_AGENT_NODE_AFFINITY"
+	discoverDaemonSetPodLabelsEnv         = "DISCOVER_AGENT_POD_LABELS"
 	deviceInUseCMName                     = "local-device-in-use-cluster-%s-node-%s"
 	deviceInUseAppName                    = "rook-claimed-devices"
 	deviceInUseClusterAttr                = "rook.io/cluster"
@@ -78,6 +80,7 @@ func (d *Discover) Start(namespace, discoverImage, securityAccount string, useCe
 }
 
 func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAccount string, useCephVolume bool) error {
+	ctx := context.TODO()
 	privileged := true
 	discovery_parameters := []string{"discover",
 		"--discover-interval", getEnvVar(discoverIntervalEnv, defaultDiscoverInterval)}
@@ -88,6 +91,9 @@ func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAcc
 	ds := &apps.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: discoverDaemonsetName,
+			Labels: map[string]string{
+				"app": discoverDaemonsetName,
+			},
 		},
 		Spec: apps.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
@@ -211,13 +217,22 @@ func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAcc
 		}
 	}
 
-	_, err = d.clientset.AppsV1().DaemonSets(namespace).Create(ds)
+	podLabels := os.Getenv(discoverDaemonSetPodLabelsEnv)
+	if podLabels != "" {
+		podLabels := k8sutil.ParseStringToLabels(podLabels)
+		// Override / Set the app label even if set by the user as
+		// otherwise the DaemonSet pod selector may be broken
+		podLabels["app"] = discoverDaemonsetName
+		ds.Spec.Template.ObjectMeta.Labels = podLabels
+	}
+
+	_, err = d.clientset.AppsV1().DaemonSets(namespace).Create(ctx, ds, metav1.CreateOptions{})
 	if err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create rook-discover daemon set. %+v", err)
 		}
 		logger.Infof("rook-discover daemonset already exists, updating ...")
-		_, err = d.clientset.AppsV1().DaemonSets(namespace).Update(ds)
+		_, err = d.clientset.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to update rook-discover daemon set. %+v", err)
 		}
@@ -237,11 +252,12 @@ func getEnvVar(varName string, defaultValue string) string {
 }
 
 // ListDevices lists all devices discovered on all nodes or specific node if node name is provided.
-func ListDevices(context *clusterd.Context, namespace, nodeName string) (map[string][]sys.LocalDisk, error) {
+func ListDevices(clusterdContext *clusterd.Context, namespace, nodeName string) (map[string][]sys.LocalDisk, error) {
+	ctx := context.TODO()
 	// convert the host name label to the k8s node name to look up the configmap  with the devices
 	if len(nodeName) > 0 {
 		var err error
-		nodeName, err = k8sutil.GetNodeNameFromHostname(context.Clientset, nodeName)
+		nodeName, err = k8sutil.GetNodeNameFromHostname(clusterdContext.Clientset, nodeName)
 		if err != nil {
 			logger.Warningf("failed to get node name from hostname. %+v", err)
 		}
@@ -264,7 +280,7 @@ func ListDevices(context *clusterd.Context, namespace, nodeName string) (map[str
 			<-time.After(time.Duration(sleepTime) * time.Second)
 		}
 
-		cms, err := context.Clientset.CoreV1().ConfigMaps(namespace).List(listOpts)
+		cms, err := clusterdContext.Clientset.CoreV1().ConfigMaps(namespace).List(ctx, listOpts)
 		if err != nil {
 			logger.Warningf("failed to list device configmaps: %v", err)
 			return devices, fmt.Errorf("failed to list device configmaps: %+v", err)
@@ -300,7 +316,8 @@ func ListDevices(context *clusterd.Context, namespace, nodeName string) (map[str
 }
 
 // ListDevicesInUse lists all devices on a node that are already used by existing clusters.
-func ListDevicesInUse(context *clusterd.Context, namespace, nodeName string) ([]sys.LocalDisk, error) {
+func ListDevicesInUse(clusterdContext *clusterd.Context, namespace, nodeName string) ([]sys.LocalDisk, error) {
+	ctx := context.TODO()
 	var devices []sys.LocalDisk
 
 	if len(nodeName) == 0 {
@@ -308,7 +325,7 @@ func ListDevicesInUse(context *clusterd.Context, namespace, nodeName string) ([]
 	}
 
 	listOpts := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", k8sutil.AppAttr, deviceInUseAppName)}
-	cms, err := context.Clientset.CoreV1().ConfigMaps(namespace).List(listOpts)
+	cms, err := clusterdContext.Clientset.CoreV1().ConfigMaps(namespace).List(ctx, listOpts)
 	if err != nil {
 		return devices, fmt.Errorf("failed to list device in use configmaps: %+v", err)
 	}
@@ -349,14 +366,15 @@ func matchDeviceFullPath(devLinks, fullpath string) bool {
 }
 
 // GetAvailableDevices conducts outer join using input filters with free devices that a node has. It marks the devices from join result as in-use.
-func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string, devices []rookv1.Device, filter string, useAllDevices bool) ([]rookv1.Device, error) {
+func GetAvailableDevices(clusterdContext *clusterd.Context, nodeName, clusterName string, devices []rookv1.Device, filter string, useAllDevices bool) ([]rookv1.Device, error) {
+	ctx := context.TODO()
 	results := []rookv1.Device{}
 	if len(devices) == 0 && len(filter) == 0 && !useAllDevices {
 		return results, nil
 	}
 	namespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
 	// find all devices
-	allDevices, err := ListDevices(context, namespace, nodeName)
+	allDevices, err := ListDevices(clusterdContext, namespace, nodeName)
 	if err != nil {
 		return results, err
 	}
@@ -366,7 +384,7 @@ func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string
 		return results, fmt.Errorf("node %s has no devices", nodeName)
 	}
 	// find those in use on the node
-	devicesInUse, err := ListDevicesInUse(context, namespace, nodeName)
+	devicesInUse, err := ListDevicesInUse(clusterdContext, namespace, nodeName)
 	if err != nil {
 		return results, err
 	}
@@ -442,15 +460,24 @@ func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string
 			},
 			Data: data,
 		}
-		_, err = context.Clientset.CoreV1().ConfigMaps(namespace).Create(cm)
+		_, err = clusterdContext.Clientset.CoreV1().ConfigMaps(namespace).Create(ctx, cm, metav1.CreateOptions{})
 		if err != nil {
 			if !k8serrors.IsAlreadyExists(err) {
 				return results, fmt.Errorf("failed to update device in use for cluster %s node %s: %v", clusterName, nodeName, err)
 			}
-			if _, err := context.Clientset.CoreV1().ConfigMaps(namespace).Update(cm); err != nil {
+			if _, err := clusterdContext.Clientset.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 				return results, fmt.Errorf("failed to update devices in use. %+v", err)
 			}
 		}
 	}
 	return results, nil
+}
+
+// Stop the discover
+func (d *Discover) Stop(ctx context.Context, namespace string) error {
+	err := d.clientset.AppsV1().DaemonSets(namespace).Delete(ctx, discoverDaemonsetName, metav1.DeleteOptions{})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }

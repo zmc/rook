@@ -16,14 +16,9 @@ areas:
     - travisn
     - BlaineEXE
     - leseb
-    reviewers:
     - satoru-takeuchi
-    - Madhu-1
-  edgefs:
-    approvers:
-    - dyusupov
     reviewers:
-    - sabbot
+    - Madhu-1
   cassandra:
     approvers:
     - yanniszark

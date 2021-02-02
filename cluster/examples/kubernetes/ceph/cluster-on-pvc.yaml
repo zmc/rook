@@ -4,20 +4,21 @@
 # in this example. See the documentation for more details on storage settings available.
 
 # For example, to create the cluster:
-#   kubectl create -f common.yaml
-#   kubectl create -f operator.yaml
+#   kubectl create -f crds.yaml -f common.yaml -f operator.yaml
 #   kubectl create -f cluster-on-pvc.yaml
 #################################################################################################################
-
 apiVersion: ceph.rook.io/v1
 kind: CephCluster
 metadata:
   name: rook-ceph
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:cluster
 spec:
   dataDirHostPath: /var/lib/rook
   mon:
+    # Set the number of mons to be started. Must be an odd number, and is generally recommended to be 3.
     count: 3
+    # The mons should be on unique nodes. For production, at least 3 nodes are recommended for this reason.
+    # Mons should only be allowed on the same node for test environments where data loss is acceptable.
     allowMultiplePerNode: false
     # A volume claim template can be specified in which case new monitors (and
     # monitors created during fail over) will construct a PVC based on the
@@ -32,7 +33,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v15.2.3
+    image: ceph/ceph:v15.2.8
     allowUnsupported: false
   skipUpgradeChecks: false
   continueUpgradeAfterChecksEvenIfNotHealthy: false
@@ -58,15 +59,28 @@ spec:
       # Rook can configure the OSD running on PVC to accommodate that by tuning some of the Ceph internal
       # Currently, "gp2" has been identified as such
       tuneDeviceClass: true
+      # Certain storage class in the Cloud are fast
+      # Rook can configure the OSD running on PVC to accommodate that by tuning some of the Ceph internal
+      # Currently, "managed-premium" has been identified as such
+      tuneFastDeviceClass: false
+      # whether to encrypt the deviceSet or not
+      encrypted: false
       # Since the OSDs could end up on any node, an effort needs to be made to spread the OSDs
       # across nodes as much as possible. Unfortunately the pod anti-affinity breaks down
-      # as soon as you have more than one OSD per node. If you have more OSDs than nodes, K8s may
-      # choose to schedule many of them on the same node. What we need is the Pod Topology
-      # Spread Constraints.
-      # Another approach for a small number of OSDs is to create a separate device set for each
-      # zone (or other set of nodes with a common label) so that the OSDs will end up on different
-      # nodes. This would require adding nodeAffinity to the placement here.
+      # as soon as you have more than one OSD per node. The topology spread constraints will
+      # give us an even spread on K8s 1.18 or newer.
       placement:
+        topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values:
+              - rook-ceph-osd
+      preparePlacement:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
@@ -84,16 +98,16 @@ spec:
               topologyKey: kubernetes.io/hostname
         topologySpreadConstraints:
         - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchExpressions:
             - key: app
               operator: In
               values:
-              - rook-ceph-osd
               - rook-ceph-osd-prepare
       resources:
+      # These are the OSD daemon limits. For OSD prepare limits, see the separate section below for "prepareosd" resources
       #   limits:
       #     cpu: "500m"
       #     memory: "4Gi"
@@ -123,15 +137,61 @@ spec:
       #       requests:
       #         # Find the right size https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#sizing
       #         storage: 5Gi
-      #     # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, gp2)
-      #     storageClassName: gp2
+      #     # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, io1)
+      #     storageClassName: io1
+      #     volumeMode: Block
+      #     accessModes:
+      #       - ReadWriteOnce
+      # dedicated block device to store bluestore wal (block.wal)
+      # - metadata:
+      #     name: wal
+      #   spec:
+      #     resources:
+      #       requests:
+      #         # Find the right size https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#sizing
+      #         storage: 5Gi
+      #     # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, io1)
+      #     storageClassName: io1
       #     volumeMode: Block
       #     accessModes:
       #       - ReadWriteOnce
       # Scheduler name for OSD pod placement
       # schedulerName: osd-scheduler
+  resources:
+  #  prepareosd:
+  #    limits:
+  #      cpu: "200m"
+  #      memory: "200Mi"
+  #   requests:
+  #      cpu: "200m"
+  #      memory: "200Mi"
   disruptionManagement:
-    managePodBudgets: false
+    managePodBudgets: true
     osdMaintenanceTimeout: 30
+    pgHealthCheckTimeout: 0
     manageMachineDisruptionBudgets: false
     machineDisruptionBudgetNamespace: openshift-machine-api
+  # security oriented settings
+  # security:
+  # To enable the KMS configuration properly don't forget to uncomment the Secret at the end of the file
+  #   kms:
+  #     # name of the config map containing all the kms connection details
+  #     connectionDetails:
+         #KMS_PROVIDER: "vault"
+         #VAULT_ADDR: VAULT_ADDR_CHANGE_ME # e,g: https://vault.my-domain.com:8200
+         #VAULT_BACKEND_PATH: "rook"
+         #VAULT_BACKEND: "kv"
+  #     # name of the secret containing the kms authentication token
+  #     tokenSecretName: rook-vault-token
+# UNCOMMENT THIS TO ENABLE A KMS CONNECTION
+# Also, do not forget to replace both:
+#   * ROOK_TOKEN_CHANGE_ME: with a base64 encoded value of the token to use
+#   * VAULT_ADDR_CHANGE_ME: with the Vault address
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: rook-vault-token
+#   namespace: rook-ceph # namespace:cluster
+# data:
+#   token: ROOK_TOKEN_CHANGE_ME

@@ -76,7 +76,6 @@ func testCreateProfile(t *testing.T, failureDomain, crushRoot, deviceClass strin
 				}
 				if deviceClass != "" {
 					assert.Equal(t, fmt.Sprintf("crush-device-class=%s", deviceClass), args[nextArg])
-					nextArg++
 				}
 				return "", nil
 			}
@@ -84,6 +83,6 @@ func testCreateProfile(t *testing.T, failureDomain, crushRoot, deviceClass strin
 		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
-	err := CreateErasureCodeProfile(context, "myns", "myapp", spec)
+	err := CreateErasureCodeProfile(context, AdminClusterInfo("mycluster"), "myapp", spec)
 	assert.Nil(t, err)
 }

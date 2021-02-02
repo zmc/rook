@@ -8,6 +8,12 @@ image:
   tag: VERSION
   pullPolicy: IfNotPresent
 
+crds:
+  # Whether the helm chart should create and update the CRDs. If false, the CRDs must be
+  # managed independently with cluster/examples/kubernetes/ceph/crds.yaml.
+  # **WARNING** Only set during first deployment. If later disabled the cluster will be destroyed.
+  enabled: true
+
 resources:
   limits:
     cpu: 500m
@@ -30,13 +36,6 @@ unreachableNodeTolerationSeconds: 5
 # Whether rook watches its current namespace for CRDs or the entire cluster, defaults to false
 currentNamespaceOnly: false
 
-# Interval at which to get the ceph status and update the cluster custom resource status
-cephStatusCheckInterval: "60s"
-
-mon:
-  healthCheckInterval: "45s"
-  monOutTimeout: "600s"
-
 ## Annotations to be added to pod
 annotations: {}
 
@@ -57,12 +56,30 @@ csi:
   enableRbdDriver: true
   enableCephfsDriver: true
   enableGrpcMetrics: true
-  enableSnapshotter: true
+  # set to false to disable deployment of snapshotter container in CephFS provisioner pod.
+  enableCephFSSnapshotter: true
+  # set to false to disable deployment of snapshotter container in RBD provisioner pod.
+  enableRBDSnapshotter: true
   # (Optional) set user created priorityclassName for csi plugin pods.
   # pluginPriorityClassName: system-node-critical
 
   # (Optional) set user created priorityclassName for csi provisioner pods.
   # provisionerPriorityClassName: system-cluster-critical
+
+  # (Optional) policy for modifying a volume's ownership or permissions when the RBD PVC is being mounted.
+  # supported values are documented at https://kubernetes-csi.github.io/docs/support-fsgroup.html
+  rbdFSGroupPolicy: "ReadWriteOnceWithFSType"
+
+  # (Optional) policy for modifying a volume's ownership or permissions when the CephFS PVC is being mounted.
+  # supported values are documented at https://kubernetes-csi.github.io/docs/support-fsgroup.html
+  cephFSFSGroupPolicy: "ReadWriteOnceWithFSType"
+
+  # OMAP generator generates the omap mapping between the PV name and the RBD image
+  # which helps CSI to identify the rbd images for CSI operations.
+  # CSI_ENABLE_OMAP_GENERATOR need to be enabled when we are using rbd mirroring feature.
+  # By default OMAP generator is disabled and when enabled it will be deployed as a
+  # sidecar with CSI provisioner pod, to enable set it to true.
+  enableOMAPGenerator: false
 
   # Set logging level for csi containers.
   # Supported values from 0 to 5. 0 for general useful logs, 5 for trace level verbosity.
@@ -77,7 +94,7 @@ csi:
   allowUnsupportedVersion: false
     # (Optional) CEPH CSI RBD provisioner resource requirement list, Put here list of resource
   # requests and limits you want to apply for provisioner pod
-  # csiRBDProvisionerResource:
+  # csiRBDProvisionerResource: |
   #  - name : csi-provisioner
   #    resource:
   #      requests:
@@ -128,7 +145,7 @@ csi:
   #        cpu: 100m
   # (Optional) CEPH CSI RBD plugin resource requirement list, Put here list of resource
   # requests and limits you want to apply for plugin pod
-  # csiRBDPluginResource:
+  # csiRBDPluginResource: |
   #  - name : driver-registrar
   #    resource:
   #      requests:
@@ -155,7 +172,7 @@ csi:
   #        cpu: 100m
   # (Optional) CEPH CSI CephFS provisioner resource requirement list, Put here list of resource
   # requests and limits you want to apply for provisioner pod
-  # csiCephFSProvisionerResource:
+  # csiCephFSProvisionerResource: |
   #  - name : csi-provisioner
   #    resource:
   #      requests:
@@ -198,7 +215,7 @@ csi:
   #        cpu: 100m
   # (Optional) CEPH CSI CephFS plugin resource requirement list, Put here list of resource
   # requests and limits you want to apply for plugin pod
-  # csiCephFSPluginResource:
+  # csiCephFSPluginResource: |
   #  - name : driver-registrar
   #    resource:
   #      requests:
@@ -247,20 +264,29 @@ csi:
   #rbdLivenessMetricsPort: 9080
   #kubeletDirPath: /var/lib/kubelet
   #cephcsi:
-    #image: quay.io/cephcsi/cephcsi:v2.1.2
+    #image: quay.io/cephcsi/cephcsi:v3.2.0
   #registrar:
-    #image: quay.io/k8scsi/csi-node-driver-registrar:v1.2.0
+    #image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.0.1
   #provisioner:
-    #image: quay.io/k8scsi/csi-provisioner:v1.4.0
+    #image: k8s.gcr.io/sig-storage/csi-provisioner:v2.0.0
   #snapshotter:
-    #image: quay.io/k8scsi/csi-snapshotter:v1.2.2
+    #image: k8s.gcr.io/sig-storage/csi-snapshotter:v3.0.0
   #attacher:
-    #image: quay.io/k8scsi/csi-attacher:v2.1.0
+    #image: k8s.gcr.io/sig-storage/csi-attacher:v3.0.0
   #resizer:
-    #image: quay.io/k8scsi/csi-resizer:v0.4.0
+    #image: k8s.gcr.io/sig-storage/csi-resizer:v1.0.0
+  # Labels to add to the CSI CephFS Deployments and DaemonSets Pods.
+  #cephfsPodLabels: "key1=value1,key2=value2"
+  # Labels to add to the CSI RBD Deployments and DaemonSets Pods.
+  #rbdPodLabels: "key1=value1,key2=value2"
 
 enableFlexDriver: false
-enableDiscoveryDaemon: true
+enableDiscoveryDaemon: false
+
+# enable the ability to have multiple Ceph filesystems in the same cluster
+# WARNING: Experimental feature in Ceph Releases Octopus (v15) and Nautilus (v14)
+# https://docs.ceph.com/en/octopus/cephfs/experimental-features/#multiple-file-systems-within-a-ceph-cluster
+allowMultipleFilesystems: false
 
 ## if true, run rook operator on the host network
 # useOperatorHostNetwork: true
@@ -299,6 +325,7 @@ enableDiscoveryDaemon: true
 #     operator: Exists
 #     effect: NoSchedule
 #   nodeAffinity: key1=value1,value2; key2=value3
+#   podLabels: "key1=value1,key2=value2"
 
 # In some situations SELinux relabelling breaks (times out) on large filesystems, and doesn't work with cephfs ReadWriteMany volumes (last relabel wins).
 # Disable it here if you have similar issues.
@@ -321,3 +348,12 @@ discoverDaemonUdev:
 
 # Whether the OBC provisioner should watch on the operator namespace or not, if not the namespace of the cluster will be used
 enableOBCWatchOperatorNamespace: true
+
+admissionController:
+  # Set tolerations and nodeAffinity for admission controller pod.
+  # The admission controller would be best to start on the same nodes as other ceph daemons.
+  # tolerations:
+  #    - key: key
+  #      operator: Exists
+  #      effect: NoSchedule
+  # nodeAffinity: key1=value1,value2; key2=value3

@@ -101,7 +101,8 @@ func (s *FlexvolumeServer) Start(driverVendor, driverName string) error {
 	}
 	s.listeners[unixSocketFile] = listener
 
-	if err := os.Chmod(unixSocketFile, 0770); err != nil {
+	// #nosec since unixSocketFile needs the permission to execute
+	if err := os.Chmod(unixSocketFile, 0750); err != nil {
 		return errors.Wrapf(err, "unable to set file permission to unix socket %q", unixSocketFile)
 	}
 
@@ -198,7 +199,7 @@ func LoadFlexSettings(directory string) []byte {
 func configureFlexVolume(driverFile, driverDir, driverName string) error {
 	// copying flex volume
 	if _, err := os.Stat(driverDir); os.IsNotExist(err) {
-		err := os.Mkdir(driverDir, 0755)
+		err := os.Mkdir(driverDir, 0750)
 		if err != nil {
 			logger.Errorf("failed to create dir %q. %v", driverDir, err)
 		}
@@ -240,6 +241,7 @@ func configureFlexVolume(driverFile, driverDir, driverName string) error {
 	if err != nil {
 		logger.Errorf("invalid flex settings. %v", err)
 	} else {
+		// #nosec since the flex settings need read permissions
 		if err := ioutil.WriteFile(path.Join(driverDir, settingsFilename), settings, 0644); err != nil {
 			logger.Errorf("failed to write settings file %q. %v", settingsFilename, err)
 		} else {
@@ -250,6 +252,7 @@ func configureFlexVolume(driverFile, driverDir, driverName string) error {
 	return nil
 }
 
+// #nosec G307 Calling defer to close the file without checking the error return is not a risk for a simple file open and close
 func copyFile(src, dest string) error {
 	srcFile, err := os.Open(filepath.Clean(src))
 	if err != nil {
@@ -257,7 +260,8 @@ func copyFile(src, dest string) error {
 	}
 	defer srcFile.Close()
 
-	destFile, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755) // creates if file doesn't exist
+	// #nosec G302,G304 since destFile needs the permission to execute
+	destFile, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0750) // creates if file doesn't exist
 	if err != nil {
 		return errors.Wrapf(err, "error creating destination file %s", dest)
 	}
@@ -267,7 +271,11 @@ func copyFile(src, dest string) error {
 	if err != nil {
 		return errors.Wrapf(err, "error copying file from %s to %s", src, dest)
 	}
-	return destFile.Sync()
+	err = destFile.Sync()
+	if err := destFile.Close(); err != nil {
+		return err
+	}
+	return err
 }
 
 // Gets the flex driver info (vendor, driver name) from a given path where the flex driver exists.
@@ -278,14 +286,17 @@ func getFlexDriverInfo(flexDriverPath string) (vendor, driver string, err error)
 	parts := strings.Split(flexDriverPath, string(os.PathSeparator))
 	for i := len(parts) - 1; i >= 0; i-- {
 		p := parts[i]
-		if matched, _ := regexp.Match(".+~.+", []byte(p)); matched {
-			// found a match for the flex driver directory name pattern
-			flexInfo := strings.Split(p, "~")
-			if len(flexInfo) > 2 {
-				return "", "", errors.Errorf("unexpected number of items in flex driver info %+v from path %s", flexInfo, flexDriverPath)
-			}
+		matched, err := regexp.Compile(".+~.+")
+		if err == nil {
+			if matched.Match([]byte(p)) {
+				// found a match for the flex driver directory name pattern
+				flexInfo := strings.Split(p, "~")
+				if len(flexInfo) > 2 {
+					return "", "", errors.Errorf("unexpected number of items in flex driver info %+v from path %s", flexInfo, flexDriverPath)
+				}
 
-			return flexInfo[0], flexInfo[1], nil
+				return flexInfo[0], flexInfo[1], nil
+			}
 		}
 	}
 

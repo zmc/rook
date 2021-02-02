@@ -44,7 +44,6 @@ const (
 	// LinearType is a linear type
 	LinearType = "linear"
 	sgdiskCmd  = "sgdisk"
-	mountCmd   = "mount"
 	// CephLVPrefix is the prefix of a LV owned by ceph-volume
 	CephLVPrefix = "ceph--"
 	// DeviceMapperPrefix is the prefix of a LV from the device mapper interface
@@ -111,6 +110,10 @@ type LocalDisk struct {
 	CephVolumeData string `json:"cephVolumeData,omitempty"`
 	// RealPath is the device pathname behind the PVC, behind /mnt/<pvc>/name
 	RealPath string `json:"real-path,omitempty"`
+	// KernelName is the kernel name of the device
+	KernelName string `json:"kernel-name,omitempty"`
+	// Whether this device should be encrypted
+	Encrypted bool `json:"encrypted,omitempty"`
 }
 
 // ListDevices list all devices available on a machine
@@ -204,7 +207,7 @@ func GetDeviceProperties(device string, executor exec.Executor) (map[string]stri
 // GetDevicePropertiesFromPath gets a device property from a path
 func GetDevicePropertiesFromPath(devicePath string, executor exec.Executor) (map[string]string, error) {
 	output, err := executor.ExecuteCommandWithOutput("lsblk", devicePath,
-		"--bytes", "--nodeps", "--pairs", "--paths", "--output", "SIZE,ROTA,RO,TYPE,PKNAME,NAME")
+		"--bytes", "--nodeps", "--pairs", "--paths", "--output", "SIZE,ROTA,RO,TYPE,PKNAME,NAME,KNAME")
 	if err != nil {
 		// The "not a block device" error also returns code 32 so the ExitStatus() check hides this error
 		if strings.Contains(output, "not a block device") {

@@ -19,14 +19,15 @@ package cluster
 import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/operator/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/crash"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/rbd"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/clusterdisruption"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/machinedisruption"
 	"github.com/rook/rook/pkg/operator/ceph/disruption/machinelabel"
-	"github.com/rook/rook/pkg/operator/ceph/disruption/nodedrain"
 	"github.com/rook/rook/pkg/operator/ceph/file"
+	"github.com/rook/rook/pkg/operator/ceph/file/mirror"
 	"github.com/rook/rook/pkg/operator/ceph/nfs"
 	"github.com/rook/rook/pkg/operator/ceph/object"
 	"github.com/rook/rook/pkg/operator/ceph/object/realm"
@@ -45,7 +46,6 @@ var (
 
 // AddToManagerFuncsMaintenance is a list of functions to add all Controllers to the Manager (entrypoint for controller)
 var AddToManagerFuncsMaintenance = []func(manager.Manager, *controllerconfig.Context) error{
-	nodedrain.Add,
 	clusterdisruption.Add,
 }
 
@@ -67,6 +67,8 @@ var AddToManagerFuncs = []func(manager.Manager, *clusterd.Context) error{
 	file.Add,
 	nfs.Add,
 	rbd.Add,
+	client.Add,
+	mirror.Add,
 }
 
 // AddToManager adds all the registered controllers to the passed manager.

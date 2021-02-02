@@ -59,6 +59,95 @@ When creating an erasure-coded pool, it is highly recommended to create the pool
 (see the [OSD configuration settings](ceph-cluster-crd.md#osd-configuration-settings). Filestore OSDs have
 [limitations](http://docs.ceph.com/docs/master/rados/operations/erasure-code/#erasure-coding-with-overwrites) that are unsafe and lower performance.
 
+### Mirroring
+
+RADOS Block Device (RBD) mirroring is a process of asynchronous replication of Ceph block device images between two or more Ceph clusters.
+Mirroring ensures point-in-time consistent replicas of all changes to an image, including reads and writes, block device resizing, snapshots, clones and flattening.
+It is generally useful when planning for Disaster Recovery.
+For clusters that are geographically distributed and stretching is not possible due to high latencies.
+
+The following will enable mirroring of the pool at the image level:
+
+```yaml
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: replicapool
+  namespace: rook-ceph
+spec:
+  replicated:
+    size: 3
+  mirroring:
+    enabled: true
+    mode: image
+    # schedule(s) of snapshot
+    snapshotSchedules:
+      - interval: 24h # daily snapshots
+        startTime: 14:00:00-05:00
+```
+
+Once mirroring is enabled, Rook will by default create its own [bootstrap peer token](https://docs.ceph.com/docs/master/rbd/rbd-mirroring/#bootstrap-peers) so that it can be used by another cluster.
+The bootstrap peer token can be found in a Kubernetes Secret. The name of the Secret is present in the Status field of the CephBlockPool CR:
+
+```yaml
+status:
+  info:
+    rbdMirrorBootstrapPeerSecretName: pool-peer-token-replicapool
+```
+
+This secret can then be fetched like so:
+
+```console
+kubectl get secret -n rook-ceph pool-peer-token-replicapool -o jsonpath='{.data.token}'|base64 -d
+eyJmc2lkIjoiOTFlYWUwZGQtMDZiMS00ZDJjLTkxZjMtMTMxMWM5ZGYzODJiIiwiY2xpZW50X2lkIjoicmJkLW1pcnJvci1wZWVyIiwia2V5IjoiQVFEN1psOWZ3V1VGRHhBQWdmY0gyZi8xeUhYeGZDUTU5L1N0NEE9PSIsIm1vbl9ob3N0IjoiW3YyOjEwLjEwMS4xOC4yMjM6MzMwMCx2MToxMC4xMDEuMTguMjIzOjY3ODldIn0=
+```
+
+The secret must be decoded. The result will be another base64 encoded blob that you will import in the destination cluster:
+
+```console
+external-cluster-console# rbd mirror pool peer bootstrap import <token file path>
+```
+
+See the official rbd mirror documentation on [how to add a bootstrap peer](https://docs.ceph.com/docs/master/rbd/rbd-mirroring/#bootstrap-peers).
+
+### Data spread across subdomains
+
+Imagine the following topology with datacenters containing racks and then hosts:
+
+```text
+.
+├── datacenter-1
+│   ├── rack-1
+│   │   ├── host-1
+│   │   ├── host-2
+│   └── rack-2
+│       ├── host-3
+│       ├── host-4
+└── datacenter-2
+    ├── rack-3
+    │   ├── host-5
+    │   ├── host-6
+    └── rack-4
+        ├── host-7
+        └── host-8
+```
+
+As an administrator I would like to place 4 copies across both datacenter where each copy inside a datacenter is across a rack.
+This can be achieved by the following:
+
+```yaml
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: replicapool
+  namespace: rook-ceph
+spec:
+  replicated:
+    size: 4
+    replicasPerFailureDomain: 2
+    subFailureDomain: rack
+```
+
 ## Pool Settings
 
 ### Metadata
@@ -70,6 +159,10 @@ When creating an erasure-coded pool, it is highly recommended to create the pool
 
 * `replicated`: Settings for a replicated pool. If specified, `erasureCoded` settings must not be specified.
   * `size`: The desired number of copies to make of the data in the pool.
+  * `requireSafeReplicaSize`: set to false if you want to create a pool with size 1, setting pool size 1 could lead to data loss without recovery. Make sure you are *ABSOLUTELY CERTAIN* that is what you want.
+  * `replicasPerFailureDomain`: Sets up the number of replicas to place in a given failure domain. For instance, if the failure domain is a datacenter (cluster is
+stretched) then you will have 2 replicas per datacenter where each replica ends up on a different host. This gives you a total of 4 replicas and for this, the `size` must be set to 4. The default is 1.
+  * `subFailureDomain`: Name of the CRUSH bucket representing a sub-failure domain. In a stretched configuration this option represent the "last" bucket where replicas will end up being written. Imagine the cluster is stretched across two datacenters, you can then have 2 copies per datacenter and each copy on a different CRUSH bucket. The default is "host".
 * `erasureCoded`: Settings for an erasure-coded pool. If specified, `replicated` settings must not be specified. See below for more details on [erasure coding](#erasure-coding).
   * `dataChunks`: Number of chunks to divide the original object into
   * `codingChunks`: Number of coding chunks to generate
@@ -81,11 +174,23 @@ When creating an erasure-coded pool, it is highly recommended to create the pool
     > **NOTE**: Neither Rook, nor Ceph, prevent the creation of a cluster where the replicated data (or Erasure Coded chunks) can be written safely. By design, Ceph will delay checking for suitable OSDs until a write request is made and this write can hang if there are not sufficient OSDs to satisfy the request.
 * `deviceClass`: Sets up the CRUSH rule for the pool to distribute data only on the specified device class. If left empty or unspecified, the pool will use the cluster's default CRUSH root, which usually distributes data over all OSDs, regardless of their class.
 * `crushRoot`: The root in the crush map to be used by the pool. If left empty or unspecified, the default root will be used. Creating a crush hierarchy for the OSDs currently requires the Rook toolbox to run the Ceph tools described [here](http://docs.ceph.com/docs/master/rados/operations/crush-map/#modifying-the-crush-map).
+* `enableRBDStats`: Enables collecting RBD per-image IO statistics by enabling dynamic OSD performance counters. Defaults to false. For more info see the [ceph documentation](https://docs.ceph.com/docs/master/mgr/prometheus/#rbd-io-statistics).
 
 * `parameters`: Sets any [parameters](https://docs.ceph.com/docs/master/rados/operations/pools/#set-pool-values) listed to the given pool
   * `target_size_ratio:` gives a hint (%) to Ceph in terms of expected consumption of the total cluster capacity of a given pool, for more info see the [ceph documentation](https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size)
-  * `requireSafeReplicaSize`: set to false if you want to create a pool with size 1, setting pool size 1 could lead to data loss without recovery. Make sure you are *ABSOLUTELY CERTAIN* that is what you want.
   * `compression_mode`: Sets up the pool for inline compression when using a Bluestore OSD. If left unspecified does not setup any compression mode for the pool. Values supported are the same as Bluestore inline compression [modes](https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#inline-compression), such as `none`, `passive`, `aggressive`, and `force`.
+
+* `mirroring`: Sets up mirroring of the pool
+  * `enabled`: whether mirroring is enabled on that pool (default: false)
+  * `mode`: mirroring mode to run, possible values are "pool" or "image" (required). Refer to the [mirroring modes Ceph documentation](https://docs.ceph.com/docs/master/rbd/rbd-mirroring/#enable-mirroring) for more details.
+  * `snapshotSchedules`: schedule(s) snapshot at the **pool** level. **Only** supported as of Ceph Octopus release. One or more schedules are supported.
+    * `interval`: frequency of the snapshots. The interval can be specified in days, hours, or minutes using d, h, m suffix respectively.
+    * `startTime`: optional, determines at what time the snapshot process starts, specified using the ISO 8601 time format.
+
+* `statusCheck`: Sets up pool mirroring status
+  * `mirror`: displays the mirroring status
+    * `disabled`: whether to enable or disable pool mirroring status
+    * `interval`: time interval to refresh the mirroring status (default 60s)
 
 ### Add specific pool properties
 

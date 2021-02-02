@@ -23,8 +23,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const containerName = "rook-nfs-operator"
-
 var operatorCmd = &cobra.Command{
 	Use:   "operator",
 	Short: "Runs the NFS operator to deploy and manage NFS server in kubernetes clusters",
@@ -45,8 +43,7 @@ func startOperator(cmd *cobra.Command, args []string) error {
 
 	logger.Infof("starting NFS operator")
 	context := rook.NewContext()
-	rookImage := rook.GetOperatorImage(context.Clientset, containerName)
-	op := operator.New(context, rookImage)
+	op := operator.New(context)
 	err := op.Run()
 	rook.TerminateOnError(err, "failed to run operator")
 

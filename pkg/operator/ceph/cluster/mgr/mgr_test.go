@@ -17,6 +17,7 @@ limitations under the License.
 package mgr
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -25,20 +26,21 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	testopk8s "github.com/rook/rook/pkg/operator/k8sutil/test"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tevino/abool"
 	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestStartMGR(t *testing.T) {
+	ctx := context.TODO()
 	var deploymentsUpdated *[]*apps.Deployment
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
@@ -52,56 +54,49 @@ func TestStartMGR(t *testing.T) {
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
-		Executor:  executor,
-		ConfigDir: configDir,
-		Clientset: clientset}
-	clusterInfo := &cephconfig.ClusterInfo{FSID: "myfsid"}
-	c := New(
-		clusterInfo,
-		context,
-		"ns",
-		"myversion",
-		cephv1.CephVersionSpec{},
-		rookv1.Placement{},
-		rookv1.Annotations{"my": "annotation"},
-		cephv1.NetworkSpec{},
-		cephv1.DashboardSpec{Enabled: true, SSL: true},
-		cephv1.MonitoringSpec{Enabled: true, RulesNamespace: ""},
-		cephv1.MgrSpec{},
-		v1.ResourceRequirements{},
-		"my-priority-class",
-		metav1.OwnerReference{},
-		"/var/lib/rook/",
-		false,
-	)
-	defer os.RemoveAll(c.dataDir)
+		Executor:                   executor,
+		ConfigDir:                  configDir,
+		Clientset:                  clientset,
+		RequestCancelOrchestration: abool.New()}
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid"}
+	clusterInfo.SetName("test")
+	clusterSpec := cephv1.ClusterSpec{
+		Annotations:        map[rookv1.KeyType]rookv1.Annotations{cephv1.KeyMgr: {"my": "annotation"}},
+		Labels:             map[rookv1.KeyType]rookv1.Labels{cephv1.KeyMgr: {"my-label-key": "value"}},
+		Dashboard:          cephv1.DashboardSpec{Enabled: true, SSL: true},
+		Monitoring:         cephv1.MonitoringSpec{Enabled: true, RulesNamespace: ""},
+		PriorityClassNames: map[rookv1.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
+		DataDirHostPath:    "/var/lib/rook/",
+	}
+	c := New(context, clusterInfo, clusterSpec, "myversion")
+	defer os.RemoveAll(c.spec.DataDirHostPath)
 
 	// start a basic service
 	err := c.Start()
 	assert.Nil(t, err)
-	validateStart(t, c)
+	validateStart(ctx, t, c)
 	assert.ElementsMatch(t, []string{}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
 	testopk8s.ClearDeploymentsUpdated(deploymentsUpdated)
 
-	c.dashboard.UrlPrefix = "/test"
-	c.dashboard.Port = 12345
+	c.spec.Dashboard.UrlPrefix = "/test"
+	c.spec.Dashboard.Port = 12345
 	err = c.Start()
 	assert.Nil(t, err)
-	validateStart(t, c)
+	validateStart(ctx, t, c)
 	assert.ElementsMatch(t, []string{"rook-ceph-mgr-a"}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
 	testopk8s.ClearDeploymentsUpdated(deploymentsUpdated)
 
 	// starting again with more replicas
 	c.Replicas = 3
-	c.dashboard.Enabled = false
+	c.spec.Dashboard.Enabled = false
 	err = c.Start()
 	assert.Nil(t, err)
-	validateStart(t, c)
+	validateStart(ctx, t, c)
 	assert.ElementsMatch(t, []string{"rook-ceph-mgr-a"}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
 	testopk8s.ClearDeploymentsUpdated(deploymentsUpdated)
 }
 
-func validateStart(t *testing.T, c *Cluster) {
+func validateStart(ctx context.Context, t *testing.T, c *Cluster) {
 	mgrNames := []string{"a", "b"}
 	for i := 0; i < c.Replicas; i++ {
 		if i == 2 {
@@ -109,24 +104,25 @@ func validateStart(t *testing.T, c *Cluster) {
 		}
 		logger.Infof("Looking for cephmgr replica %d", i)
 		daemonName := mgrNames[i]
-		d, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(fmt.Sprintf("rook-ceph-mgr-%s", daemonName), metav1.GetOptions{})
+		d, err := c.context.Clientset.AppsV1().Deployments(c.clusterInfo.Namespace).Get(ctx, fmt.Sprintf("rook-ceph-mgr-%s", daemonName), metav1.GetOptions{})
 		assert.Nil(t, err)
 		assert.Equal(t, map[string]string{"my": "annotation"}, d.Spec.Template.Annotations)
+		assert.Contains(t, d.Spec.Template.Labels, "my-label-key")
 		assert.Equal(t, "my-priority-class", d.Spec.Template.Spec.PriorityClassName)
 	}
 
-	_, err := c.context.Clientset.CoreV1().Services(c.Namespace).Get("rook-ceph-mgr", metav1.GetOptions{})
+	_, err := c.context.Clientset.CoreV1().Services(c.clusterInfo.Namespace).Get(ctx, "rook-ceph-mgr", metav1.GetOptions{})
 	assert.Nil(t, err)
 
-	ds, err := c.context.Clientset.CoreV1().Services(c.Namespace).Get("rook-ceph-mgr-dashboard", metav1.GetOptions{})
-	if c.dashboard.Enabled {
+	ds, err := c.context.Clientset.CoreV1().Services(c.clusterInfo.Namespace).Get(ctx, "rook-ceph-mgr-dashboard", metav1.GetOptions{})
+	if c.spec.Dashboard.Enabled {
 		assert.NoError(t, err)
-		if c.dashboard.Port == 0 {
+		if c.spec.Dashboard.Port == 0 {
 			// port=0 -> default port
 			assert.Equal(t, ds.Spec.Ports[0].Port, int32(dashboardPortHTTPS))
 		} else {
 			// non-zero ports are configured as-is
-			assert.Equal(t, ds.Spec.Ports[0].Port, int32(c.dashboard.Port))
+			assert.Equal(t, ds.Spec.Ports[0].Port, int32(c.spec.Dashboard.Port))
 		}
 	} else {
 		assert.True(t, errors.IsNotFound(err))
@@ -161,15 +157,14 @@ func TestConfigureModules(t *testing.T) {
 
 	clientset := testop.New(t, 3)
 	context := &clusterd.Context{Executor: executor, Clientset: clientset}
-	clusterInfo := &cephconfig.ClusterInfo{}
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns"}
 	c := &Cluster{
-		clusterInfo: clusterInfo,
 		context:     context,
-		Namespace:   "ns",
+		clusterInfo: clusterInfo,
 	}
 
 	// one module without any special configuration
-	c.mgrSpec.Modules = []cephv1.Module{
+	c.spec.Mgr.Modules = []cephv1.Module{
 		{Name: "mymodule", Enabled: true},
 	}
 	assert.NoError(t, c.configureMgrModules())
@@ -178,12 +173,12 @@ func TestConfigureModules(t *testing.T) {
 	assert.Equal(t, "mymodule", lastModuleConfigured)
 
 	// one module that has a min version that is not met
-	c.mgrSpec.Modules = []cephv1.Module{
+	c.spec.Mgr.Modules = []cephv1.Module{
 		{Name: "pg_autoscaler", Enabled: true},
 	}
 
 	// one module that has a min version that is met
-	c.mgrSpec.Modules = []cephv1.Module{
+	c.spec.Mgr.Modules = []cephv1.Module{
 		{Name: "pg_autoscaler", Enabled: true},
 	}
 	c.clusterInfo.CephVersion = cephver.CephVersion{Major: 14}
@@ -200,7 +195,7 @@ func TestConfigureModules(t *testing.T) {
 	modulesEnabled = 0
 	lastModuleConfigured = ""
 	configSettings = map[string]string{}
-	c.mgrSpec.Modules[0].Enabled = false
+	c.spec.Mgr.Modules[0].Enabled = false
 	assert.NoError(t, c.configureMgrModules())
 	assert.Equal(t, 0, modulesEnabled)
 	assert.Equal(t, 1, modulesDisabled)

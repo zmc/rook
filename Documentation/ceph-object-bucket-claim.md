@@ -12,7 +12,7 @@ Rook supports the creation of new buckets and access to existing buckets via two
 - an `Object Bucket (OB)` is a custom resource automatically generated when a bucket is provisioned. It is a global resource, typically not visible to non-admin users, and contains information specific to the bucket. It is described by an OB CRD, also shown below.
 
 An OBC references a storage class which is created by an administrator. The storage class defines whether the bucket requested is a new bucket or an existing bucket. It also defines the bucket retention policy.
-Users request a new or existing bucket by creating an OBC which is shown below. The ceph provisioner detects the OBC and creates a new bucket or grants access to an existing bucket, depending the the storage class referenced in the OBC. It also generates a Secret which provides credentials to access the bucket, and a ConfigMap which contains the bucket's endpoint. Application pods consume the information in the Secret and ConfigMap to access the bucket
+Users request a new or existing bucket by creating an OBC which is shown below. The ceph provisioner detects the OBC and creates a new bucket or grants access to an existing bucket, depending the the storage class referenced in the OBC. It also generates a Secret which provides credentials to access the bucket, and a ConfigMap which contains the bucket's endpoint. Application pods consume the information in the Secret and ConfigMap to access the bucket. Please note that to make provisioner watch the cluster namespace only you need to set `ROOK_OBC_WATCH_OPERATOR_NAMESPACE` to `true` in the operator manifest, otherwise it watches all namespaces.
 
 ## Sample
 
@@ -28,7 +28,8 @@ spec:
   generateBucketName: photo-booth [4]
   storageClassName: rook-ceph-bucket [4]
   additionalConfig: [5]
-    ANY_KEY: VALUE ...
+    maxObjects: "1000"
+    maxSize: "2G"
 ```
 1. `name` of the `ObjectBucketClaim`. This name becomes the name of the Secret and ConfigMap.
 1. `namespace`(optional) of the `ObjectBucketClaim`, which is also the namespace of the ConfigMap and Secret.
@@ -39,7 +40,9 @@ an entire object store.
 If both `bucketName` and `generateBucketName` are supplied then `BucketName` has precedence and `GenerateBucketName` is ignored.
 If both `bucketName` and `generateBucketName` are blank or omitted then the storage class is expected to contain the name of an _existing_ bucket. It's an error if all three bucket related names are blank or omitted.
 1. `storageClassName` which defines the StorageClass which contains the names of the bucket provisioner, the object-store and specifies the bucket retention policy.
-1. `additionalConfig` is an optional list of key-value pairs used to define attributes specific to the bucket being provisioned by this OBC. This information is typically tuned to a particular bucket provisioner and may limit application portability. Examples can include config values such as tenant, user and policy settings, etc.
+1. `additionalConfig` is an optional list of key-value pairs used to define attributes specific to the bucket being provisioned by this OBC. This information is typically tuned to a particular bucket provisioner and may limit application portability. Options supported:
+  - `maxObjects`: The maximum number of objects in the bucket
+  - `maxSize`: The maximum size of the bucket, please note minimum recommended value is 4K.
 
 ### OBC Custom Resource after Bucket Provisioning
 ```yaml
@@ -55,10 +58,7 @@ spec:
   ObjectBucketName: obc-default-ceph-bucket [2]
   additionalConfig: null
   bucketName: photo-booth-c1178d61-1517-431f-8408-ec4c9fa50bee [3]
-  cannedBucketAcl: ""
-  ssl: false
   storageClassName: rook-ceph-bucket [4]
-  versioned: false
 status:
   Phase: bound [5]
 ```

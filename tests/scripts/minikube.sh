@@ -20,7 +20,11 @@ function wait_for_ssh() {
 function copy_image_to_cluster() {
     local build_image=$1
     local final_image=$2
-    docker save "${build_image}" | (eval "$(minikube docker-env --shell bash)" && docker load && docker tag "${build_image}" "${final_image}")
+    local docker_env_tag="${DOCKERCMD}-env"
+    ${DOCKERCMD} save "${build_image}" | \
+        (eval "$(minikube ${docker_env_tag} --shell bash)" && \
+        ${DOCKERCMD} load && \
+        ${DOCKERCMD} tag "${build_image}" "${final_image}")
 }
 
 function copy_images() {
@@ -28,12 +32,7 @@ function copy_images() {
       echo "copying ceph images"
       copy_image_to_cluster "${BUILD_REGISTRY}/ceph-amd64" rook/ceph:master
       # uncomment to push the nautilus image when needed
-      #copy_image_to_cluster ceph/ceph:v14 ceph/ceph:v14
-    fi
-
-    if [[ "$1" == "" || "$1" == "cockroachdb" ]]; then
-      echo "copying cockroachdb image"
-      copy_image_to_cluster "${BUILD_REGISTRY}/cockroachdb-amd64" rook/cockroachdb:master
+      #copy_image_to_cluster ceph/ceph:v15 ceph/ceph:v15
     fi
 
     if [[ "$1" == "" || "$1" == "cassandra" ]]; then
@@ -56,7 +55,7 @@ function copy_images() {
 MEMORY=${MEMORY:-"3000"}
 
 # use vda1 instead of sda1 when running with the libvirt driver
-VM_DRIVER=$(minikube config get vm-driver 2>/dev/null || echo "virtualbox")
+VM_DRIVER=$(minikube config get driver 2>/dev/null || echo "virtualbox")
 if [[ "$VM_DRIVER" == "kvm2" ]]; then
   DISK="vda1"
 else
@@ -87,10 +86,6 @@ case "${1:-}" in
     copy_image_to_cluster mysql:5.6 mysql:5.6
     copy_image_to_cluster wordpress:4.6.1-apache wordpress:4.6.1-apache
     ;;
-  cockroachdb-loadgen)
-    echo "copying the cockroachdb loadgen images"
-    copy_image_to_cluster cockroachdb/loadgen-kv:0.1 cockroachdb/loadgen-kv:0.1
-    ;;
   helm)
     echo " copying rook image for helm"
     helm_tag="$(cat _output/version)"
@@ -101,12 +96,11 @@ case "${1:-}" in
     ;;
   *)
     echo "usage:" >&2
-    echo "  $0 up [ceph | cockroachdb | cassandra | nfs | yugabytedb]" >&2
+    echo "  $0 up [ceph | cassandra | nfs | yugabytedb]" >&2
     echo "  $0 down" >&2
     echo "  $0 clean" >&2
     echo "  $0 ssh" >&2
-    echo "  $0 update [ceph | cockroachdb | cassandra | nfs | yugabytedb]" >&2
+    echo "  $0 update [ceph | cassandra | nfs | yugabytedb]" >&2
     echo "  $0 wordpress" >&2
-    echo "  $0 cockroachdb-loadgen" >&2
     echo "  $0 helm" >&2
 esac

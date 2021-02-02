@@ -27,9 +27,8 @@ import (
 )
 
 const (
-	beforeOctopusTime            = "2006-01-02 15:04:05.999999999Z"
-	octopusAndAfterTime          = "2006-01-02T15:04:05.999999999Z"
-	operatorCephBaseImageVersion = "ROOK_CEPH_BASE_IMAGE_VERSION"
+	beforeOctopusTime   = "2006-01-02 15:04:05.999999999Z"
+	octopusAndAfterTime = "2006-01-02T15:04:05.999999999Z"
 )
 
 type ObjectBucketMetadata struct {
@@ -211,7 +210,7 @@ func GetBucket(c *Context, bucket string) (*ObjectBucket, int, error) {
 	return &ObjectBucket{Name: bucket, ObjectBucketMetadata: ObjectBucketMetadata{Owner: metadata.Owner, CreatedAt: metadata.CreatedAt}, ObjectBucketStats: *stat}, RGWErrorNone, nil
 }
 
-func DeleteBucket(c *Context, bucketName string, purge bool) (int, error) {
+func DeleteObjectBucket(c *Context, bucketName string, purge bool) (int, error) {
 	options := []string{"bucket", "rm", "--bucket", bucketName}
 	if purge {
 		options = append(options, "--purge-objects")

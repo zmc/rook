@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -31,6 +32,7 @@ import (
 )
 
 func TestCreateRack(t *testing.T) {
+	ctx := context.TODO()
 	simpleCluster := casstest.NewSimpleCluster(3)
 
 	tests := []struct {
@@ -76,7 +78,7 @@ func TestCreateRack(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cc := newFakeClusterController(test.kubeObjects, nil)
+			cc := newFakeClusterController(t, test.kubeObjects, nil)
 
 			if err := cc.createRack(test.rack, test.cluster); err == nil {
 				if test.expectedErr {
@@ -85,7 +87,7 @@ func TestCreateRack(t *testing.T) {
 
 					var sts *appsv1.StatefulSet
 					sts, err = cc.kubeClient.AppsV1().StatefulSets(test.cluster.Namespace).
-						Get(util.StatefulSetNameForRack(test.rack, test.cluster), metav1.GetOptions{})
+						Get(ctx, util.StatefulSetNameForRack(test.rack, test.cluster), metav1.GetOptions{})
 					if err != nil {
 						t.Errorf("Couldn't retrieve expected StatefulSet: %s", err.Error())
 					} else {
@@ -104,7 +106,7 @@ func TestCreateRack(t *testing.T) {
 }
 
 func TestScaleUpRack(t *testing.T) {
-
+	ctx := context.TODO()
 	currMembers := int32(2)
 	expMembers := int32(3)
 	c := casstest.NewSimpleCluster(expMembers)
@@ -141,7 +143,7 @@ func TestScaleUpRack(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 
-			cc := newFakeClusterController(test.kubeObjects, nil)
+			cc := newFakeClusterController(t, test.kubeObjects, nil)
 
 			test.cluster.Status = cassandrav1alpha1.ClusterStatus{
 				Racks: map[string]*cassandrav1alpha1.RackStatus{
@@ -155,7 +157,7 @@ func TestScaleUpRack(t *testing.T) {
 					t.Errorf("Expected an error, got none.")
 				} else {
 					sts, err := cc.kubeClient.AppsV1().StatefulSets(test.cluster.Namespace).
-						Get(util.StatefulSetNameForRack(test.rack, test.cluster), metav1.GetOptions{})
+						Get(ctx, util.StatefulSetNameForRack(test.rack, test.cluster), metav1.GetOptions{})
 					if err != nil {
 						t.Errorf("Couldn't retrieve expected StatefulSet: %s", err.Error())
 						return
@@ -179,7 +181,7 @@ func TestScaleUpRack(t *testing.T) {
 }
 
 func TestScaleDownRack(t *testing.T) {
-
+	ctx := context.TODO()
 	desired := int32(2)
 	actual := int32(3)
 
@@ -203,7 +205,7 @@ func TestScaleDownRack(t *testing.T) {
 
 		kubeObjects := append(memberServices, sts)
 		rookObjects := []runtime.Object{c}
-		cc := newFakeClusterController(kubeObjects, rookObjects)
+		cc := newFakeClusterController(t, kubeObjects, rookObjects)
 
 		err := cc.scaleDownRack(r, c)
 		require.NoErrorf(t, err, "Unexpected error while scaling down: %v", err)
@@ -225,14 +227,14 @@ func TestScaleDownRack(t *testing.T) {
 		kubeObjects := append(memberServices, sts)
 		rookObjects := []runtime.Object{c}
 
-		cc := newFakeClusterController(kubeObjects, rookObjects)
+		cc := newFakeClusterController(t, kubeObjects, rookObjects)
 
 		svc, err := cc.serviceLister.Services(c.Namespace).Get(memberName)
 		require.NoErrorf(t, err, "Unexpected error while getting MemberService: %v", err)
 
 		// Mark as decommissioned
 		svc.Labels[constants.DecommissionLabel] = constants.LabelValueTrue
-		_, err = cc.kubeClient.CoreV1().Services(svc.Namespace).Update(svc)
+		_, err = cc.kubeClient.CoreV1().Services(svc.Namespace).Update(ctx, svc, metav1.UpdateOptions{})
 		require.Nilf(t, err, "Unexpected error while updating MemberService: %v", err)
 
 		// Resume decommission
@@ -240,7 +242,7 @@ func TestScaleDownRack(t *testing.T) {
 		require.NoErrorf(t, err, "Unexpected error while resuming scale down: %v", err)
 
 		// Check that StatefulSet is scaled
-		updatedSts, err := cc.kubeClient.AppsV1().StatefulSets(sts.Namespace).Get(sts.Name, metav1.GetOptions{})
+		updatedSts, err := cc.kubeClient.AppsV1().StatefulSets(sts.Namespace).Get(ctx, sts.Name, metav1.GetOptions{})
 		require.NoErrorf(t, err, "Unexpected error while getting statefulset: %v", err)
 		require.Truef(t, *updatedSts.Spec.Replicas == *sts.Spec.Replicas-1, "Statefulset has incorrect number of replicas. Expected: %d, got %d.", *sts.Spec.Replicas-1, *updatedSts.Spec.Replicas)
 

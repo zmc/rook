@@ -23,8 +23,6 @@ import (
 
 	cassandrav1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/cassandra.rook.io/v1alpha1"
 	cephv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/ceph.rook.io/v1"
-	cockroachdbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/cockroachdb.rook.io/v1alpha1"
-	edgefsv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1"
 	nfsv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/nfs.rook.io/v1alpha1"
 	rookv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/rook.io/v1"
 	rookv1alpha2 "github.com/rook/rook/pkg/client/clientset/versioned/typed/rook.io/v1alpha2"
@@ -38,8 +36,6 @@ type Interface interface {
 	Discovery() discovery.DiscoveryInterface
 	CassandraV1alpha1() cassandrav1alpha1.CassandraV1alpha1Interface
 	CephV1() cephv1.CephV1Interface
-	CockroachdbV1alpha1() cockroachdbv1alpha1.CockroachdbV1alpha1Interface
-	EdgefsV1() edgefsv1.EdgefsV1Interface
 	NfsV1alpha1() nfsv1alpha1.NfsV1alpha1Interface
 	RookV1() rookv1.RookV1Interface
 	RookV1alpha2() rookv1alpha2.RookV1alpha2Interface
@@ -50,14 +46,12 @@ type Interface interface {
 // version included in a Clientset.
 type Clientset struct {
 	*discovery.DiscoveryClient
-	cassandraV1alpha1   *cassandrav1alpha1.CassandraV1alpha1Client
-	cephV1              *cephv1.CephV1Client
-	cockroachdbV1alpha1 *cockroachdbv1alpha1.CockroachdbV1alpha1Client
-	edgefsV1            *edgefsv1.EdgefsV1Client
-	nfsV1alpha1         *nfsv1alpha1.NfsV1alpha1Client
-	rookV1              *rookv1.RookV1Client
-	rookV1alpha2        *rookv1alpha2.RookV1alpha2Client
-	yugabytedbV1alpha1  *yugabytedbv1alpha1.YugabytedbV1alpha1Client
+	cassandraV1alpha1  *cassandrav1alpha1.CassandraV1alpha1Client
+	cephV1             *cephv1.CephV1Client
+	nfsV1alpha1        *nfsv1alpha1.NfsV1alpha1Client
+	rookV1             *rookv1.RookV1Client
+	rookV1alpha2       *rookv1alpha2.RookV1alpha2Client
+	yugabytedbV1alpha1 *yugabytedbv1alpha1.YugabytedbV1alpha1Client
 }
 
 // CassandraV1alpha1 retrieves the CassandraV1alpha1Client
@@ -68,16 +62,6 @@ func (c *Clientset) CassandraV1alpha1() cassandrav1alpha1.CassandraV1alpha1Inter
 // CephV1 retrieves the CephV1Client
 func (c *Clientset) CephV1() cephv1.CephV1Interface {
 	return c.cephV1
-}
-
-// CockroachdbV1alpha1 retrieves the CockroachdbV1alpha1Client
-func (c *Clientset) CockroachdbV1alpha1() cockroachdbv1alpha1.CockroachdbV1alpha1Interface {
-	return c.cockroachdbV1alpha1
-}
-
-// EdgefsV1 retrieves the EdgefsV1Client
-func (c *Clientset) EdgefsV1() edgefsv1.EdgefsV1Interface {
-	return c.edgefsV1
 }
 
 // NfsV1alpha1 retrieves the NfsV1alpha1Client
@@ -115,7 +99,7 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 	configShallowCopy := *c
 	if configShallowCopy.RateLimiter == nil && configShallowCopy.QPS > 0 {
 		if configShallowCopy.Burst <= 0 {
-			return nil, fmt.Errorf("Burst is required to be greater than 0 when RateLimiter is not set and QPS is set to greater than 0")
+			return nil, fmt.Errorf("burst is required to be greater than 0 when RateLimiter is not set and QPS is set to greater than 0")
 		}
 		configShallowCopy.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(configShallowCopy.QPS, configShallowCopy.Burst)
 	}
@@ -126,14 +110,6 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 		return nil, err
 	}
 	cs.cephV1, err = cephv1.NewForConfig(&configShallowCopy)
-	if err != nil {
-		return nil, err
-	}
-	cs.cockroachdbV1alpha1, err = cockroachdbv1alpha1.NewForConfig(&configShallowCopy)
-	if err != nil {
-		return nil, err
-	}
-	cs.edgefsV1, err = edgefsv1.NewForConfig(&configShallowCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -167,8 +143,6 @@ func NewForConfigOrDie(c *rest.Config) *Clientset {
 	var cs Clientset
 	cs.cassandraV1alpha1 = cassandrav1alpha1.NewForConfigOrDie(c)
 	cs.cephV1 = cephv1.NewForConfigOrDie(c)
-	cs.cockroachdbV1alpha1 = cockroachdbv1alpha1.NewForConfigOrDie(c)
-	cs.edgefsV1 = edgefsv1.NewForConfigOrDie(c)
 	cs.nfsV1alpha1 = nfsv1alpha1.NewForConfigOrDie(c)
 	cs.rookV1 = rookv1.NewForConfigOrDie(c)
 	cs.rookV1alpha2 = rookv1alpha2.NewForConfigOrDie(c)
@@ -183,8 +157,6 @@ func New(c rest.Interface) *Clientset {
 	var cs Clientset
 	cs.cassandraV1alpha1 = cassandrav1alpha1.New(c)
 	cs.cephV1 = cephv1.New(c)
-	cs.cockroachdbV1alpha1 = cockroachdbv1alpha1.New(c)
-	cs.edgefsV1 = edgefsv1.New(c)
 	cs.nfsV1alpha1 = nfsv1alpha1.New(c)
 	cs.rookV1 = rookv1.New(c)
 	cs.rookV1alpha2 = rookv1alpha2.New(c)

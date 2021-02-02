@@ -4,7 +4,7 @@ metadata:
   name: csi-rbdplugin-provisioner
   namespace: {{ .Namespace }}
 spec:
-  replicas: 2
+  replicas: {{ .ProvisionerReplicas }}
   selector:
     matchLabels:
      app: csi-rbdplugin-provisioner
@@ -13,6 +13,9 @@ spec:
       labels:
         app: csi-rbdplugin-provisioner
         contains: csi-rbdplugin-metrics
+        {{ range $key, $value := .CSIRBDPodLabels }}
+        {{ $key }}: "{{ $value }}"
+        {{ end }}
     spec:
       serviceAccount: rook-csi-rbd-provisioner-sa
       {{ if .ProvisionerPriorityClassName }}
@@ -26,9 +29,9 @@ spec:
             - "--v={{ .LogLevel }}"
             - "--timeout=150s"
             - "--retry-interval-start=500ms"
-            - "--enable-leader-election=true"
-            - "--leader-election-type=leases"
+            - "--leader-election=true"
             - "--leader-election-namespace={{ .Namespace }}"
+            - "--default-fstype=ext4"
           env:
             - name: ADDRESS
               value: unix:///csi/csi-provisioner.sock
@@ -41,9 +44,10 @@ spec:
           args:
             - "--csi-address=$(ADDRESS)"
             - "--v={{ .LogLevel }}"
-            - "--csiTimeout=150s"
+            - "--timeout=150s"
             - "--leader-election"
             - "--leader-election-namespace={{ .Namespace }}"
+            - "--handle-volume-inuse-error=false"
           env:
             - name: ADDRESS
               value: unix:///csi/csi-provisioner.sock
@@ -66,7 +70,7 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-        {{ if .EnableSnapshotter }}
+        {{ if .EnableRBDSnapshotter }}
         - name: csi-snapshotter
           image:  {{ .SnapshotterImage }}
           args:
@@ -82,6 +86,26 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+        {{ end }}
+        {{ if .EnableOMAPGenerator }}
+        - name: csi-omap-generator
+          image: {{ .CSIPluginImage }}
+          args :
+            - "--type=controller"
+            - "--drivernamespace=$(DRIVER_NAMESPACE)"
+            - "--v={{ .LogLevel }}"
+            - "--drivername={{ .DriverNamePrefix }}rbd.csi.ceph.com"
+          env:
+            - name: DRIVER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: ceph-csi-config
+              mountPath: /etc/ceph-csi-config/
+            - name: keys-tmp-dir
+              mountPath: /tmp/csi/keys
         {{ end }}
         - name: csi-rbdplugin
           image: {{ .CSIPluginImage }}

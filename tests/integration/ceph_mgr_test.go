@@ -50,6 +50,9 @@ func TestCephMgrSuite(t *testing.T) {
 		t.Skip()
 	}
 
+	logger.Info("TEMPORARILY disable the mgr test suite until https://github.com/rook/rook/issues/5877 is resolved")
+	t.Skip()
+
 	s := new(CephMgrSuite)
 	defer func(s *CephMgrSuite) {
 		HandlePanics(recover(), s.cluster, s.T)
@@ -79,7 +82,6 @@ type serviceStatus struct {
 }
 
 type service struct {
-	placement   map[string]string
 	ServiceName string `json:"Service_name"`
 	ServiceType string `json:"Service_type"`
 	Status      serviceStatus
@@ -122,15 +124,18 @@ func (suite *CephMgrSuite) execute(command []string) (error, string) {
 }
 
 func (suite *CephMgrSuite) waitForOrchestrationModule() {
+	var err error
 	for timeout := 0; timeout < 30; timeout++ {
 		err, output := suite.execute([]string{"status"})
-		logger.Info("%s", output)
+		logger.Infof("%s", output)
 		if err == nil {
 			logger.Info("Rook Toolbox ready to execute commands")
-			break
+			return
 		}
 		time.Sleep(2 * time.Second)
 	}
+	logger.Error("Giving up waiting for Rook Toolbox to be ready")
+	assert.Nil(suite.T(), err)
 }
 func (suite *CephMgrSuite) TestDeviceLs() {
 	logger.Info("Testing .... <ceph orch device ls>")

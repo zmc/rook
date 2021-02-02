@@ -17,11 +17,14 @@ limitations under the License.
 package integration
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/tests/framework/clients"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
@@ -33,16 +36,210 @@ import (
 )
 
 const (
-	fileMountPath        = "/tmp/rookfs"
 	filePodName          = "file-test"
 	fileMountUserPodName = "file-mountuser-test"
 	fileMountUser        = "filemountuser"
-	fileMountSecret      = "file-mountuser-cephkey"
+	fileMountSecret      = "file-mountuser-cephkey" //nolint:gosec // We safely suppress gosec in tests file
 )
+
+func fileSystemCSICloneTest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, storageClassName, systemNamespace string) {
+	// create pvc and app
+	pvcSize := "1Gi"
+	pvcName := "parent-pvc"
+	podName := "demo-pod"
+	readOnly := false
+	mountPoint := "/var/lib/test"
+	logger.Infof("create a PVC")
+	err := helper.FSClient.CreatePVC(defaultNamespace, pvcName, storageClassName, "ReadWriteOnce", pvcSize)
+	require.NoError(s.T(), err)
+	require.True(s.T(), k8sh.WaitUntilPVCIsBound(defaultNamespace, pvcName), "Make sure PVC is Bound")
+
+	logger.Infof("bind PVC to application")
+	err = helper.FSClient.CreatePod(podName, pvcName, defaultNamespace, mountPoint, readOnly)
+	assert.NoError(s.T(), err)
+
+	logger.Infof("check pod is in running state")
+	require.True(s.T(), k8sh.IsPodRunning(podName, defaultNamespace), "make sure pod is in running state")
+	logger.Infof("Storage Mounted successfully")
+
+	// write data to pvc get the checksum value
+	logger.Infof("write data to pvc")
+	cmd := fmt.Sprintf("dd if=/dev/zero of=%s/file.out bs=1MB count=10 status=none conv=fsync && md5sum %s/file.out", mountPoint, mountPoint)
+	resp, err := k8sh.RunCommandInPod(defaultNamespace, podName, cmd)
+	require.NoError(s.T(), err)
+	pvcChecksum := strings.Fields(resp)
+	require.Equal(s.T(), len(pvcChecksum), 2)
+
+	clonePVCName := "clone-pvc"
+	logger.Infof("create a new pvc from pvc")
+	err = helper.FSClient.CreatePVCClone(defaultNamespace, clonePVCName, pvcName, storageClassName, "ReadWriteOnce", pvcSize)
+	require.NoError(s.T(), err)
+	require.True(s.T(), k8sh.WaitUntilPVCIsBound(defaultNamespace, clonePVCName), "Make sure PVC is Bound")
+
+	clonePodName := "clone-pod"
+	logger.Infof("bind PVC clone to application")
+	err = helper.FSClient.CreatePod(clonePodName, clonePVCName, defaultNamespace, mountPoint, readOnly)
+	assert.NoError(s.T(), err)
+
+	logger.Infof("check pod is in running state")
+	require.True(s.T(), k8sh.IsPodRunning(clonePodName, defaultNamespace), "make sure pod is in running state")
+	logger.Infof("Storage Mounted successfully")
+
+	// get the checksum of the data and validate it
+	logger.Infof("check md5sum of both pvc and clone data is same")
+	cmd = fmt.Sprintf("md5sum %s/file.out", mountPoint)
+	resp, err = k8sh.RunCommandInPod(defaultNamespace, clonePodName, cmd)
+	require.NoError(s.T(), err)
+	clonePVCChecksum := strings.Fields(resp)
+	require.Equal(s.T(), len(clonePVCChecksum), 2)
+
+	// compare the checksum value and verify the values are equal
+	assert.Equal(s.T(), clonePVCChecksum[0], pvcChecksum[0])
+	// delete clone PVC and app
+	logger.Infof("delete clone pod")
+
+	err = k8sh.DeletePod(k8sutil.DefaultNamespace, clonePodName)
+	require.NoError(s.T(), err)
+	logger.Infof("delete clone pvc")
+
+	err = helper.FSClient.DeletePVC(defaultNamespace, clonePVCName)
+	assertNoErrorUnlessNotFound(s, err)
+	assert.True(s.T(), k8sh.WaitUntilPVCIsDeleted(defaultNamespace, clonePVCName))
+
+	// delete the parent PVC and app
+	err = k8sh.DeletePod(k8sutil.DefaultNamespace, podName)
+	require.NoError(s.T(), err)
+	logger.Infof("delete parent pvc")
+
+	err = helper.FSClient.DeletePVC(defaultNamespace, pvcName)
+	assertNoErrorUnlessNotFound(s, err)
+	assert.True(s.T(), k8sh.WaitUntilPVCIsDeleted(defaultNamespace, pvcName))
+}
+
+func fileSystemCSISnapshotTest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, storageClassName, namespace string) {
+	logger.Infof("install snapshot CRD")
+	err := k8sh.CreateSnapshotCRD()
+	require.NoError(s.T(), err)
+
+	logger.Infof("install snapshot controller")
+	err = k8sh.CreateSnapshotController()
+	require.NoError(s.T(), err)
+
+	logger.Infof("check snapshot controller is running")
+	err = k8sh.WaitForSnapshotController(15)
+	require.NoError(s.T(), err)
+	// create snapshot class
+	snapshotDeletePolicy := "Delete"
+	snapshotClassName := "snapshot-testing"
+	logger.Infof("create snapshotclass")
+	err = helper.FSClient.CreateSnapshotClass(snapshotClassName, snapshotDeletePolicy, namespace)
+	require.NoError(s.T(), err)
+	// create pvc and app
+	pvcSize := "1Gi"
+	pvcName := "snap-pvc"
+	podName := "demo-pod"
+	readOnly := false
+	mountPoint := "/var/lib/test"
+	logger.Infof("create a PVC")
+	err = helper.FSClient.CreatePVC(defaultNamespace, pvcName, storageClassName, "ReadWriteOnce", pvcSize)
+	require.NoError(s.T(), err)
+	require.True(s.T(), k8sh.WaitUntilPVCIsBound(defaultNamespace, pvcName), "Make sure PVC is Bound")
+
+	logger.Infof("bind PVC to application")
+	err = helper.FSClient.CreatePod(podName, pvcName, defaultNamespace, mountPoint, readOnly)
+	assert.NoError(s.T(), err)
+
+	logger.Infof("check pod is in running state")
+	require.True(s.T(), k8sh.IsPodRunning(podName, defaultNamespace), "make sure pod is in running state")
+	logger.Infof("Storage Mounted successfully")
+
+	// write data to pvc get the checksum value
+	logger.Infof("write data to pvc")
+	cmd := fmt.Sprintf("dd if=/dev/zero of=%s/file.out bs=1MB count=10 status=none conv=fsync && md5sum %s/file.out", mountPoint, mountPoint)
+	resp, err := k8sh.RunCommandInPod(defaultNamespace, podName, cmd)
+	require.NoError(s.T(), err)
+	pvcChecksum := strings.Fields(resp)
+	require.Equal(s.T(), len(pvcChecksum), 2)
+	// create a snapshot
+	snapshotName := "rbd-pvc-snapshot"
+	logger.Infof("create a snapshot from pvc")
+	err = helper.FSClient.CreateSnapshot(snapshotName, pvcName, snapshotClassName, defaultNamespace)
+	require.NoError(s.T(), err)
+	restorePVCName := "restore-block-pvc"
+	// check snapshot is in ready state
+	ready, err := k8sh.CheckSnapshotISReadyToUse(snapshotName, defaultNamespace, 15)
+	require.NoError(s.T(), err)
+	require.True(s.T(), ready, "make sure snapshot is in ready state")
+	// create restore from snapshot and bind it to app
+	logger.Infof("restore pvc to a new snapshot")
+	err = helper.FSClient.CreatePVCRestore(defaultNamespace, restorePVCName, snapshotName, storageClassName, "ReadWriteOnce", pvcSize)
+	require.NoError(s.T(), err)
+	require.True(s.T(), k8sh.WaitUntilPVCIsBound(defaultNamespace, restorePVCName), "Make sure PVC is Bound")
+
+	restorePodName := "restore-pod"
+	logger.Infof("bind PVC Restore to application")
+	err = helper.FSClient.CreatePod(restorePodName, restorePVCName, defaultNamespace, mountPoint, readOnly)
+	assert.NoError(s.T(), err)
+
+	logger.Infof("check pod is in running state")
+	require.True(s.T(), k8sh.IsPodRunning(restorePodName, defaultNamespace), "make sure pod is in running state")
+	logger.Infof("Storage Mounted successfully")
+
+	// get the checksum of the data and validate it
+	logger.Infof("check md5sum of both pvc and restore data is same")
+	cmd = fmt.Sprintf("md5sum %s/file.out", mountPoint)
+	resp, err = k8sh.RunCommandInPod(defaultNamespace, restorePodName, cmd)
+	require.NoError(s.T(), err)
+	restorePVCChecksum := strings.Fields(resp)
+	require.Equal(s.T(), len(restorePVCChecksum), 2)
+
+	// compare the checksum value and verify the values are equal
+	assert.Equal(s.T(), restorePVCChecksum[0], pvcChecksum[0])
+	// delete clone PVC and app
+	logger.Infof("delete restore pod")
+
+	err = k8sh.DeletePod(k8sutil.DefaultNamespace, restorePodName)
+	require.NoError(s.T(), err)
+	logger.Infof("delete restore pvc")
+
+	err = helper.FSClient.DeletePVC(defaultNamespace, restorePVCName)
+	assertNoErrorUnlessNotFound(s, err)
+	assert.True(s.T(), k8sh.WaitUntilPVCIsDeleted(defaultNamespace, restorePVCName))
+
+	// delete the snapshot
+	logger.Infof("delete snapshot")
+
+	err = helper.FSClient.DeleteSnapshot(snapshotName, pvcName, snapshotClassName, defaultNamespace)
+	require.NoError(s.T(), err)
+	logger.Infof("delete application pod")
+
+	// delete the parent PVC and app
+	err = k8sh.DeletePod(k8sutil.DefaultNamespace, podName)
+	require.NoError(s.T(), err)
+	logger.Infof("delete parent pvc")
+
+	err = helper.FSClient.DeletePVC(defaultNamespace, pvcName)
+	assertNoErrorUnlessNotFound(s, err)
+	assert.True(s.T(), k8sh.WaitUntilPVCIsDeleted(defaultNamespace, pvcName))
+
+	logger.Infof("delete snapshotclass")
+
+	err = helper.FSClient.DeleteSnapshotClass(snapshotClassName, snapshotDeletePolicy, namespace)
+	require.NoError(s.T(), err)
+	logger.Infof("delete snapshot-controller")
+
+	err = k8sh.DeleteSnapshotController()
+	require.NoError(s.T(), err)
+	logger.Infof("delete snapshot CRD")
+
+	// remove snapshotcontroller and delete snapshot CRD
+	err = k8sh.DeleteSnapshotCRD()
+	require.NoError(s.T(), err)
+}
 
 // Smoke Test for File System Storage - Test check the following operations on Filesystem Storage in order
 // Create,Mount,Write,Read,Unmount and Delete.
-func runFileE2ETest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace, filesystemName string, useCSI bool) {
+func runFileE2ETest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace, filesystemName string, useCSI bool, preserveFilesystemOnDelete bool) {
 	if useCSI {
 		checkSkipCSITest(s.T(), k8sh)
 	}
@@ -53,9 +250,14 @@ func runFileE2ETest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.S
 	activeCount := 2
 	createFilesystem(helper, k8sh, s, namespace, filesystemName, activeCount)
 
+	if preserveFilesystemOnDelete {
+		_, err := k8sh.Kubectl("-n", namespace, "patch", "CephFilesystem", filesystemName, "--type=merge", "-p", `{"spec": {"preserveFilesystemOnDelete": true}}`)
+		assert.NoError(s.T(), err)
+	}
+
 	// Create a test pod where CephFS is consumed without user creds
 	storageClassName := "cephfs-storageclass"
-	err := helper.FSClient.CreateStorageClass(filesystemName, namespace, storageClassName)
+	err := helper.FSClient.CreateStorageClass(filesystemName, installer.SystemNamespace(namespace), namespace, storageClassName)
 	assert.NoError(s.T(), err)
 	createFilesystemConsumerPod(helper, k8sh, s, namespace, filesystemName, storageClassName, useCSI)
 
@@ -76,6 +278,7 @@ func runFileE2ETest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.S
 		assert.NoError(s.T(), err, "we should be able to write to the `/foo` directory on CephFS")
 
 		cleanupFilesystemConsumer(helper, k8sh, s, namespace, fileMountUserPodName)
+		assert.NoError(s.T(), err)
 	}
 
 	// Start the NFS daemons
@@ -83,10 +286,21 @@ func runFileE2ETest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.S
 
 	// Cleanup the filesystem and its clients
 	cleanupFilesystemConsumer(helper, k8sh, s, namespace, filePodName)
+	assert.NoError(s.T(), err)
 	downscaleMetadataServers(helper, k8sh, s, namespace, filesystemName)
 	cleanupFilesystem(helper, k8sh, s, namespace, filesystemName)
-	err = helper.BlockClient.DeleteStorageClass(storageClassName)
+	err = helper.FSClient.DeleteStorageClass(storageClassName)
 	assertNoErrorUnlessNotFound(s, err)
+
+	if preserveFilesystemOnDelete {
+		fses, err := helper.FSClient.List(namespace)
+		assert.NoError(s.T(), err)
+		assert.Len(s.T(), fses, 1)
+		assert.Equal(s.T(), fses[0].Name, filesystemName)
+
+		err = helper.FSClient.Delete(filesystemName, namespace)
+		assert.NoError(s.T(), err)
+	}
 }
 
 func testNFSDaemons(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace string, filesystemName string) {
@@ -130,7 +344,8 @@ func cleanupFilesystemConsumer(helper *clients.TestClient, k8sh *utils.K8sHelper
 		k8sh.PrintPodDescribe(namespace, podName)
 		assert.Fail(s.T(), fmt.Sprintf("make sure %s pod is terminated", podName))
 	}
-	helper.BlockClient.DeletePVC(namespace, podName)
+	err = helper.FSClient.DeletePVC(namespace, podName)
+	assertNoErrorUnlessNotFound(s, err)
 	logger.Infof("File system consumer deleted")
 }
 
@@ -144,11 +359,26 @@ func cleanupFilesystem(helper *clients.TestClient, k8sh *utils.K8sHelper, s suit
 
 // Test File System Creation on Rook that was installed on a custom namespace i.e. Namespace != "rook" and delete it again
 func runFileE2ETestLite(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace string, filesystemName string) {
+	checkSkipCSITest(s.T(), k8sh)
 	logger.Infof("File Storage End to End Integration Test - create Filesystem and make sure mds pod is running")
 	logger.Infof("Running on Rook Cluster %s", namespace)
 	activeCount := 1
 	createFilesystem(helper, k8sh, s, namespace, filesystemName, activeCount)
+	// Create a test pod where CephFS is consumed without user creds
+	storageClassName := "cephfs-storageclass"
+	err := helper.FSClient.CreateStorageClass(filesystemName, namespace, namespace, storageClassName)
+	assert.NoError(s.T(), err)
+	assert.NoError(s.T(), err)
+	if !skipSnapshotTest(k8sh) {
+		fileSystemCSISnapshotTest(helper, k8sh, s, storageClassName, namespace)
+	}
+
+	if !skipCloneTest(k8sh) {
+		fileSystemCSICloneTest(helper, k8sh, s, storageClassName, namespace)
+	}
 	cleanupFilesystem(helper, k8sh, s, namespace, filesystemName)
+	err = helper.FSClient.DeleteStorageClass(storageClassName)
+	assertNoErrorUnlessNotFound(s, err)
 }
 
 func createFilesystem(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace, filesystemName string, activeCount int) {
@@ -165,7 +395,8 @@ func fileTestDataCleanUp(helper *clients.TestClient, k8sh *utils.K8sHelper, s su
 	logger.Infof("Cleaning up file system")
 	err := k8sh.DeletePod(namespace, podName)
 	assert.NoError(s.T(), err)
-	helper.FSClient.Delete(filesystemName, namespace)
+	err = helper.FSClient.Delete(filesystemName, namespace)
+	assert.NoError(s.T(), err)
 }
 
 func createPodWithFilesystem(k8sh *utils.K8sHelper, s suite.Suite, podName, namespace, filesystemName, storageClassName string, mountUser, useCSI bool) error {
@@ -266,6 +497,7 @@ spec:
 }
 
 func createFilesystemMountCephCredentials(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace string, filesystemName string) {
+	ctx := context.TODO()
 	// Create agent binding for access to Secrets
 	err := k8sh.ResourceOperation("apply", getFilesystemAgentMountSecretsBinding(namespace))
 	require.Nil(s.T(), err)
@@ -273,7 +505,7 @@ func createFilesystemMountCephCredentials(helper *clients.TestClient, k8sh *util
 	logger.Info("Creating /foo directory on CephFS")
 	_, err = k8sh.Exec(namespace, "rook-ceph-tools", "mkdir", []string{"-p", utils.TestMountPath})
 	require.Nil(s.T(), err)
-	_, err = k8sh.ExecWithRetry(3, namespace, "rook-ceph-tools", "bash", []string{"-c", fmt.Sprintf("mount -t ceph -o mds_namespace=%s,name=admin,secret=$(grep key /etc/ceph/keyring | awk '{print $3}') $(grep mon_host /etc/ceph/ceph.conf | awk '{print $3}'):/ %s", filesystemName, utils.TestMountPath)})
+	_, err = k8sh.ExecWithRetry(10, namespace, "rook-ceph-tools", "bash", []string{"-c", fmt.Sprintf("mount -t ceph -o mds_namespace=%s,name=admin,secret=$(grep key /etc/ceph/keyring | awk '{print $3}') $(grep mon_host /etc/ceph/ceph.conf | awk '{print $3}'):/ %s", filesystemName, utils.TestMountPath)})
 	require.Nil(s.T(), err)
 	_, err = k8sh.Exec(namespace, "rook-ceph-tools", "mkdir", []string{"-p", fmt.Sprintf("%s/foo", utils.TestMountPath)})
 	require.Nil(s.T(), err)
@@ -296,7 +528,7 @@ func createFilesystemMountCephCredentials(helper *clients.TestClient, k8sh *util
 	logger.Info("Created Ceph credentials")
 	require.Nil(s.T(), err)
 	// Save Ceph credentials to Kubernetes
-	_, err = k8sh.Clientset.CoreV1().Secrets(namespace).Create(&v1.Secret{
+	_, err = k8sh.Clientset.CoreV1().Secrets(namespace).Create(ctx, &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fileMountSecret,
 			Namespace: namespace,
@@ -304,7 +536,7 @@ func createFilesystemMountCephCredentials(helper *clients.TestClient, k8sh *util
 		Data: map[string][]byte{
 			"mykey": []byte(result),
 		},
-	})
+	}, metav1.CreateOptions{})
 	require.Nil(s.T(), err)
 	logger.Info("Created Ceph credentials Secret in Kubernetes")
 }
@@ -320,7 +552,7 @@ func createFilesystemMountUserConsumerPod(helper *clients.TestClient, k8sh *util
 }
 
 func getFilesystemAgentMountSecretsBinding(namespace string) string {
-	return `apiVersion: rbac.authorization.k8s.io/v1beta1
+	return `apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: rook-ceph-agent-mount
@@ -338,8 +570,8 @@ subjects:
 `
 }
 
-func waitForFilesystemActive(k8sh *utils.K8sHelper, namespace, filesystemName string) error {
-	command, args := cephclient.FinalizeCephCommandArgs("ceph", []string{"fs", "status", filesystemName}, k8sh.MakeContext().ConfigDir, namespace, cephclient.AdminUsername)
+func waitForFilesystemActive(k8sh *utils.K8sHelper, clusterInfo *client.ClusterInfo, filesystemName string) error {
+	command, args := cephclient.FinalizeCephCommandArgs("ceph", clusterInfo, []string{"fs", "status", filesystemName}, k8sh.MakeContext().ConfigDir)
 	var stat string
 	var err error
 

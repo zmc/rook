@@ -50,8 +50,9 @@ const (
 )
 
 func TestCephRBDMirrorController(t *testing.T) {
+	ctx := context.TODO()
 	var (
-		name      = "my-fs"
+		name      = "my-mirror"
 		namespace = "rook-ceph"
 	)
 	// Set DEBUG logging
@@ -64,7 +65,7 @@ func TestCephRBDMirrorController(t *testing.T) {
 	// FAILURE because no CephCluster
 	//
 	// An rbd-mirror resource with metadata and spec.
-	fs := &cephv1.CephRBDMirror{
+	rbdMirror := &cephv1.CephRBDMirror{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
@@ -74,11 +75,10 @@ func TestCephRBDMirrorController(t *testing.T) {
 		},
 		TypeMeta: controllerTypeMeta,
 	}
-	cephCluster := &cephv1.CephCluster{}
 
 	// Objects to track in the fake client.
 	object := []runtime.Object{
-		fs,
+		rbdMirror,
 	}
 
 	executor := &exectest.MockExecutor{
@@ -91,6 +91,21 @@ func TestCephRBDMirrorController(t *testing.T) {
 			}
 			if args[0] == "versions" {
 				return dummyVersionsRaw, nil
+			}
+			if args[0] == "mirror" && args[1] == "pool" && args[2] == "info" {
+				return `{"mode":"image","site_name":"39074576-5884-4ef3-8a4d-8a0c5ed33031","peers":[{"uuid":"4a6983c0-3c9d-40f5-b2a9-2334a4659827","direction":"rx-tx","site_name":"ocs","mirror_uuid":"","client_name":"client.rbd-mirror-peer"}]}`, nil
+			}
+			if args[0] == "mirror" && args[1] == "pool" && args[2] == "status" {
+				return `{"summary":{"health":"WARNING","daemon_health":"OK","image_health":"WARNING","states":{"unknown":1}}}`, nil
+			}
+			return "", nil
+		},
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			if args[0] == "mirror" && args[1] == "pool" && args[2] == "info" {
+				return `{"mode":"image","site_name":"39074576-5884-4ef3-8a4d-8a0c5ed33031","peers":[{"uuid":"4a6983c0-3c9d-40f5-b2a9-2334a4659827","direction":"rx-tx","site_name":"ocs","mirror_uuid":"","client_name":"client.rbd-mirror-peer"}]}`, nil
+			}
+			if args[0] == "mirror" && args[1] == "pool" && args[2] == "status" {
+				return `{"summary":{"health":"WARNING","daemon_health":"OK","image_health":"WARNING","states":{"unknown":1}}}`, nil
 			}
 			return "", nil
 		},
@@ -108,7 +123,8 @@ func TestCephRBDMirrorController(t *testing.T) {
 	s.AddKnownTypes(cephv1.SchemeGroupVersion, &cephv1.CephCluster{})
 
 	// Create a fake client to mock API calls.
-	cl := fake.NewFakeClientWithScheme(s, object...)
+	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
+
 	// Create a ReconcileCephRBDMirror object with the scheme and fake client.
 	r := &ReconcileCephRBDMirror{client: cl, scheme: s, context: c}
 
@@ -121,7 +137,7 @@ func TestCephRBDMirrorController(t *testing.T) {
 		},
 	}
 	logger.Info("STARTING PHASE 1")
-	res, err := r.Reconcile(req)
+	res, err := r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 1 DONE")
@@ -131,7 +147,7 @@ func TestCephRBDMirrorController(t *testing.T) {
 	//
 	// FAILURE we have a cluster but it's not ready
 	//
-	cephCluster = &cephv1.CephCluster{
+	cephCluster := &cephv1.CephCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      namespace,
 			Namespace: namespace,
@@ -145,11 +161,11 @@ func TestCephRBDMirrorController(t *testing.T) {
 	}
 	object = append(object, cephCluster)
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	// Create a ReconcileCephRBDMirror object with the scheme and fake client.
 	r = &ReconcileCephRBDMirror{client: cl, scheme: s, context: c}
 	logger.Info("STARTING PHASE 2")
-	res, err = r.Reconcile(req)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.True(t, res.Requeue)
 	logger.Info("PHASE 2 DONE")
@@ -162,7 +178,6 @@ func TestCephRBDMirrorController(t *testing.T) {
 
 	// Mock clusterInfo
 	secrets := map[string][]byte{
-		"cluster-name": []byte("foo-cluster"),
 		"fsid":         []byte(name),
 		"mon-secret":   []byte("monsecret"),
 		"admin-secret": []byte("adminsecret"),
@@ -175,7 +190,7 @@ func TestCephRBDMirrorController(t *testing.T) {
 		Data: secrets,
 		Type: k8sutil.RookType,
 	}
-	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(secret)
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	// Add ready status to the CephCluster
@@ -183,17 +198,42 @@ func TestCephRBDMirrorController(t *testing.T) {
 	cephCluster.Status.CephStatus.Health = "HEALTH_OK"
 
 	// Create a fake client to mock API calls.
-	cl = fake.NewFakeClientWithScheme(s, object...)
+	cl = fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 
 	// Create a ReconcileCephRBDMirror object with the scheme and fake client.
-	r = &ReconcileCephRBDMirror{client: cl, scheme: s, context: c}
+	r = &ReconcileCephRBDMirror{
+		client:  cl,
+		scheme:  s,
+		context: c,
+		peers:   make(map[string]*peerSpec),
+	}
 
-	logger.Info("STARTING PHASE 3")
-	res, err = r.Reconcile(req)
+	logger.Info("STARTING PHASE 4")
+
+	peerSecretName := "peer-secret"
+	rbdMirror.Spec.Peers.SecretNames = []string{peerSecretName}
+	err = r.client.Update(context.TODO(), rbdMirror)
+	assert.NoError(t, err)
+	res, err = r.Reconcile(ctx, req)
+	assert.Error(t, err)
+	assert.True(t, res.Requeue)
+
+	logger.Info("STARTING PHASE 5")
+	bootstrapPeerToken := `eyJmc2lkIjoiYzZiMDg3ZjItNzgyOS00ZGJiLWJjZmMtNTNkYzM0ZTBiMzVkIiwiY2xpZW50X2lkIjoicmJkLW1pcnJvci1wZWVyIiwia2V5IjoiQVFBV1lsWmZVQ1Q2RGhBQVBtVnAwbGtubDA5YVZWS3lyRVV1NEE9PSIsIm1vbl9ob3N0IjoiW3YyOjE5Mi4xNjguMTExLjEwOjMzMDAsdjE6MTkyLjE2OC4xMTEuMTA6Njc4OV0sW3YyOjE5Mi4xNjguMTExLjEyOjMzMDAsdjE6MTkyLjE2OC4xMTEuMTI6Njc4OV0sW3YyOjE5Mi4xNjguMTExLjExOjMzMDAsdjE6MTkyLjE2OC4xMTEuMTE6Njc4OV0ifQ==` //nolint:gosec // This is just a var name, not a real token
+	peerSecret := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      peerSecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{"token": []byte(bootstrapPeerToken), "pool": []byte("goo")},
+		Type: k8sutil.RookType,
+	}
+	_, err = c.Clientset.CoreV1().Secrets(namespace).Create(ctx, peerSecret, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	res, err = r.Reconcile(ctx, req)
 	assert.NoError(t, err)
 	assert.False(t, res.Requeue)
-	err = r.client.Get(context.TODO(), req.NamespacedName, fs)
+	err = r.client.Get(context.TODO(), req.NamespacedName, rbdMirror)
 	assert.NoError(t, err)
-	assert.Equal(t, "Ready", fs.Status.Phase, fs)
-	logger.Info("PHASE 3 DONE")
+	assert.Equal(t, "Ready", rbdMirror.Status.Phase, rbdMirror)
 }

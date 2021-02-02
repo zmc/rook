@@ -10,6 +10,7 @@ These examples show how to perform advanced configuration tasks on your Rook
 storage cluster.
 
 * [Prerequisites](#prerequisites)
+* [Using alternate namespaces](#using-alternate-namespaces)
 * [Use custom Ceph user and secret for mounting](#use-custom-ceph-user-and-secret-for-mounting)
 * [Log Collection](#log-collection)
 * [OSD Information](#osd-information)
@@ -29,6 +30,37 @@ the Ceph client suite is from a [Rook Toolbox container](ceph-toolbox.md).
 The Kubernetes based examples assume Rook OSD pods are in the `rook-ceph` namespace.
 If you run them in a different namespace, modify `kubectl -n rook-ceph [...]` to fit
 your situation.
+
+## Using alternate namespaces
+
+If you wish to deploy the Rook Operator and/or Ceph clusters to namespaces other than the default
+`rook-ceph`, the manifests are commented to allow for easy `sed` replacements. Change
+`ROOK_CLUSTER_NAMESPACE` to tailor the manifests for additional Ceph clusters. You can choose
+to also change `ROOK_OPERATOR_NAMESPACE` to create a new Rook Operator for each Ceph cluster (don't
+forget to set `ROOK_CURRENT_NAMESPACE_ONLY`), or you can leave it at the same value for every
+Ceph cluster if you only wish to have one Operator manage all Ceph clusters.
+
+This will help you manage namespaces more easily, but you should still make sure the resources are
+configured to your liking.
+
+```sh
+cd cluster/examples/kubernetes/ceph
+
+export ROOK_OPERATOR_NAMESPACE="rook-ceph"
+export ROOK_CLUSTER_NAMESPACE="rook-ceph"
+
+sed -i.bak \
+    -e "s/\(.*\):.*# namespace:operator/\1: $ROOK_OPERATOR_NAMESPACE # namespace:operator/g" \
+    -e "s/\(.*\):.*# namespace:cluster/\1: $ROOK_CLUSTER_NAMESPACE # namespace:cluster/g" \
+    -e "s/\(.*serviceaccount\):.*:\(.*\) # serviceaccount:namespace:operator/\1:$ROOK_OPERATOR_NAMESPACE:\2 # serviceaccount:namespace:operator/g" \
+    -e "s/\(.*serviceaccount\):.*:\(.*\) # serviceaccount:namespace:cluster/\1:$ROOK_CLUSTER_NAMESPACE:\2 # serviceaccount:namespace:cluster/g" \
+    -e "s/\(.*\): [-_A-Za-z0-9]*\.\(.*\) # driver:namespace:operator/\1: $ROOK_OPERATOR_NAMESPACE.\2 # driver:namespace:operator/g" \
+    -e "s/\(.*\): [-_A-Za-z0-9]*\.\(.*\) # driver:namespace:cluster/\1: $ROOK_CLUSTER_NAMESPACE.\2 # driver:namespace:cluster/g" \
+  common.yaml operator.yaml cluster.yaml # add other files or change these as desired for your config
+
+# You need to use `apply` for all Ceph clusters after the first if you have only one Operator
+kubectl apply -f common.yaml -f operator.yaml -f cluster.yaml # add other files as desired for yourconfig
+```
 
 ## Use custom Ceph user and secret for mounting
 
@@ -72,7 +104,7 @@ For more information on using the Ceph feature to limit access to CephFS paths, 
 **This ClusterRole is needed no matter if you want to use a RoleBinding per namespace or a ClusterRoleBinding.**
 
 ```yaml
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-agent-mount
@@ -101,7 +133,7 @@ Replace `namespace: name-of-namespace-with-mountsecret` according to the name of
 
 ```yaml
 kind: RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: rook-ceph-agent-mount
   namespace: name-of-namespace-with-mountsecret
@@ -124,7 +156,7 @@ This ClusterRoleBinding only needs to be created once, as it covers the whole cl
 
 ```yaml
 kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: rook-ceph-agent-mount
   labels:
@@ -178,7 +210,7 @@ do
  echo "Pod:  ${pod}"
  echo "Node: $(kubectl -n rook-ceph get pod ${pod} -o jsonpath='{.spec.nodeName}')"
  kubectl -n rook-ceph exec ${pod} -- sh -c '\
-  for i in /var/lib/rook/osd*; do
+  for i in /var/lib/ceph/osd/ceph-*; do
     [ -f ${i}/ready ] || continue
     echo -ne "-$(basename ${i}) "
     echo $(lsblk -n -o NAME,SIZE ${i}/block 2> /dev/null || \
@@ -188,7 +220,7 @@ do
 done
 ```
 
-The output should look something like this. Note that OSDs on the same node will show duplicate information.
+The output should look something like this.
 
 ```console
 Pod:  osd-m2fz2
@@ -421,7 +453,7 @@ For example,
 
 ```yaml
   network:
-    hostNetwork: true
+    provider: host
 ```
 
 > IMPORTANT: Changing this setting is not supported in a running Rook cluster. Host networking

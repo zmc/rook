@@ -46,7 +46,7 @@ func newClientCluster(client client.Client, namespace string, context *clusterd.
 	}
 }
 
-// onK8sNodeAdd is trigger when a node is added in the Kubernetes cluster
+// onK8sNodeAdd is triggered when a node is added in the Kubernetes cluster
 // func (c *clientCluster) onK8sNodeAdd(object runtime.Object) bool {
 func (c *clientCluster) onK8sNode(object runtime.Object) bool {
 	node, ok := object.(*v1.Node)
@@ -57,17 +57,17 @@ func (c *clientCluster) onK8sNode(object runtime.Object) bool {
 	// Get CephCluster
 	cluster := c.getCephCluster()
 
-	if k8sutil.GetNodeSchedulable(*node) == false {
+	if !k8sutil.GetNodeSchedulable(*node) {
 		logger.Debugf("node watcher: skipping cluster update. added node %q is unschedulable", node.Labels[v1.LabelHostname])
 		return false
 	}
 
-	if k8sutil.NodeIsTolerable(*node, cephv1.GetOSDPlacement(cluster.Spec.Placement).Tolerations, false) == false {
-		logger.Debugf("node watcher: node since it is not tolerable for cluster %q, skipping", cluster.Namespace)
+	if !k8sutil.NodeIsTolerable(*node, cephv1.GetOSDPlacement(cluster.Spec.Placement).Tolerations, false) {
+		logger.Debugf("node watcher: node %q is not tolerable for cluster %q, skipping", node.Name, cluster.Namespace)
 		return false
 	}
 
-	if cluster.Spec.Storage.UseAllNodes == false {
+	if !cluster.Spec.Storage.UseAllNodes {
 		logger.Debugf("node watcher: do not use all Nodes in cluster %q, skipping", cluster.Namespace)
 		return false
 	}
@@ -78,7 +78,7 @@ func (c *clientCluster) onK8sNode(object runtime.Object) bool {
 		return false
 	}
 
-	valid, _ := k8sutil.ValidNode(*node, cluster.Spec.Placement.All())
+	valid, _ := k8sutil.ValidNode(*node, cephv1.GetOSDPlacement(cluster.Spec.Placement))
 	if valid {
 		nodeName := node.Name
 		hostname, ok := node.Labels[v1.LabelHostname]
@@ -89,7 +89,9 @@ func (c *clientCluster) onK8sNode(object runtime.Object) bool {
 		// Make sure we can call Ceph properly
 		// Is the node in the CRUSH map already?
 		// If so we don't need to reconcile, this is done to avoid double reconcile on operator restart
-		osds, err := cephclient.GetOSDOnHost(c.context, cluster.Namespace, nodeName)
+		// Assume the admin key since we are watching for node status to create OSDs
+		clusterInfo := cephclient.AdminClusterInfo(cluster.Namespace)
+		osds, err := cephclient.GetOSDOnHost(c.context, clusterInfo, nodeName)
 		if err != nil {
 			// If it fails, this might be due to the the operator just starting and catching an add event for that node
 			logger.Debugf("failed to get osds on node %q", nodeName)
@@ -98,7 +100,7 @@ func (c *clientCluster) onK8sNode(object runtime.Object) bool {
 
 		// If they are OSDs in the CRUSH map and if the host exists in the CRUSH map, don't reconcile
 		if osds != "" {
-			// This is Debug level because the node receives frequent updates and this will polute the logs
+			// This is Debug level because the node receives frequent updates and this will pollute the logs
 			logger.Debugf("node watcher: node %q is already an OSD node with %q", nodeName, osds)
 		} else {
 			logger.Infof("node watcher: adding node %q to cluster %q", node.Labels[v1.LabelHostname], cluster.Namespace)

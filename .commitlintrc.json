@@ -12,10 +12,8 @@
         "cassandra",
         "ceph",
         "ci",
-        "cockroachdb",
         "core",
         "docs",
-        "edgefs",
         "nfs",
         "test",
         "yugabytedb"

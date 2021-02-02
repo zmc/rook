@@ -28,7 +28,7 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-config")
@@ -52,6 +52,9 @@ const (
 	// RbdMirrorType defines the rbd-mirror DaemonType
 	RbdMirrorType = "rbd-mirror"
 
+	// FilesystemMirrorType defines the fs-mirror DaemonType
+	FilesystemMirrorType = "fs-mirror"
+
 	// CrashType defines the crash collector DaemonType
 	CrashType = "crashcollector"
 
@@ -63,15 +66,15 @@ const (
 )
 
 var (
-	// VarLibCephDir is simply "/var/lib/ceph". It is made overwriteable only for unit tests where it
+	// VarLibCephDir is simply "/var/lib/ceph". It is made overwritable only for unit tests where it
 	// may be needed to send data intended for /var/lib/ceph to a temporary test dir.
 	VarLibCephDir = "/var/lib/ceph"
 
-	// EtcCephDir is simply "/etc/ceph". It is made overwriteable only for unit tests where it
+	// EtcCephDir is simply "/etc/ceph". It is made overwritable only for unit tests where it
 	// may be needed to send data intended for /etc/ceph to a temporary test dir.
 	EtcCephDir = "/etc/ceph"
 
-	// VarLogCephDir defines Ceph logging directory. It is made overwriteable only for unit tests where it
+	// VarLogCephDir defines Ceph logging directory. It is made overwritable only for unit tests where it
 	// may be needed to send data intended for /var/log/ceph to a temporary test dir.
 	VarLogCephDir = "/var/log/ceph"
 
@@ -102,16 +105,38 @@ func NewFlag(key, value string) string {
 // cannot be called before at least one monitor is established.
 func SetDefaultConfigs(
 	context *clusterd.Context,
-	namespace string,
-	clusterInfo *cephconfig.ClusterInfo,
-	networkSpec cephv1.NetworkSpec,
+	clusterInfo *cephclient.ClusterInfo,
+	clusterSpec cephv1.ClusterSpec,
 ) error {
 	// ceph.conf is never used. All configurations are made in the centralized mon config database,
 	// or they are specified on the commandline when daemons are called.
-	monStore := GetMonStore(context, namespace)
+	monStore := GetMonStore(context, clusterInfo)
 
 	if err := monStore.SetAll(DefaultCentralizedConfigs(clusterInfo.CephVersion)...); err != nil {
 		return errors.Wrapf(err, "failed to apply default Ceph configurations")
+	}
+
+	// When enabled the collector will logrotate logs from files
+	if clusterSpec.LogCollector.Enabled {
+		// Override "log file" for existing clusters since it is empty
+		logOptions := []Option{
+			configOverride("global", "log file", "/var/log/ceph/$cluster-$name.log"),
+			configOverride("global", "log to file", "true"),
+		}
+
+		if err := monStore.SetAll(logOptions...); err != nil {
+			return errors.Wrapf(err, "failed to apply logging configuration for log collector")
+		}
+		// If the log collector is disabled we do not log to file since we collect nothing
+	} else {
+		logOptions := []Option{
+			configOverride("global", "log file", ""),
+			configOverride("global", "log to file", "false"),
+		}
+
+		if err := monStore.SetAll(logOptions...); err != nil {
+			return errors.Wrapf(err, "failed to apply logging configuration")
+		}
 	}
 
 	if err := monStore.SetAll(DefaultLegacyConfigs()...); err != nil {
@@ -119,11 +144,11 @@ func SetDefaultConfigs(
 	}
 
 	// Apply Multus if needed
-	if networkSpec.IsMultus() {
+	if clusterSpec.Network.IsMultus() {
 		logger.Info("configuring ceph network(s) with multus")
-		cephNetworks, err := generateNetworkSettings(context, namespace, networkSpec.Selectors)
+		cephNetworks, err := generateNetworkSettings(context, clusterInfo.Namespace, clusterSpec.Network.Selectors)
 		if err != nil {
-			errors.Wrap(err, "failed to generate network settings")
+			return errors.Wrap(err, "failed to generate network settings")
 		}
 
 		// Apply ceph network settings to the mon config store

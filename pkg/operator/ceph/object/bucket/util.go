@@ -17,12 +17,13 @@ limitations under the License.
 package bucket
 
 import (
-	"math/rand"
-	"time"
+	"context"
+	"crypto/rand"
 
 	"github.com/coreos/pkg/capnslog"
 	bktv1alpha1 "github.com/kube-object-storage/lib-bucket-provisioner/pkg/apis/objectbucket.io/v1alpha1"
 	"github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner"
+	apibkt "github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner/api"
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -32,7 +33,6 @@ import (
 	"k8s.io/client-go/rest"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	cephclientset "github.com/rook/rook/pkg/client/clientset/versioned/typed/ceph.rook.io/v1"
 	cephObject "github.com/rook/rook/pkg/operator/ceph/object"
 )
 
@@ -41,9 +41,6 @@ var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-bucket-prov")
 const (
 	genUserLen           = 8
 	cephUser             = "cephUser"
-	prefixObjectStoreSvc = "rook-ceph-rgw"
-	accessKeyIdKey       = "accessKeyID"
-	secretSecretKeyKey   = "secretAccessKey"
 	objectStoreName      = "objectStoreName"
 	objectStoreNamespace = "objectStoreNamespace"
 	objectStoreEndpoint  = "endpoint"
@@ -51,28 +48,10 @@ const (
 
 func NewBucketController(cfg *rest.Config, p *Provisioner) (*provisioner.Provisioner, error) {
 	const allNamespaces = ""
-	provName := cephObject.GetObjectBucketProvisioner(p.context, p.namespace)
+	provName := cephObject.GetObjectBucketProvisioner(p.context, p.clusterInfo.Namespace)
 
 	logger.Infof("ceph bucket provisioner launched watching for provisioner %q", provName)
 	return provisioner.NewProvisioner(cfg, provName, p, allNamespaces)
-}
-
-// Return the secret namespace and name from the passed storage class.
-func getSecretNamespaceAndName(sc *storagev1.StorageClass) (string, string) {
-
-	const (
-		scSecretNameKey = "secretName"
-		scSecretNSKey   = "secretNamespace"
-	)
-	return sc.Parameters[scSecretNSKey], sc.Parameters[scSecretNameKey]
-}
-
-func getAccessKeyId(secret *v1.Secret) string {
-	return string(secret.Data[accessKeyIdKey])
-}
-
-func getSecretAccessKey(secret *v1.Secret) string {
-	return string(secret.Data[secretSecretKeyKey])
 }
 
 func getObjectStoreName(sc *storagev1.StorageClass) string {
@@ -101,9 +80,10 @@ func getCephUser(ob *bktv1alpha1.ObjectBucket) string {
 	return ob.Spec.AdditionalState[cephUser]
 }
 
-func getObjectStore(c cephclientset.CephV1Interface, namespace, name string) (*cephv1.CephObjectStore, error) {
+func (p *Provisioner) getObjectStore() (*cephv1.CephObjectStore, error) {
+	ctx := context.TODO()
 	// Verify the object store API object actually exists
-	store, err := c.CephObjectStores(namespace).Get(name, metav1.GetOptions{})
+	store, err := p.context.RookClientset.CephV1().CephObjectStores(p.clusterInfo.Namespace).Get(ctx, p.objectStoreName, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			return nil, errors.Wrap(err, "cephObjectStore not found")
@@ -114,8 +94,9 @@ func getObjectStore(c cephclientset.CephV1Interface, namespace, name string) (*c
 }
 
 func getService(c kubernetes.Interface, namespace, name string) (*v1.Service, error) {
+	ctx := context.TODO()
 	// Verify the object store's service actually exists
-	svc, err := c.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
+	svc, err := c.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			return nil, errors.Wrap(err, "cephObjectStore service not found")
@@ -127,12 +108,21 @@ func getService(c kubernetes.Interface, namespace, name string) (*v1.Service, er
 
 func randomString(n int) string {
 
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	var letterRunes = []rune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letterRunes[r.Intn(len(letterRunes))]
+	var letterRunes = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	for k, v := range b {
+		b[k] = letterRunes[v%byte(len(letterRunes))]
 	}
 	return string(b)
+}
+
+func MaxObjectQuota(options *apibkt.BucketOptions) string {
+	return options.ObjectBucketClaim.Spec.AdditionalConfig["maxObjects"]
+}
+
+func MaxSizeQuota(options *apibkt.BucketOptions) string {
+	return options.ObjectBucketClaim.Spec.AdditionalConfig["maxSize"]
 }

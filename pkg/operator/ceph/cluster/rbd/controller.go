@@ -26,7 +26,6 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
@@ -53,7 +52,7 @@ const (
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 
 // List of object resources to watch by the controller
-var objectsToWatch = []runtime.Object{
+var objectsToWatch = []client.Object{
 	&v1.Service{TypeMeta: metav1.TypeMeta{Kind: "Service", APIVersion: v1.SchemeGroupVersion.String()}},
 	&v1.ConfigMap{TypeMeta: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: v1.SchemeGroupVersion.String()}},
 	&appsv1.Deployment{TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: appsv1.SchemeGroupVersion.String()}},
@@ -69,11 +68,19 @@ var controllerTypeMeta = metav1.TypeMeta{
 
 // ReconcileCephRBDMirror reconciles a cephRBDMirror object
 type ReconcileCephRBDMirror struct {
+	context         *clusterd.Context
+	clusterInfo     *cephclient.ClusterInfo
 	client          client.Client
 	scheme          *runtime.Scheme
-	context         *clusterd.Context
 	cephClusterSpec *cephv1.ClusterSpec
-	clusterInfo     *cephconfig.ClusterInfo
+	peers           map[string]*peerSpec
+}
+
+// peerSpec represents peer details
+type peerSpec struct {
+	info      *cephclient.PoolMirroringInfo
+	poolName  string
+	direction string
 }
 
 // Add creates a new cephRBDMirror Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -86,12 +93,14 @@ func Add(mgr manager.Manager, context *clusterd.Context) error {
 func newReconciler(mgr manager.Manager, context *clusterd.Context) reconcile.Reconciler {
 	// Add the cephv1 scheme to the manager scheme so that the controller knows about it
 	mgrScheme := mgr.GetScheme()
-	cephv1.AddToScheme(mgr.GetScheme())
-
+	if err := cephv1.AddToScheme(mgr.GetScheme()); err != nil {
+		panic(err)
+	}
 	return &ReconcileCephRBDMirror{
 		client:  mgr.GetClient(),
 		scheme:  mgrScheme,
 		context: context,
+		peers:   make(map[string]*peerSpec),
 	}
 }
 
@@ -101,6 +110,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if err != nil {
 		return err
 	}
+	logger.Info("successfully started")
 
 	// Watch for changes on the cephRBDMirror CRD object
 	err = c.Watch(&source.Kind{Type: &cephv1.CephRBDMirror{TypeMeta: controllerTypeMeta}}, &handler.EnqueueRequestForObject{}, opcontroller.WatchControllerPredicate())
@@ -119,6 +129,25 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		}
 	}
 
+	// Build Handler function to return the list of ceph rbd-mirror
+	// This is used by the watchers below
+	handlerFunc, err := opcontroller.ObjectToCRMapper(mgr.GetClient(), &cephv1.CephRBDMirrorList{}, mgr.GetScheme())
+	if err != nil {
+		return err
+	}
+
+	// Watch for CephCluster Spec changes that we want to propagate to us
+	err = c.Watch(&source.Kind{Type: &cephv1.CephCluster{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       opcontroller.ClusterResource.Kind,
+			APIVersion: opcontroller.ClusterResource.APIVersion,
+		},
+	},
+	}, handler.EnqueueRequestsFromMapFunc(handlerFunc), opcontroller.WatchCephClusterPredicate())
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -126,10 +155,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 // and what is in the cephRBDMirror.Spec
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCephRBDMirror) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	// workaround because the rook logging mechanism is not compatible with the controller-runtime loggin interface
+func (r *ReconcileCephRBDMirror) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
+	// workaround because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	reconcileResponse, err := r.reconcile(request)
 	if err != nil {
+		updateStatus(r.client, request.NamespacedName, k8sutil.FailedStatus)
 		logger.Errorf("failed to reconcile %v", err)
 	}
 
@@ -154,6 +184,11 @@ func (r *ReconcileCephRBDMirror) reconcile(request reconcile.Request) (reconcile
 		updateStatus(r.client, request.NamespacedName, k8sutil.Created)
 	}
 
+	// validate the pool settings
+	if err := validateSpec(&cephRBDMirror.Spec); err != nil {
+		return opcontroller.ImmediateRetryResult, errors.Wrapf(err, "invalid rbd-mirror CR %q spec", cephRBDMirror.Name)
+	}
+
 	// Make sure a CephCluster is present otherwise do nothing
 	cephCluster, isReadyToReconcile, _, reconcileResponse := opcontroller.IsReadyToReconcile(r.client, r.context, request.NamespacedName, controllerName)
 	if !isReadyToReconcile {
@@ -164,26 +199,31 @@ func (r *ReconcileCephRBDMirror) reconcile(request reconcile.Request) (reconcile
 
 	// Populate clusterInfo
 	// Always populate it during each reconcile
-	clusterInfo, _, _, err := mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
+	r.clusterInfo, _, _, err = mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
 	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to populate cluster info")
+		return opcontroller.ImmediateRetryResult, errors.Wrap(err, "failed to populate cluster info")
 	}
-	r.clusterInfo = clusterInfo
 
 	// Populate CephVersion
 	daemon := string(opconfig.MonType)
-	currentCephVersion, err := cephclient.LeastUptodateDaemonVersion(r.context, r.clusterInfo.Name, daemon)
+	currentCephVersion, err := cephclient.LeastUptodateDaemonVersion(r.context, r.clusterInfo, daemon)
 	if err != nil {
-		return reconcile.Result{}, errors.Wrapf(err, "failed to retrieve current ceph %q version", daemon)
+		return opcontroller.ImmediateRetryResult, errors.Wrapf(err, "failed to retrieve current ceph %q version", daemon)
 	}
 	r.clusterInfo.CephVersion = currentCephVersion
+
+	// Add bootstrap peer if any
+	logger.Debug("reconciling ceph rbd mirror peers addition")
+	reconcileResponse, err = r.reconcileAddBoostrapPeer(cephRBDMirror, request.NamespacedName)
+	if err != nil {
+		return opcontroller.ImmediateRetryResult, errors.Wrap(err, "failed to add ceph rbd mirror peer")
+	}
 
 	// CREATE/UPDATE
 	logger.Debug("reconciling ceph rbd mirror deployments")
 	reconcileResponse, err = r.reconcileCreateCephRBDMirror(cephRBDMirror)
 	if err != nil {
-		updateStatus(r.client, request.NamespacedName, k8sutil.FailedStatus)
-		return reconcile.Result{}, errors.Wrap(err, "failed to create ceph rbd mirror deployments")
+		return opcontroller.ImmediateRetryResult, errors.Wrap(err, "failed to create ceph rbd mirror deployments")
 	}
 
 	// Set Ready status, we are done reconciling
@@ -197,30 +237,20 @@ func (r *ReconcileCephRBDMirror) reconcile(request reconcile.Request) (reconcile
 
 func (r *ReconcileCephRBDMirror) reconcileCreateCephRBDMirror(cephRBDMirror *cephv1.CephRBDMirror) (reconcile.Result, error) {
 	if r.cephClusterSpec.External.Enable {
-		_, err := opcontroller.ValidateCephVersionsBetweenLocalAndExternalClusters(r.context, cephRBDMirror.Namespace, r.clusterInfo.CephVersion)
+		_, err := opcontroller.ValidateCephVersionsBetweenLocalAndExternalClusters(r.context, r.clusterInfo)
 		if err != nil {
 			// This handles the case where the operator is running, the external cluster has been upgraded and a CR creation is called
 			// If that's a major version upgrade we fail, if it's a minor version, we continue, it's not ideal but not critical
-			return reconcile.Result{}, errors.Wrap(err, "refusing to run new crd")
+			return opcontroller.ImmediateRetryResult, errors.Wrap(err, "refusing to run new crd")
 		}
 	}
 
 	err := r.start(cephRBDMirror)
 	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to start rbd mirror")
+		return opcontroller.ImmediateRetryResult, errors.Wrap(err, "failed to start rbd mirror")
 	}
 
 	return reconcile.Result{}, nil
-}
-
-func (r *ReconcileCephRBDMirror) setFailedStatus(cephRBDMirror *cephv1.CephRBDMirror, errMessage string, err error) (reconcile.Result, error) {
-	cephRBDMirror.Status.Phase = k8sutil.ReconcileFailedStatus
-	errStatus := opcontroller.UpdateStatus(r.client, cephRBDMirror)
-	if errStatus != nil {
-		logger.Errorf("failed to set status. %v", errStatus)
-	}
-
-	return reconcile.Result{}, errors.Wrapf(err, "%s", errMessage)
 }
 
 // updateStatus updates an object with a given status

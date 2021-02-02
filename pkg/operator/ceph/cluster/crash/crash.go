@@ -24,13 +24,13 @@ import (
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/api/batch/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,6 +40,8 @@ import (
 const (
 	crashCollectorKeyringUsername = "client.crash"
 	crashCollectorKeyName         = "rook-ceph-crash-collector-keyring"
+	// pruneSchedule is scheduled to run every day at midnight.
+	pruneSchedule = "0 0 * * *"
 )
 
 // ClusterResource operator-kit Custom Resource Definition
@@ -126,6 +128,56 @@ func (r *ReconcileNode) createOrUpdateCephCrash(node corev1.Node, tolerations []
 	return controllerutil.CreateOrUpdate(context.TODO(), r.client, deploy, mutateFunc)
 }
 
+// createOrUpdateCephCron is a wrapper around controllerutil.CreateOrUpdate
+func (r *ReconcileNode) createOrUpdateCephCron(cephCluster cephv1.CephCluster, cephVersion *version.CephVersion) (controllerutil.OperationResult, error) {
+	cronJob := &v1beta1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            prunerName,
+			Namespace:       cephCluster.GetNamespace(),
+			OwnerReferences: []metav1.OwnerReference{clusterOwnerRef(cephCluster.GetName(), string(cephCluster.GetUID()))},
+		},
+	}
+
+	// Adding volumes to pods containing data needed to connect to the ceph cluster.
+	volumes := controller.DaemonVolumesBase(config.NewDatalessDaemonDataPathMap(cephCluster.GetNamespace(), cephCluster.Spec.DataDirHostPath), "")
+	volumes = append(volumes, keyring.Volume().CrashCollector())
+
+	mutateFunc := func() error {
+
+		// labels for the pod, the deployment, and the deploymentSelector
+		cronJobLabels := map[string]string{
+			k8sutil.AppAttr: prunerName,
+		}
+		cronJobLabels[k8sutil.ClusterAttr] = cephCluster.GetNamespace()
+
+		cronJob.ObjectMeta.Labels = cronJobLabels
+		cronJob.Spec.JobTemplate.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: cronJobLabels,
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					getCrashPruneContainer(cephCluster, *cephVersion),
+				},
+				RestartPolicy: corev1.RestartPolicyNever,
+				HostNetwork:   cephCluster.Spec.Network.IsHost(),
+				Volumes:       volumes,
+			},
+		}
+
+		cronJob.Spec.Schedule = pruneSchedule
+		// After 100 failures, the cron job will no longer run.
+		// To avoid this, the cronjob is configured to only count the failures
+		// that occurred in the last hour.
+		deadline := int64(60)
+		cronJob.Spec.StartingDeadlineSeconds = &deadline
+
+		return nil
+	}
+
+	return controllerutil.CreateOrUpdate(context.TODO(), r.client, cronJob, mutateFunc)
+}
+
 func getCrashDirInitContainer(cephCluster cephv1.CephCluster) corev1.Container {
 	dataPathMap := config.NewDatalessDaemonDataPathMap(cephCluster.GetNamespace(), cephCluster.Spec.DataDirHostPath)
 	crashPostedDir := path.Join(dataPathMap.ContainerCrashDir(), "posted")
@@ -140,7 +192,7 @@ func getCrashDirInitContainer(cephCluster cephv1.CephCluster) corev1.Container {
 			crashPostedDir,
 		},
 		Image:           cephCluster.Spec.CephVersion.Image,
-		SecurityContext: mon.PodSecurityContext(),
+		SecurityContext: controller.PodSecurityContext(),
 		Resources:       cephv1.GetCrashCollectorResources(cephCluster.Spec.Resources),
 		VolumeMounts:    controller.DaemonVolumeMounts(dataPathMap, ""),
 	}
@@ -155,7 +207,7 @@ func getCrashChownInitContainer(cephCluster cephv1.CephCluster) corev1.Container
 		cephCluster.Spec.CephVersion.Image,
 		controller.DaemonVolumeMounts(dataPathMap, ""),
 		cephv1.GetCrashCollectorResources(cephCluster.Spec.Resources),
-		mon.PodSecurityContext(),
+		controller.PodSecurityContext(),
 	)
 }
 
@@ -176,7 +228,36 @@ func getCrashDaemonContainer(cephCluster cephv1.CephCluster, cephVersion version
 		Env:             envVars,
 		VolumeMounts:    volumeMounts,
 		Resources:       cephv1.GetCrashCollectorResources(cephCluster.Spec.Resources),
-		SecurityContext: mon.PodSecurityContext(),
+		SecurityContext: controller.PodSecurityContext(),
+	}
+
+	return container
+}
+
+func getCrashPruneContainer(cephCluster cephv1.CephCluster, cephVersion version.CephVersion) corev1.Container {
+	cephImage := cephCluster.Spec.CephVersion.Image
+	envVars := append(controller.DaemonEnvVars(cephImage), generateCrashEnvVar())
+	dataPathMap := config.NewDatalessDaemonDataPathMap(cephCluster.GetNamespace(), cephCluster.Spec.DataDirHostPath)
+	volumeMounts := controller.DaemonVolumeMounts(dataPathMap, "")
+	volumeMounts = append(volumeMounts, keyring.VolumeMount().CrashCollector())
+
+	container := corev1.Container{
+		Name: "ceph-crash-pruner",
+		Command: []string{
+			"ceph",
+			"-n",
+			crashClient,
+			"crash",
+			"prune",
+		},
+		Args: []string{
+			fmt.Sprintf("%d", cephCluster.Spec.CrashCollector.DaysToRetain),
+		},
+		Image:           cephImage,
+		Env:             envVars,
+		VolumeMounts:    volumeMounts,
+		Resources:       cephv1.GetCrashCollectorResources(cephCluster.Spec.Resources),
+		SecurityContext: controller.PodSecurityContext(),
 	}
 
 	return container

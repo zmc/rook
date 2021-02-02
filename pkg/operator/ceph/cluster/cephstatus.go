@@ -26,10 +26,13 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+	"github.com/rook/rook/pkg/operator/k8sutil"
+	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -40,33 +43,44 @@ const (
 
 // cephStatusChecker aggregates the mon/cluster info needed to check the health of the monitors
 type cephStatusChecker struct {
-	context        *clusterd.Context
-	resourceName   string
-	interval       time.Duration
-	cephUser       string
-	client         client.Client
-	namespacedName types.NamespacedName
+	context     *clusterd.Context
+	clusterInfo *cephclient.ClusterInfo
+	interval    time.Duration
+	client      client.Client
+	isExternal  bool
 }
 
 // newCephStatusChecker creates a new HealthChecker object
-func newCephStatusChecker(context *clusterd.Context, resourceName string, cephUser string, namespacedName types.NamespacedName) *cephStatusChecker {
+func newCephStatusChecker(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, clusterSpec *cephv1.ClusterSpec) *cephStatusChecker {
 	c := &cephStatusChecker{
-		context:        context,
-		resourceName:   resourceName,
-		interval:       defaultStatusCheckInterval,
-		cephUser:       cephUser,
-		client:         context.Client,
-		namespacedName: namespacedName,
+		context:     context,
+		clusterInfo: clusterInfo,
+		interval:    defaultStatusCheckInterval,
+		client:      context.Client,
+		isExternal:  clusterSpec.External.Enable,
 	}
 
 	// allow overriding the check interval with an env var on the operator
-	checkInterval := os.Getenv("ROOK_CEPH_STATUS_CHECK_INTERVAL")
+	// Keep the existing behavior
+	var checkInterval string
+	checkIntervalCRSetting := clusterSpec.HealthCheck.DaemonHealth.Status.Interval
+	checkIntervalEnv := os.Getenv("ROOK_CEPH_STATUS_CHECK_INTERVAL")
+	if checkIntervalEnv != "" {
+		checkInterval = checkIntervalEnv
+	}
+
+	if checkIntervalCRSetting != "" && checkIntervalEnv == "" {
+		checkInterval = checkIntervalCRSetting
+	}
+
+	// Set duration
 	if checkInterval != "" {
 		if duration, err := time.ParseDuration(checkInterval); err == nil {
 			logger.Infof("ceph status check interval is %s", checkInterval)
 			c.interval = duration
 		}
 	}
+
 	return c
 }
 
@@ -78,7 +92,7 @@ func (c *cephStatusChecker) checkCephStatus(stopCh chan struct{}) {
 	for {
 		select {
 		case <-stopCh:
-			logger.Infof("Stopping monitoring of ceph status")
+			logger.Infof("stopping monitoring of ceph status")
 			return
 
 		case <-time.After(c.interval):
@@ -95,36 +109,54 @@ func (c *cephStatusChecker) checkStatus() {
 	logger.Debugf("checking health of cluster")
 
 	// Check ceph's status
-	status, err = cephclient.StatusWithUser(c.context, c.namespacedName.Namespace, c.cephUser)
+	status, err = cephclient.StatusWithUser(c.context, c.clusterInfo)
 	if err != nil {
 		logger.Errorf("failed to get ceph status. %v", err)
+		condition, reason, message := c.conditionMessageReason(cephv1.ConditionFailure)
+		if err := c.updateCephStatus(cephStatusOnError(err.Error()), condition, reason, message); err != nil {
+			logger.Errorf("failed to query cluster status in namespace %q. %v", c.clusterInfo.Namespace, err)
+		}
 		return
 	}
 
-	logger.Debugf("Cluster status: %+v", status)
-	if err := c.updateCephStatus(&status); err != nil {
-		logger.Errorf("failed to query cluster status in namespace %q. %v", c.namespacedName.Namespace, err)
+	logger.Debugf("cluster status: %+v", status)
+	condition, reason, message := c.conditionMessageReason(cephv1.ConditionReady)
+	if err := c.updateCephStatus(&status, condition, reason, message); err != nil {
+		logger.Errorf("failed to query cluster status in namespace %q. %v", c.clusterInfo.Namespace, err)
+	}
+
+	if status.Health.Status != "HEALTH_OK" {
+		logger.Debug("checking for stuck pods on not ready nodes")
+		if err := c.forceDeleteStuckRookPodsOnNotReadyNodes(); err != nil {
+			logger.Errorf("failed to delete pod on not ready nodes. %v", err)
+		}
 	}
 }
 
 // updateStatus updates an object with a given status
-func (c *cephStatusChecker) updateCephStatus(status *cephclient.CephStatus) error {
-	cephCluster := &cephv1.CephCluster{}
-	err := c.client.Get(context.TODO(), c.namespacedName, cephCluster)
+func (c *cephStatusChecker) updateCephStatus(status *cephclient.CephStatus, condition cephv1.ConditionType, reason, message string) error {
+	ctx := context.TODO()
+	clusterName := c.clusterInfo.NamespacedName()
+	cephCluster, err := c.context.RookClientset.CephV1().CephClusters(clusterName.Namespace).Get(ctx, clusterName.Name, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Debug("CephCluster resource not found. Ignoring since object must be deleted.")
 			return nil
 		}
-		return errors.Wrapf(err, "failed to retrieve ceph cluster %q to update status to %+v", c.namespacedName.Name, status)
+		return errors.Wrapf(err, "failed to retrieve ceph cluster %q in namespace %q to update status to %+v", clusterName.Name, clusterName.Namespace, status)
 	}
 
+	// Update with Ceph Status
 	cephCluster.Status.CephStatus = toCustomResourceStatus(cephCluster.Status, status)
+	cephCluster.Status.Phase = condition
 	if err := opcontroller.UpdateStatus(c.client, cephCluster); err != nil {
-		return errors.Wrapf(err, "failed to update cluster %q status", c.namespacedName.Namespace)
+		return errors.Wrapf(err, "failed to update cluster %q status", clusterName.Namespace)
 	}
 
-	logger.Debugf("ceph cluster %q status updated to %+v", c.namespacedName.Name, status)
+	// Update condition
+	config.ConditionExport(c.context, c.clusterInfo.NamespacedName(), condition, v1.ConditionTrue, reason, message)
+
+	logger.Debugf("ceph cluster %q status and condition updated to %+v, %v, %s, %s", clusterName.Namespace, status, v1.ConditionTrue, reason, message)
 	return nil
 }
 
@@ -141,12 +173,23 @@ func toCustomResourceStatus(currentStatus cephv1.ClusterStatus, newStatus *cephc
 			Message:  message.Summary.Message,
 		}
 	}
+
+	if newStatus.PgMap.TotalBytes != 0 {
+		s.Capacity.TotalBytes = newStatus.PgMap.TotalBytes
+		s.Capacity.UsedBytes = newStatus.PgMap.UsedBytes
+		s.Capacity.AvailableBytes = newStatus.PgMap.AvailableBytes
+		s.Capacity.LastUpdated = formatTime(time.Now().UTC())
+	}
+
 	if currentStatus.CephStatus != nil {
 		s.PreviousHealth = currentStatus.CephStatus.PreviousHealth
 		s.LastChanged = currentStatus.CephStatus.LastChanged
 		if currentStatus.CephStatus.Health != s.Health {
 			s.PreviousHealth = currentStatus.CephStatus.Health
 			s.LastChanged = s.LastChecked
+		}
+		if newStatus.PgMap.TotalBytes == 0 {
+			s.Capacity = currentStatus.CephStatus.Capacity
 		}
 	}
 	return s
@@ -157,10 +200,10 @@ func formatTime(t time.Time) string {
 }
 
 func (c *ClusterController) updateClusterCephVersion(image string, cephVersion cephver.CephVersion) {
+	ctx := context.TODO()
 	logger.Infof("cluster %q: version %q detected for image %q", c.namespacedName.Namespace, cephVersion.String(), image)
 
-	cephCluster := &cephv1.CephCluster{}
-	err := c.client.Get(context.TODO(), c.namespacedName, cephCluster)
+	cephCluster, err := c.context.RookClientset.CephV1().CephClusters(c.namespacedName.Namespace).Get(ctx, c.namespacedName.Name, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Debug("CephCluster resource not found. Ignoring since object must be deleted.")
@@ -181,4 +224,95 @@ func (c *ClusterController) updateClusterCephVersion(image string, cephVersion c
 		logger.Errorf("failed to update cluster %q version. %v", c.namespacedName.Name, err)
 		return
 	}
+}
+
+func cephStatusOnError(errorMessage string) *cephclient.CephStatus {
+	details := make(map[string]cephclient.CheckMessage)
+	details["error"] = cephclient.CheckMessage{
+		Severity: "Urgent",
+		Summary: cephclient.Summary{
+			Message: errorMessage,
+		},
+	}
+
+	return &cephclient.CephStatus{
+		Health: cephclient.HealthStatus{
+			Status: "HEALTH_ERR",
+			Checks: details,
+		},
+	}
+}
+
+func (c *cephStatusChecker) conditionMessageReason(condition cephv1.ConditionType) (cephv1.ConditionType, string, string) {
+	var reason, message string
+
+	switch condition {
+	case cephv1.ConditionFailure:
+		reason = "ClusterFailure"
+		message = "Failed to configure ceph cluster"
+		if c.isExternal {
+			message = "Failed to configure external ceph cluster"
+		}
+	case cephv1.ConditionReady:
+		reason = "ClusterCreated"
+		message = "Cluster created successfully"
+		if c.isExternal {
+			condition = cephv1.ConditionConnected
+			reason = "ClusterConnected"
+			message = "Cluster connected successfully"
+		}
+	}
+
+	return condition, reason, message
+}
+
+// forceDeleteStuckPodsOnNotReadyNodes lists all the nodes that are in NotReady state and
+// gets all the pods on the failed node and force delete the pods stuck in terminating state.
+func (c *cephStatusChecker) forceDeleteStuckRookPodsOnNotReadyNodes() error {
+	nodes, err := k8sutil.GetNotReadyKubernetesNodes(c.context.Clientset)
+	if err != nil {
+		return errors.Wrap(err, "failed to get NotReady nodes")
+	}
+	for _, node := range nodes {
+		pods, err := c.getRookPodsOnNode(node.Name)
+		if err != nil {
+			logger.Errorf("failed to get pods on NotReady node %q. %v", node.Name, err)
+		}
+		for _, pod := range pods {
+			if err := k8sutil.ForceDeletePodIfStuck(c.context, pod); err != nil {
+				logger.Warningf("skipping forced delete of stuck pod %q. %v", pod.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *cephStatusChecker) getRookPodsOnNode(node string) ([]v1.Pod, error) {
+	clusterName := c.clusterInfo.NamespacedName()
+	appLabels := []string{
+		"csi-rbdplugin-provisioner",
+		"csi-rbdplugin",
+		"csi-cephfsplugin-provisioner",
+		"csi-cephfsplugin",
+		"rook-ceph-operator",
+	}
+	podsOnNode := []v1.Pod{}
+	pods, err := c.context.Clientset.CoreV1().Pods(clusterName.Namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return podsOnNode, errors.Wrapf(err, "failed to get pods on node %q", node)
+	}
+	for _, pod := range pods.Items {
+		if pod.Labels["rook_cluster"] == clusterName.Name {
+			podsOnNode = append(podsOnNode, pod)
+			continue
+		}
+		for _, label := range appLabels {
+			if pod.Labels["app"] == label {
+				podsOnNode = append(podsOnNode, pod)
+				break
+			}
+		}
+
+	}
+	return podsOnNode, nil
 }

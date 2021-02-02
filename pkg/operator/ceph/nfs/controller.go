@@ -26,7 +26,6 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
@@ -52,7 +51,7 @@ const (
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
 
 // List of object resources to watch by the controller
-var objectsToWatch = []runtime.Object{
+var objectsToWatch = []client.Object{
 	&v1.Service{TypeMeta: metav1.TypeMeta{Kind: "Service", APIVersion: v1.SchemeGroupVersion.String()}},
 	&v1.ConfigMap{TypeMeta: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: v1.SchemeGroupVersion.String()}},
 	&appsv1.Deployment{TypeMeta: metav1.TypeMeta{Kind: "Deployment", APIVersion: appsv1.SchemeGroupVersion.String()}},
@@ -72,7 +71,7 @@ type ReconcileCephNFS struct {
 	scheme          *runtime.Scheme
 	context         *clusterd.Context
 	cephClusterSpec *cephv1.ClusterSpec
-	clusterInfo     *cephconfig.ClusterInfo
+	clusterInfo     *cephclient.ClusterInfo
 }
 
 // Add creates a new cephNFS Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -85,7 +84,9 @@ func Add(mgr manager.Manager, context *clusterd.Context) error {
 func newReconciler(mgr manager.Manager, context *clusterd.Context) reconcile.Reconciler {
 	// Add the cephv1 scheme to the manager scheme so that the controller knows about it
 	mgrScheme := mgr.GetScheme()
-	cephv1.AddToScheme(mgr.GetScheme())
+	if err := cephv1.AddToScheme(mgr.GetScheme()); err != nil {
+		panic(err)
+	}
 
 	return &ReconcileCephNFS{
 		client:  mgr.GetClient(),
@@ -126,8 +127,8 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 // and what is in the cephNFS.Spec
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCephNFS) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	// workaround because the rook logging mechanism is not compatible with the controller-runtime loggin interface
+func (r *ReconcileCephNFS) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
+	// workaround because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	reconcileResponse, err := r.reconcile(request)
 	if err != nil {
 		logger.Errorf("failed to reconcile %v", err)
@@ -147,6 +148,12 @@ func (r *ReconcileCephNFS) reconcile(request reconcile.Request) (reconcile.Resul
 		}
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, errors.Wrap(err, "failed to get cephNFS")
+	}
+
+	// Set a finalizer so we can do cleanup before the object goes away
+	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephNFS)
+	if err != nil {
+		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
 	}
 
 	// The CR was just created, initializing status fields
@@ -179,24 +186,17 @@ func (r *ReconcileCephNFS) reconcile(request reconcile.Request) (reconcile.Resul
 
 	// Populate clusterInfo
 	// Always populate it during each reconcile
-	clusterInfo, _, _, err := mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
+	r.clusterInfo, _, _, err = mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "failed to populate cluster info")
 	}
-	r.clusterInfo = clusterInfo
 
 	// Populate CephVersion
-	currentCephVersion, err := cephclient.LeastUptodateDaemonVersion(r.context, r.clusterInfo.Name, opconfig.MonType)
+	currentCephVersion, err := cephclient.LeastUptodateDaemonVersion(r.context, r.clusterInfo, opconfig.MonType)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "failed to retrieve current ceph %q version", opconfig.MonType)
 	}
 	r.clusterInfo.CephVersion = currentCephVersion
-
-	// Set a finalizer so we can do cleanup before the object goes away
-	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephNFS)
-	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
-	}
 
 	// DELETE: the CR was deleted
 	if !cephNFS.GetDeletionTimestamp().IsZero() {
@@ -217,13 +217,13 @@ func (r *ReconcileCephNFS) reconcile(request reconcile.Request) (reconcile.Resul
 	}
 
 	// validate the store settings
-	if err := validateGanesha(r.context, cephNFS); err != nil {
+	if err := validateGanesha(r.context, r.clusterInfo, cephNFS); err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "invalid ceph nfs %q arguments", cephNFS.Name)
 	}
 
 	// CREATE/UPDATE
 	logger.Debug("reconciling ceph nfs deployments")
-	reconcileResponse, err = r.reconcileCreateCephNFS(cephNFS)
+	_, err = r.reconcileCreateCephNFS(cephNFS)
 	if err != nil {
 		updateStatus(r.client, request.NamespacedName, k8sutil.FailedStatus)
 		return reconcile.Result{}, errors.Wrap(err, "failed to create ceph nfs deployments")
@@ -239,8 +239,9 @@ func (r *ReconcileCephNFS) reconcile(request reconcile.Request) (reconcile.Resul
 }
 
 func (r *ReconcileCephNFS) reconcileCreateCephNFS(cephNFS *cephv1.CephNFS) (reconcile.Result, error) {
+	ctx := context.TODO()
 	if r.cephClusterSpec.External.Enable {
-		_, err := opcontroller.ValidateCephVersionsBetweenLocalAndExternalClusters(r.context, cephNFS.Namespace, r.clusterInfo.CephVersion)
+		_, err := opcontroller.ValidateCephVersionsBetweenLocalAndExternalClusters(r.context, r.clusterInfo)
 		if err != nil {
 			// This handles the case where the operator is running, the external cluster has been upgraded and a CR creation is called
 			// If that's a major version upgrade we fail, if it's a minor version, we continue, it's not ideal but not critical
@@ -248,36 +249,33 @@ func (r *ReconcileCephNFS) reconcileCreateCephNFS(cephNFS *cephv1.CephNFS) (reco
 		}
 	}
 
-	deployments, err := r.context.Clientset.AppsV1().Deployments(cephNFS.Namespace).List(metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", AppName)})
+	deployments, err := r.context.Clientset.AppsV1().Deployments(cephNFS.Namespace).List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", AppName)})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Infof("creating ceph nfs %q", cephNFS.Name)
-			err := r.upCephNFS(cephNFS, 0)
+			err := r.upCephNFS(cephNFS)
 			if err != nil {
 				return reconcile.Result{}, errors.Wrapf(err, "failed to create ceph nfs %q", cephNFS.Name)
 			}
-		} else {
-			return reconcile.Result{}, errors.Wrap(err, "failed to list ceph nfs deployments")
+			return reconcile.Result{}, nil
 		}
-	} else {
-		// Scale up case (CR value cephNFS.Spec.Server.Active changed)
-		nfsServerListNum := len(deployments.Items)
-		if nfsServerListNum < cephNFS.Spec.Server.Active {
-			logger.Infof("scaling up ceph nfs %q from %d to %d", cephNFS.Name, nfsServerListNum, cephNFS.Spec.Server.Active)
-			err := r.upCephNFS(cephNFS, nfsServerListNum)
-			if err != nil {
-				return reconcile.Result{}, errors.Wrapf(err, "failed to scale up ceph nfs %q", cephNFS.Name)
-			}
-		}
+		return reconcile.Result{}, errors.Wrap(err, "failed to list ceph nfs deployments")
+	}
 
-		// Scale down case (CR value cephNFS.Spec.Server.Active changed)
-		if nfsServerListNum > cephNFS.Spec.Server.Active {
-			logger.Infof("scaling down ceph nfs %q from %d to %d", cephNFS.Name, nfsServerListNum, cephNFS.Spec.Server.Active)
-			err := r.downCephNFS(cephNFS, nfsServerListNum)
-			if err != nil {
-				return reconcile.Result{}, errors.Wrapf(err, "failed to scale down ceph nfs %q", cephNFS.Name)
-			}
+	nfsServerListNum := len(deployments.Items)
+	// Scale down case (CR value cephNFS.Spec.Server.Active changed)
+	if nfsServerListNum > cephNFS.Spec.Server.Active {
+		logger.Infof("scaling down ceph nfs %q from %d to %d", cephNFS.Name, nfsServerListNum, cephNFS.Spec.Server.Active)
+		err := r.downCephNFS(cephNFS, nfsServerListNum)
+		if err != nil {
+			return reconcile.Result{}, errors.Wrapf(err, "failed to scale down ceph nfs %q", cephNFS.Name)
 		}
+	}
+	// Update existing deployments and create new ones in the scale up case
+	logger.Infof("updating ceph nfs %q", cephNFS.Name)
+	err = r.upCephNFS(cephNFS)
+	if err != nil {
+		return reconcile.Result{}, errors.Wrapf(err, "failed to update ceph nfs %q", cephNFS.Name)
 	}
 
 	return reconcile.Result{}, nil

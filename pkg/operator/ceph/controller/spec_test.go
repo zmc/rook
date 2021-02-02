@@ -20,6 +20,8 @@ import (
 	"math"
 	"testing"
 
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/k8sutil"
@@ -66,6 +68,7 @@ func TestMountsMatchVolumes(t *testing.T) {
 func TestCheckPodMemory(t *testing.T) {
 	// This value is in MB
 	const PodMinimumMemory uint64 = 1024
+	name := "test"
 
 	// A value for the memory used in the tests
 	var memory_value = int64(PodMinimumMemory * 8 * uint64(math.Pow10(6)))
@@ -73,7 +76,7 @@ func TestCheckPodMemory(t *testing.T) {
 	// Case 1: No memory limits, no memory requested
 	test_resource := v1.ResourceRequirements{}
 
-	if err := CheckPodMemory(test_resource, PodMinimumMemory); err != nil {
+	if err := CheckPodMemory(name, test_resource, PodMinimumMemory); err != nil {
 		t.Errorf("Error case 1: %s", err.Error())
 	}
 
@@ -87,7 +90,7 @@ func TestCheckPodMemory(t *testing.T) {
 		},
 	}
 
-	if err := CheckPodMemory(test_resource, PodMinimumMemory); err != nil {
+	if err := CheckPodMemory(name, test_resource, PodMinimumMemory); err != nil {
 		t.Errorf("Error case 2: %s", err.Error())
 	}
 
@@ -98,7 +101,7 @@ func TestCheckPodMemory(t *testing.T) {
 		},
 	}
 
-	if err := CheckPodMemory(test_resource, PodMinimumMemory); err != nil {
+	if err := CheckPodMemory(name, test_resource, PodMinimumMemory); err != nil {
 		t.Errorf("Error case 3: %s", err.Error())
 	}
 }
@@ -152,4 +155,47 @@ func TestGenerateLivenessProbeExecDaemon(t *testing.T) {
 	// test with a mon so the delay should be 10
 	probe = GenerateLivenessProbeExecDaemon(config.MonType, "a")
 	assert.Equal(t, initialDelaySecondsNonOSDDaemon, probe.InitialDelaySeconds)
+}
+
+func TestDaemonFlags(t *testing.T) {
+	testcases := []struct {
+		label       string
+		clusterInfo *client.ClusterInfo
+		clusterSpec *cephv1.ClusterSpec
+		daemonID    string
+		expected    []string
+	}{
+		{
+			label: "case 1: IPv6 enabled",
+			clusterInfo: &client.ClusterInfo{
+				FSID: "id",
+			},
+			clusterSpec: &cephv1.ClusterSpec{
+				Network: cephv1.NetworkSpec{
+					IPFamily: "IPv6",
+				},
+			},
+			daemonID: "daemon-id",
+			expected: []string{"--fsid=id", "--keyring=/etc/ceph/keyring-store/keyring", "--log-to-stderr=true", "--err-to-stderr=true",
+				"--mon-cluster-log-to-stderr=true", "--log-stderr-prefix=debug ", "--default-log-to-file=false", "--default-mon-cluster-log-to-file=false",
+				"--mon-host=$(ROOK_CEPH_MON_HOST)", "--mon-initial-members=$(ROOK_CEPH_MON_INITIAL_MEMBERS)", "--id=daemon-id", "--setuser=ceph", "--setgroup=ceph",
+				"--ms-bind-ipv6=true"},
+		},
+		{
+			label: "case 2: IPv6 disabled",
+			clusterInfo: &client.ClusterInfo{
+				FSID: "id",
+			},
+			clusterSpec: &cephv1.ClusterSpec{},
+			daemonID:    "daemon-id",
+			expected: []string{"--fsid=id", "--keyring=/etc/ceph/keyring-store/keyring", "--log-to-stderr=true", "--err-to-stderr=true",
+				"--mon-cluster-log-to-stderr=true", "--log-stderr-prefix=debug ", "--default-log-to-file=false", "--default-mon-cluster-log-to-file=false",
+				"--mon-host=$(ROOK_CEPH_MON_HOST)", "--mon-initial-members=$(ROOK_CEPH_MON_INITIAL_MEMBERS)", "--id=daemon-id", "--setuser=ceph", "--setgroup=ceph"},
+		},
+	}
+
+	for _, tc := range testcases {
+		actual := DaemonFlags(tc.clusterInfo, tc.clusterSpec, tc.daemonID)
+		assert.Equalf(t, tc.expected, actual, "[%s]: failed to get correct daemonset flags", tc.label)
+	}
 }

@@ -8,7 +8,7 @@ apiVersion: ceph.rook.io/v1
 kind: CephFilesystem
 metadata:
   name: myfs-ec
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:cluster
 spec:
   # The metadata pool spec
   metadataPool:
@@ -22,9 +22,10 @@ spec:
         dataChunks: 2
         codingChunks: 1
       # Inline compression mode for the data pool
-      compressionMode: none
-  # Whether to preserve metadata and data pools on filesystem deletion
-  preservePoolsOnDelete: true
+      parameters:
+        compression_mode: none
+  # Whether to preserve filesystem after CephFilesystem CRD deletion
+  preserveFilesystemOnDelete: true
   # The metadata service (mds) configuration
   metadataServer:
     # The number of active MDS instances
@@ -72,6 +73,9 @@ spec:
                 topologyKey: topology.kubernetes.io/zone
     # A key/value list of annotations
     annotations:
+    #  key: value
+    # A key/value list of labels
+    labels:
     #  key: value
     resources:
     # The requests and limits set here, allow the filesystem MDS Pod(s) to use half of one CPU core and 1 gigabyte of memory

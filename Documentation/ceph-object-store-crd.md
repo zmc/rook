@@ -39,7 +39,7 @@ spec:
     type: s3
     sslCertificateRef:
     port: 80
-    securePort:
+    # securePort: 443
     instances: 1
     # A key/value list of annotations
     annotations:
@@ -81,6 +81,8 @@ spec:
 
 The pools allow all of the settings defined in the Pool CRD spec. For more details, see the [Pool CRD](ceph-pool-crd.md) settings. In the example above, there must be at least three hosts (size 3) and at least three devices (2 data + 1 coding chunks) in the cluster.
 
+When the `zone` section is set pools with the object stores name will not be created since the object-store will the using the pools created by the ceph-object-zone.
+
 * `metadataPool`: The settings used to create all of the object store metadata pools. Must use replication.
 * `dataPool`: The settings to create the object store data pool. Can use replication or erasure coding.
 * `preservePoolsOnDelete`: If it is set to 'true' the pools used to support the object store will remain when the object store will be deleted. This is a security measure to avoid accidental loss of data. It is set to 'false' by default. If not specified is also deemed as 'false'.
@@ -91,19 +93,33 @@ The gateway settings correspond to the RGW daemon settings.
 
 * `type`: `S3` is supported
 * `sslCertificateRef`: If the certificate is not specified, SSL will not be configured. If specified, this is the name of the Kubernetes secret that contains the SSL certificate to be used for secure connections to the object store. Rook will look in the secret provided at the `cert` key name. The value of the `cert` key must be in the format expected by the [RGW service](https://docs.ceph.com/docs/master/install/ceph-deploy/install-ceph-gateway/#using-ssl-with-civetweb): "The server key, server certificate, and any other CA or intermediate certificates be supplied in one file. Each of these items must be in pem form."
-* `port`: The port on which the RGW pods and the RGW service will be listening (not encrypted).
+* `port`: The port on which the Object service will be reachable. If host networking is enabled, the RGW daemons will also listen on that port. If running on SDN, the RGW daemon listening port will be 8080 internally.
 * `securePort`: The secure port on which RGW pods will be listening. An SSL certificate must be specified.
 * `instances`: The number of pods that will be started to load balance this object store.
+* `externalRgwEndpoints`: A list of IP addresses to connect to external existing Rados Gateways (works with external mode). This setting will be ignored if the `CephCluster` does not have `external` spec enabled. Refer to the [external cluster section](ceph-cluster-crd.md#external-cluster) for more details.
 * `annotations`: Key value pair list of annotations to add.
+* `labels`: Key value pair list of labels to add.
 * `placement`: The Kubernetes placement settings to determine where the RGW pods should be started in the cluster.
 * `resources`: Set resource requests/limits for the Gateway Pod(s), see [Resource Requirements/Limits](ceph-cluster-crd.md#resource-requirementslimits).
 * `priorityClassName`: Set priority class name for the Gateway Pod(s)
+
+Example of external rgw endpoints to connect to:
+
+```yaml
+gateway:
+  port: 80
+  externalRgwEndpoints:
+    - ip: 192.168.39.182
+```
+
+This will create a service with the endpoint `192.168.39.182` on port `80`, pointing to the Ceph object external gateway.
+All the other settings from the gateway section will be ignored, except for `securePort`.
 
 ## Zone Settings
 
 The [zone](ceph-object-multisite.md) settings allow the object store to join custom created [ceph-object-zone](ceph-object-multisite-crd.md).
 
-* `name`: the name of the ceph-object-zone the object stores should be in.
+* `name`: the name of the ceph-object-zone the object store will be in.
 
 ## Runtime settings
 
@@ -119,3 +135,30 @@ execution attack.
 Rook will not overwrite an existing `mime.types` ConfigMap so that user modifications will not be
 destroyed. If the object store is destroyed and recreated, the ConfigMap will also be destroyed and
 created anew.
+
+## Health settings
+
+Rook-Ceph will be default monitor the state of the object store endpoints.
+The following CRD settings are available:
+
+* `healthCheck`: main object store health monitoring section
+
+Here is a complete example:
+
+```yaml
+healthCheck:
+  bucket:
+    disabled: false
+    interval: 60s
+```
+
+The endpoint health check procedure is the following:
+
+1. Create an S3 user
+2. Create a bucket with that user
+3. PUT the file in the object store
+4. GET the file from the object store
+5. Verify object consistency
+6. Update CR health status check
+
+Rook-Ceph always keeps the bucket and the user for the health check, it just does a PUT and GET of an s3 object since creating a bucket is an expensive operation.

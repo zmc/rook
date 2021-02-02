@@ -19,6 +19,8 @@ package csi
 import (
 	"testing"
 
+	rookfake "github.com/rook/rook/pkg/client/clientset/versioned/fake"
+	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/test"
 
 	"github.com/stretchr/testify/assert"
@@ -26,10 +28,8 @@ import (
 
 func TestStartCSI(t *testing.T) {
 	RBDPluginTemplatePath = "csi-rbdplugin.yaml"
-	RBDProvisionerSTSTemplatePath = "csi-rbdplugin-provisioner-sts.yaml"
 	RBDProvisionerDepTemplatePath = "csi-rbdplugin-provisioner-dep.yaml"
 	CephFSPluginTemplatePath = "csi-cephfsplugin.yaml"
-	CephFSProvisionerSTSTemplatePath = "csi-cephfsplugin-provisioner-sts.yaml"
 	CephFSProvisionerDepTemplatePath = "csi-cephfsplugin-provisioner-dep.yaml"
 
 	CSIParam = Param{
@@ -40,10 +40,15 @@ func TestStartCSI(t *testing.T) {
 		SnapshotterImage: "image",
 	}
 	clientset := test.New(t, 3)
+	context := &clusterd.Context{
+		Clientset:     clientset,
+		RookClientset: rookfake.NewSimpleClientset(),
+	}
 	serverVersion, err := clientset.Discovery().ServerVersion()
 	if err != nil {
 		assert.Nil(t, err)
 	}
-	err = startDrivers("ns", clientset, serverVersion, nil)
+	AllowUnsupported = true
+	err = startDrivers(context.Clientset, context.RookClientset, "ns", serverVersion, nil, nil)
 	assert.Nil(t, err)
 }

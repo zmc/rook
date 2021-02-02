@@ -24,11 +24,12 @@ import (
 )
 
 func TestToString(t *testing.T) {
-	assert.Equal(t, "14.0.0-0 nautilus", fmt.Sprintf("%s", &Nautilus))
-	assert.Equal(t, "15.0.0-0 octopus", fmt.Sprintf("%s", &Octopus))
+	assert.Equal(t, "14.0.0-0 nautilus", Nautilus.String())
+	assert.Equal(t, "15.0.0-0 octopus", Octopus.String())
+	received := CephVersion{-1, 0, 0, 0}
 
 	expected := fmt.Sprintf("-1.0.0-0 %s", unknownVersionString)
-	assert.Equal(t, expected, fmt.Sprintf("%s", &CephVersion{-1, 0, 0, 0}))
+	assert.Equal(t, expected, received.String())
 }
 
 func TestCephVersionFormatted(t *testing.T) {
@@ -96,14 +97,13 @@ func TestSupported(t *testing.T) {
 	for _, v := range supportedVersions {
 		assert.True(t, v.Supported())
 	}
-	for _, v := range unsupportedVersions {
-		assert.False(t, v.Supported())
-	}
 }
 
 func TestIsRelease(t *testing.T) {
 	assert.True(t, Nautilus.isRelease(Nautilus))
 	assert.True(t, Octopus.isRelease(Octopus))
+	assert.True(t, Pacific.isRelease(Pacific))
+	assert.True(t, Quincy.isRelease(Quincy))
 
 	assert.False(t, Octopus.isRelease(Nautilus))
 
@@ -201,4 +201,37 @@ func TestValidateCephVersionsBetweenLocalAndExternalClusters(t *testing.T) {
 	externalCephVersion = CephVersion{Major: 14, Minor: 2, Extra: 2}
 	err = ValidateCephVersionsBetweenLocalAndExternalClusters(localCephVersion, externalCephVersion)
 	assert.NoError(t, err)
+}
+
+func TestCephVersion_Unsupported(t *testing.T) {
+	type fields struct {
+		Major int
+		Minor int
+		Extra int
+		Build int
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		want   bool
+	}{
+		{"supported", fields{Major: 14, Minor: 2, Extra: 1, Build: 0}, false},
+		{"supported", fields{Major: 14, Minor: 2, Extra: 12, Build: 0}, false},
+		{"supported", fields{Major: 15, Minor: 2, Extra: 1, Build: 0}, false},
+		{"supported", fields{Major: 15, Minor: 2, Extra: 6, Build: 0}, false},
+		{"unsupported", fields{Major: 14, Minor: 2, Extra: 13, Build: 0}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := &CephVersion{
+				Major: tt.fields.Major,
+				Minor: tt.fields.Minor,
+				Extra: tt.fields.Extra,
+				Build: tt.fields.Build,
+			}
+			if got := v.Unsupported(); got != tt.want {
+				t.Errorf("CephVersion.Unsupported() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

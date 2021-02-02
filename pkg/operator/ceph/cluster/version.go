@@ -48,7 +48,7 @@ func (c *ClusterController) detectAndValidateCephVersion(cluster *cluster) (*cep
 }
 
 func (c *cluster) printOverallCephVersion() {
-	versions, err := daemonclient.GetAllCephDaemonVersions(c.context, c.Namespace)
+	versions, err := daemonclient.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
 	if err != nil {
 		logger.Errorf("failed to get ceph daemons versions. %v", err)
 		return
@@ -130,8 +130,9 @@ func (c *cluster) detectCephVersion(rookImage, cephImage string, timeout time.Du
 	job := versionReporter.Job()
 	job.Spec.Template.Spec.ServiceAccountName = "rook-ceph-cmd-reporter"
 
-	// Apply the same node selector and tolerations for the ceph version detection as the mon daemons
+	// Apply the same placement for the ceph version detection as the mon daemons except for PodAntiAffinity
 	cephv1.GetMonPlacement(c.Spec.Placement).ApplyToPodSpec(&job.Spec.Template.Spec)
+	job.Spec.Template.Spec.Affinity.PodAntiAffinity = nil
 
 	stdout, stderr, retcode, err := versionReporter.Run(timeout)
 	if err != nil {
@@ -163,6 +164,10 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 			}
 			logger.Warningf("unsupported ceph version detected: %q, pursuing", version)
 		}
+
+		if version.Unsupported() {
+			logger.Errorf("UNSUPPORTED: ceph version %q detected, it is recommended to rollback to the previous pin-point stable release, pursuing anyways", version)
+		}
 	}
 
 	// The following tries to determine if the operator can proceed with an upgrade because we come from an OnAdd() call
@@ -186,8 +191,9 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 		return nil
 	}
 
+	clusterInfo.CephVersion = *version
 	if c.Spec.External.Enable && c.Spec.CephVersion.Image != "" {
-		c.Info.CephVersion, err = controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, *version)
+		c.ClusterInfo.CephVersion, err = controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.ClusterInfo)
 		if err != nil {
 			return errors.Wrap(err, "failed to validate ceph version between external and local")
 		}
@@ -201,7 +207,7 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	}
 
 	// Get cluster running versions
-	versions, err := client.GetAllCephDaemonVersions(c.context, c.Namespace)
+	versions, err := client.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
 	if err != nil {
 		logger.Errorf("failed to get ceph daemons versions, this typically happens during the first cluster initialization. %v", err)
 		return nil
@@ -220,7 +226,7 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	if differentImages {
 		// If the image version changed let's make sure we can safely upgrade
 		// check ceph's status, if not healthy we fail
-		cephHealthy := client.IsCephHealthy(c.context, c.Namespace)
+		cephHealthy := client.IsCephHealthy(c.context, c.ClusterInfo)
 		if !cephHealthy {
 			if c.Spec.SkipUpgradeChecks {
 				logger.Warning("ceph is not healthy but SkipUpgradeChecks is set, forcing upgrade.")

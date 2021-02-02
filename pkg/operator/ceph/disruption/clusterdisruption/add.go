@@ -17,19 +17,21 @@ limitations under the License.
 package clusterdisruption
 
 import (
-	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
-	"github.com/rook/rook/pkg/operator/ceph/disruption/nodedrain"
-	"github.com/rook/rook/pkg/operator/k8sutil"
+	"reflect"
 
+	"github.com/rook/rook/pkg/operator/ceph/disruption/controllerconfig"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	appsv1 "k8s.io/api/apps/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -49,11 +51,10 @@ func Add(mgr manager.Manager, context *controllerconfig.Context) error {
 	sharedClusterMap := &ClusterMap{}
 
 	reconcileClusterDisruption := &ReconcileClusterDisruption{
-		client:              mgr.GetClient(),
-		scheme:              mgrScheme,
-		context:             context,
-		clusterMap:          sharedClusterMap,
-		osdCrushLocationMap: &OSDCrushLocationMap{Context: context.ClusterdContext},
+		client:     mgr.GetClient(),
+		scheme:     mgrScheme,
+		context:    context,
+		clusterMap: sharedClusterMap,
 	}
 	reconciler := reconcile.Reconciler(reconcileClusterDisruption)
 	// Create a new controller
@@ -62,95 +63,75 @@ func Add(mgr manager.Manager, context *controllerconfig.Context) error {
 		return err
 	}
 
-	// enqueues with an empty name that is populated by the reconciler.
-	// There is a one-per-namespace limit on CephClusters
-	enqueueByNamespace := &handler.EnqueueRequestsFromMapFunc{
-		ToRequests: handler.ToRequestsFunc(func(obj handler.MapObject) []reconcile.Request {
-			// The name will be populated in the reconcile
-			namespace := obj.Meta.GetNamespace()
-			if len(namespace) == 0 {
-				logger.Errorf("enqueByNamespace received an obj without a namespace. %+v", obj)
-				return []reconcile.Request{}
+	cephClusterPredicate := predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			logger.Info("create event from ceph cluster CR")
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldCluster, ok := e.ObjectOld.DeepCopyObject().(*cephv1.CephCluster)
+			if !ok {
+				return false
 			}
-			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace}}
-			return []reconcile.Request{req}
-		}),
+			newCluster, ok := e.ObjectNew.DeepCopyObject().(*cephv1.CephCluster)
+			if !ok {
+				return false
+			}
+			return !reflect.DeepEqual(oldCluster.Spec, newCluster.Spec)
+		},
 	}
 
 	// Watch for CephClusters
-	err = c.Watch(&source.Kind{Type: &cephv1.CephCluster{}}, &handler.EnqueueRequestForObject{})
+	err = c.Watch(&source.Kind{Type: &cephv1.CephCluster{}}, &handler.EnqueueRequestForObject{}, cephClusterPredicate)
 	if err != nil {
 		return err
 	}
 
-	// Watch for PodDisruptionBudgets and enqueue the CephCluster in the namespace
+	pdbPredicate := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			pdb, ok := e.ObjectNew.DeepCopyObject().(*policyv1beta1.PodDisruptionBudget)
+			if !ok {
+				return false
+			}
+			// only reconcile if allowed disruptions is 0 in the main PDB
+			return pdb.Name == osdPDBAppName && pdb.Status.DisruptionsAllowed == 0
+		},
+	}
+
+	// Watch for main PodDisruptionBudget and enqueue the CephCluster in the namespace
 	err = c.Watch(
 		&source.Kind{Type: &policyv1beta1.PodDisruptionBudget{}},
-		&handler.EnqueueRequestsFromMapFunc{
-			ToRequests: handler.ToRequestsFunc(func(obj handler.MapObject) []reconcile.Request {
-				_, ok := obj.Object.(*policyv1beta1.PodDisruptionBudget)
-				if !ok {
-					// not a pdb, returning empty
-					logger.Errorf("PDB handler received non-PDB")
-					return []reconcile.Request{}
-				}
-				labels := obj.Meta.GetLabels()
-
-				// only enqueue osdDisruptionAppLabels
-				_, ok = labels[osdDisruptionAppName]
-				if !ok {
-					return []reconcile.Request{}
-				}
-				// // The name will be populated in the reconcile
-				namespace := obj.Meta.GetNamespace()
-				req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace}}
-
-				return []reconcile.Request{req}
-			}),
-		},
+		handler.EnqueueRequestsFromMapFunc(handler.MapFunc(func(obj client.Object) []reconcile.Request {
+			pdb, ok := obj.(*policyv1beta1.PodDisruptionBudget)
+			if !ok {
+				// not a pdb, returning empty
+				logger.Errorf("PDB handler received non-PDB")
+				return []reconcile.Request{}
+			}
+			namespace := pdb.GetNamespace()
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace}}
+			return []reconcile.Request{req}
+		}),
+		),
+		pdbPredicate,
 	)
 	if err != nil {
 		return err
 	}
 
-	// Watch for canary Deployments created by the nodedrain controller and enqueue all Cephclusters
-	err = c.Watch(
-		&source.Kind{Type: &appsv1.Deployment{}},
-		&handler.EnqueueRequestsFromMapFunc{
-			ToRequests: handler.ToRequestsFunc(func(obj handler.MapObject) []reconcile.Request {
-				_, ok := obj.Object.(*appsv1.Deployment)
-				if !ok {
-					// not a Deployment, returning empty
-					logger.Errorf("deployment handler received non-Deployment")
-					return []reconcile.Request{}
-				}
-
-				// don't enqueue if it isn't a canary Deployment
-				labels := obj.Meta.GetLabels()
-				appLabel, ok := labels[k8sutil.AppAttr]
-				if !ok || appLabel != nodedrain.CanaryAppName {
-					return []reconcile.Request{}
-				}
-
-				// Enqueue all CephClusters
-				clusterMap := sharedClusterMap.GetClusterMap()
-				numClusters := len(clusterMap)
-				if numClusters == 0 {
-					return []reconcile.Request{}
-				}
-				reqs := make([]reconcile.Request, 0)
-				for namespace := range clusterMap {
-					// The name will be populated in the reconcile
-					reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace}})
-				}
-
-				return reqs
-			}),
-		},
+	// enqueues with an empty name that is populated by the reconciler.
+	// There is a one-per-namespace limit on CephClusters
+	enqueueByNamespace := handler.EnqueueRequestsFromMapFunc(handler.MapFunc(func(obj client.Object) []reconcile.Request {
+		// The name will be populated in the reconcile
+		namespace := obj.GetNamespace()
+		if len(namespace) == 0 {
+			logger.Errorf("enqueueByNamespace received an obj without a namespace. %+v", obj)
+			return []reconcile.Request{}
+		}
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Namespace: namespace}}
+		return []reconcile.Request{req}
+	}),
 	)
-	if err != nil {
-		return err
-	}
 
 	// Watch for CephBlockPools and enqueue the CephCluster in the namespace
 	err = c.Watch(&source.Kind{Type: &cephv1.CephBlockPool{}}, enqueueByNamespace)

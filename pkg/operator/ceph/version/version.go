@@ -46,12 +46,17 @@ var (
 	Octopus = CephVersion{15, 0, 0, 0}
 	// Pacific Ceph version
 	Pacific = CephVersion{16, 0, 0, 0}
+	// Quincy Ceph version
+	Quincy = CephVersion{17, 0, 0, 0}
+
+	// cephVolumeLVMDiskSortingCephVersion introduced a major regression in c-v and thus is not suitable for production
+	cephVolumeLVMDiskSortingCephVersion = CephVersion{Major: 14, Minor: 2, Extra: 13}
 
 	// supportedVersions are production-ready versions that rook supports
-	supportedVersions   = []CephVersion{Nautilus, Octopus}
-	unsupportedVersions = []CephVersion{Pacific}
-	// allVersions includes all supportedVersions as well as unreleased versions that are being tested with rook
-	allVersions = append(supportedVersions, unsupportedVersions...)
+	supportedVersions = []CephVersion{Nautilus, Octopus}
+
+	// unsupportedVersions are possibly Ceph pin-point release that introduced breaking changes and not recommended
+	unsupportedVersions = []CephVersion{cephVolumeLVMDiskSortingCephVersion}
 
 	// for parsing the output of `ceph --version`
 	versionPattern = regexp.MustCompile(`ceph version (\d+)\.(\d+)\.(\d+)`)
@@ -77,10 +82,14 @@ func (v *CephVersion) CephVersionFormatted() string {
 // ReleaseName is the name of the Ceph release
 func (v *CephVersion) ReleaseName() string {
 	switch v.Major {
-	case Octopus.Major:
-		return "octopus"
 	case Nautilus.Major:
 		return "nautilus"
+	case Octopus.Major:
+		return "octopus"
+	case Pacific.Major:
+		return "pacific"
+	case Quincy.Major:
+		return "quincy"
 	default:
 		return unknownVersionString
 	}
@@ -132,8 +141,22 @@ func (v *CephVersion) Supported() bool {
 	return false
 }
 
+// Unsupported checks if a given release is supported
+func (v *CephVersion) Unsupported() bool {
+	for _, sv := range unsupportedVersions {
+		if v.isExactly(sv) {
+			return true
+		}
+	}
+	return false
+}
+
 func (v *CephVersion) isRelease(other CephVersion) bool {
 	return v.Major == other.Major
+}
+
+func (v *CephVersion) isExactly(other CephVersion) bool {
+	return v.Major == other.Major && v.Minor == other.Minor && v.Extra == other.Extra
 }
 
 // IsNautilus checks if the Ceph version is Nautilus
@@ -149,6 +172,11 @@ func (v *CephVersion) IsOctopus() bool {
 // IsPacific checks if the Ceph version is Pacific
 func (v *CephVersion) IsPacific() bool {
 	return v.isRelease(Pacific)
+}
+
+// IsQuincy checks if the Ceph version is Quincy
+func (v *CephVersion) IsQuincy() bool {
+	return v.isRelease(Quincy)
 }
 
 // IsAtLeast checks a given Ceph version is at least a given one
@@ -172,6 +200,11 @@ func (v *CephVersion) IsAtLeast(other CephVersion) bool {
 	}
 	// If we arrive here then both versions are identical
 	return true
+}
+
+// IsAtLeastQuincy check that the Ceph version is at least Quincy
+func (v *CephVersion) IsAtLeastQuincy() bool {
+	return v.IsAtLeast(Quincy)
 }
 
 // IsAtLeastPacific check that the Ceph version is at least Pacific

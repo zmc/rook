@@ -20,6 +20,7 @@ import (
 	"strconv"
 
 	"github.com/pkg/errors"
+	"github.com/rook/rook/pkg/clusterd"
 	controllerutil "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,17 +28,23 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-func ValidateAndStartDrivers(clientset kubernetes.Interface, namespace, rookImage, securityAccount string, serverVersion *version.Info, ownerRef *metav1.OwnerReference) {
-	if err := validateCSIVersion(clientset, namespace, rookImage, securityAccount, ownerRef); err != nil {
-		logger.Errorf("invalid csi version. %+v", err)
-		return
+func ValidateAndConfigureDrivers(context *clusterd.Context, namespace, rookImage, securityAccount string, serverVersion *version.Info, ownerRef *metav1.OwnerReference) {
+	var v *CephCSIVersion
+	var err error
+	if !AllowUnsupported {
+		if v, err = validateCSIVersion(context.Clientset, namespace, rookImage, securityAccount, ownerRef); err != nil {
+			logger.Errorf("invalid csi version. %+v", err)
+			return
+		}
+	} else {
+		logger.Info("Skipping csi version check, since unsupported versions are allowed")
 	}
 
-	if err := startDrivers(namespace, clientset, serverVersion, ownerRef); err != nil {
+	if err := startDrivers(context.Clientset, context.RookClientset, namespace, serverVersion, ownerRef, v); err != nil {
 		logger.Errorf("failed to start Ceph csi drivers. %v", err)
 		return
 	}
-	logger.Infof("successfully started Ceph CSI driver(s)")
+	stopDrivers(context.Clientset, namespace, serverVersion)
 }
 
 func SetParams(clientset kubernetes.Interface) error {
@@ -99,5 +106,18 @@ func SetParams(clientset kubernetes.Interface) error {
 	if err != nil {
 		return errors.Wrap(err, "unable to configure CSI kubelet directory path")
 	}
+
+	csiCephFSPodLabels, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "ROOK_CSI_CEPHFS_POD_LABELS", "")
+	if err != nil {
+		return errors.Wrap(err, "unable to configure CSI CephFS pod labels")
+	}
+	CSIParam.CSICephFSPodLabels = k8sutil.ParseStringToLabels(csiCephFSPodLabels)
+
+	csiRBDPodLabels, err := k8sutil.GetOperatorSetting(clientset, controllerutil.OperatorSettingConfigMapName, "ROOK_CSI_RBD_POD_LABELS", "")
+	if err != nil {
+		return errors.Wrap(err, "unable to configure CSI RBD pod labels")
+	}
+	CSIParam.CSIRBDPodLabels = k8sutil.ParseStringToLabels(csiRBDPodLabels)
+
 	return nil
 }

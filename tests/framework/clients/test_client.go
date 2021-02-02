@@ -24,10 +24,6 @@ import (
 	"github.com/rook/rook/tests/framework/utils"
 )
 
-var (
-	versionCmd = []string{"rook", "version"}
-)
-
 // TestClient is a wrapper for test client, containing interfaces for all rook operations
 type TestClient struct {
 	BlockClient      *BlockOperation
@@ -41,10 +37,6 @@ type TestClient struct {
 	RBDMirrorClient  *RBDMirrorOperation
 	k8sh             *utils.K8sHelper
 }
-
-const (
-	unableToCheckRookStatusMsg = "Unable to check rook status - please check of rook is up and running"
-)
 
 // CreateTestClient creates new instance of test client for a platform
 func CreateTestClient(k8sHelper *utils.K8sHelper, manifests installer.CephManifests) *TestClient {
@@ -65,7 +57,8 @@ func CreateTestClient(k8sHelper *utils.K8sHelper, manifests installer.CephManife
 // Status returns rook status details
 func (c TestClient) Status(namespace string) (client.CephStatus, error) {
 	context := c.k8sh.MakeContext()
-	status, err := client.Status(context, namespace)
+	clusterInfo := client.AdminClusterInfo(namespace)
+	status, err := client.Status(context, clusterInfo)
 	if err != nil {
 		return client.CephStatus{}, fmt.Errorf("failed to get status: %+v", err)
 	}

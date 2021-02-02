@@ -17,11 +17,13 @@ limitations under the License.
 package keyring
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"testing"
 
 	"github.com/rook/rook/pkg/clusterd"
+	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	testop "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
@@ -29,17 +31,19 @@ import (
 )
 
 func TestAdminKeyringStore(t *testing.T) {
+	ctxt := context.TODO()
 	clientset := testop.New(t, 1)
 	ctx := &clusterd.Context{
 		Clientset: clientset,
 	}
-	ns := "rook-ceph"
+	ns := "test-ns"
 	owner := metav1.OwnerReference{}
-	clusterInfo := testop.CreateConfigDir(1)
-	k := GetSecretStore(ctx, ns, &owner)
+	clusterInfo := clienttest.CreateTestClusterInfo(1)
+	clusterInfo.Namespace = ns
+	k := GetSecretStore(ctx, clusterInfo, &owner)
 
 	assertKeyringData := func(expectedKeyring string) {
-		s, e := clientset.CoreV1().Secrets(ns).Get("rook-ceph-admin-keyring", metav1.GetOptions{})
+		s, e := clientset.CoreV1().Secrets(ns).Get(ctxt, "rook-ceph-admin-keyring", metav1.GetOptions{})
 		assert.NoError(t, e)
 		assert.Equal(t, 1, len(s.StringData))
 		assert.Equal(t, expectedKeyring, s.StringData["keyring"])
@@ -47,13 +51,15 @@ func TestAdminKeyringStore(t *testing.T) {
 	}
 
 	// create key
-	clusterInfo.AdminSecret = "adminsecretkey"
-	k.Admin().CreateOrUpdate(clusterInfo)
+	clusterInfo.CephCred.Secret = "adminsecretkey"
+	err := k.Admin().CreateOrUpdate(clusterInfo)
+	assert.NoError(t, err)
 	assertKeyringData(fmt.Sprintf(adminKeyringTemplate, "adminsecretkey"))
 
 	// update key
-	clusterInfo.AdminSecret = "differentsecretkey"
-	k.Admin().CreateOrUpdate(clusterInfo)
+	clusterInfo.CephCred.Secret = "differentsecretkey"
+	err = k.Admin().CreateOrUpdate(clusterInfo)
+	assert.NoError(t, err)
 	assertKeyringData(fmt.Sprintf(adminKeyringTemplate, "differentsecretkey"))
 }
 
@@ -62,13 +68,13 @@ func TestAdminVolumeAndMount(t *testing.T) {
 	ctx := &clusterd.Context{
 		Clientset: clientset,
 	}
-	ns := "rook-ceph"
 	owner := metav1.OwnerReference{}
-	clusterInfo := testop.CreateConfigDir(1)
-	s := GetSecretStore(ctx, ns, &owner)
+	clusterInfo := clienttest.CreateTestClusterInfo(1)
+	s := GetSecretStore(ctx, clusterInfo, &owner)
 
-	clusterInfo.AdminSecret = "adminsecretkey"
-	s.Admin().CreateOrUpdate(clusterInfo)
+	clusterInfo.CephCred.Secret = "adminsecretkey"
+	err := s.Admin().CreateOrUpdate(clusterInfo)
+	assert.NoError(t, err)
 
 	v := Volume().Admin()
 	m := VolumeMount().Admin()

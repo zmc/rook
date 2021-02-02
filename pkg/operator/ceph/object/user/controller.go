@@ -37,7 +37,7 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/object"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	corev1 "k8s.io/api/core/v1"
@@ -48,9 +48,8 @@ import (
 )
 
 const (
-	appName             = object.AppName
-	controllerName      = "ceph-object-store-user-controller"
-	cephObjectStoreKind = "CephObjectStoreUser"
+	appName        = object.AppName
+	controllerName = "ceph-object-store-user-controller"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", controllerName)
@@ -71,7 +70,7 @@ type ReconcileObjectStoreUser struct {
 	objContext      *object.Context
 	userConfig      object.ObjectUser
 	cephClusterSpec *cephv1.ClusterSpec
-	clusterInfo     *cephconfig.ClusterInfo
+	clusterInfo     *cephclient.ClusterInfo
 }
 
 // Add creates a new CephObjectStoreUser Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -84,7 +83,9 @@ func Add(mgr manager.Manager, context *clusterd.Context) error {
 func newReconciler(mgr manager.Manager, context *clusterd.Context) reconcile.Reconciler {
 	// Add the cephv1 scheme to the manager scheme so that the controller knows about it
 	mgrScheme := mgr.GetScheme()
-	cephv1.AddToScheme(mgr.GetScheme())
+	if err := cephv1.AddToScheme(mgr.GetScheme()); err != nil {
+		panic(err)
+	}
 
 	return &ReconcileObjectStoreUser{
 		client:  mgr.GetClient(),
@@ -123,8 +124,8 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 // and what is in the CephObjectStoreUser.Spec
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileObjectStoreUser) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	// workaround because the rook logging mechanism is not compatible with the controller-runtime loggin interface
+func (r *ReconcileObjectStoreUser) Reconcile(context context.Context, request reconcile.Request) (reconcile.Result, error) {
+	// workaround because the rook logging mechanism is not compatible with the controller-runtime logging interface
 	reconcileResponse, err := r.reconcile(request)
 	if err != nil {
 		logger.Errorf("failed to reconcile %v", err)
@@ -144,6 +145,12 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 		}
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, errors.Wrap(err, "failed to get CephObjectStoreUser")
+	}
+
+	// Set a finalizer so we can do cleanup before the object goes away
+	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephObjectStoreUser)
+	if err != nil {
+		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
 	}
 
 	// The CR was just created, initializing status fields
@@ -174,27 +181,14 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 	}
 	r.cephClusterSpec = &cephCluster.Spec
 
-	// Set a finalizer so we can do cleanup before the object goes away
-	err = opcontroller.AddFinalizerIfNotPresent(r.client, cephObjectStoreUser)
+	// Populate clusterInfo during each reconcile
+	r.clusterInfo, _, _, err = mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
 	if err != nil {
-		return reconcile.Result{}, errors.Wrap(err, "failed to add finalizer")
+		return reconcile.Result{}, errors.Wrap(err, "failed to populate cluster info")
 	}
 
-	// Populate clusterInfo
-	// Always populate it during each reconcile
-	var clusterInfo *cephconfig.ClusterInfo
-	if r.cephClusterSpec.External.Enable {
-		clusterInfo = mon.PopulateExternalClusterInfo(r.context, request.NamespacedName.Namespace)
-	} else {
-		clusterInfo, _, _, err = mon.LoadClusterInfo(r.context, request.NamespacedName.Namespace)
-		if err != nil {
-			return reconcile.Result{}, errors.Wrap(err, "failed to populate cluster info")
-		}
-	}
-	r.clusterInfo = clusterInfo
-
-	// validate isObjectStoreInitialized
-	objContext, err := r.isObjectStoreInitialized(cephObjectStoreUser)
+	// validate initializeObjectStoreContext
+	err = r.initializeObjectStoreContext(cephObjectStoreUser)
 	if err != nil {
 		if !cephObjectStoreUser.GetDeletionTimestamp().IsZero() {
 			// Remove finalizer
@@ -211,17 +205,10 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 		updateStatus(r.client, request.NamespacedName, k8sutil.ReconcileFailedStatus)
 		return opcontroller.WaitForRequeueIfCephClusterNotReady, nil
 	}
-	// Set the object store context
-	r.objContext = objContext
 
 	// Generate user config
 	userConfig := generateUserConfig(cephObjectStoreUser)
 	r.userConfig = userConfig
-
-	// Set the cephx external username if the CephCluster is external
-	if r.cephClusterSpec.External.Enable {
-		r.objContext.RunAsUser = r.clusterInfo.ExternalCred.Username
-	}
 
 	// DELETE: the CR was deleted
 	if !cephObjectStoreUser.GetDeletionTimestamp().IsZero() {
@@ -271,20 +258,20 @@ func (r *ReconcileObjectStoreUser) reconcile(request reconcile.Request) (reconci
 }
 
 func (r *ReconcileObjectStoreUser) reconcileCephUser(cephObjectStoreUser *cephv1.CephObjectStoreUser) (reconcile.Result, error) {
-	err := r.createCephUser(cephObjectStoreUser)
+	err := r.createorUpdateCephUser(cephObjectStoreUser)
 	if err != nil {
-		return reconcile.Result{}, errors.Wrapf(err, "failed to create object store user %q", cephObjectStoreUser.Name)
+		return reconcile.Result{}, errors.Wrapf(err, "failed to create/update object store user %q", cephObjectStoreUser.Name)
 	}
 
 	return reconcile.Result{}, nil
 }
 
-func (r *ReconcileObjectStoreUser) createCephUser(u *cephv1.CephObjectStoreUser) error {
+func (r *ReconcileObjectStoreUser) createorUpdateCephUser(u *cephv1.CephObjectStoreUser) error {
 	logger.Infof("creating ceph object user %q in namespace %q", u.Name, u.Namespace)
 	user, rgwerr, err := object.CreateUser(r.objContext, r.userConfig)
 	if err != nil {
 		if rgwerr == object.ErrorCodeFileExists {
-			objectUser, _, err := object.GetUser(r.objContext, r.userConfig.UserID)
+			objectUser, _, err := object.UpdateUser(r.objContext, r.userConfig)
 			if err != nil {
 				return errors.Wrapf(err, "failed to get details from ceph object user %q", objectUser.UserID)
 			}
@@ -292,6 +279,7 @@ func (r *ReconcileObjectStoreUser) createCephUser(u *cephv1.CephObjectStoreUser)
 			// Set access and secret key
 			r.userConfig.AccessKey = objectUser.AccessKey
 			r.userConfig.SecretKey = objectUser.SecretKey
+			logger.Debugf("ceph object user %q updated with display name %q", u.Name, *objectUser.DisplayName)
 
 			return nil
 		}
@@ -306,21 +294,25 @@ func (r *ReconcileObjectStoreUser) createCephUser(u *cephv1.CephObjectStoreUser)
 	return nil
 }
 
-func (r *ReconcileObjectStoreUser) isObjectStoreInitialized(u *cephv1.CephObjectStoreUser) (*object.Context, error) {
-	objContext := object.NewContext(r.context, u.Spec.Store, u.Namespace)
-
-	// If the cluster is external just return
-	// we don't need to validate u.Spec.Store
-	if r.cephClusterSpec.External.Enable {
-		return objContext, nil
-	}
-
+func (r *ReconcileObjectStoreUser) initializeObjectStoreContext(u *cephv1.CephObjectStoreUser) error {
 	err := r.objectStoreInitialized(u)
 	if err != nil {
-		return objContext, errors.Wrap(err, "failed to detect if object store is initialized")
+		return errors.Wrapf(err, "failed to detect if object store %q is initialized", u.Spec.Store)
 	}
 
-	return objContext, nil
+	store, err := r.getObjectStore(u.Spec.Store)
+	if err != nil {
+		return errors.Wrapf(err, "failed to get object store %q", u.Spec.Store)
+	}
+
+	objContext, err := object.NewMultisiteContext(r.context, r.clusterInfo, store)
+	if err != nil {
+		return errors.Wrapf(err, "Multisite failed to set on object context for object store user")
+	}
+	r.objContext = objContext
+	r.objContext.Endpoint = store.Status.Info["endpoint"]
+
+	return nil
 }
 
 func generateUserConfig(user *cephv1.CephObjectStoreUser) object.ObjectUser {
@@ -339,17 +331,26 @@ func generateUserConfig(user *cephv1.CephObjectStoreUser) object.ObjectUser {
 	return userConfig
 }
 
+func generateCephUserSecretName(u *cephv1.CephObjectStoreUser) string {
+	return fmt.Sprintf("rook-ceph-object-user-%s-%s", u.Spec.Store, u.Name)
+}
+
+func generateStatusInfo(u *cephv1.CephObjectStoreUser) map[string]string {
+	m := make(map[string]string)
+	m["secretName"] = generateCephUserSecretName(u)
+	return m
+}
+
 func (r *ReconcileObjectStoreUser) generateCephUserSecret(u *cephv1.CephObjectStoreUser) *v1.Secret {
 	// Store the keys in a secret
 	secrets := map[string]string{
 		"AccessKey": *r.userConfig.AccessKey,
 		"SecretKey": *r.userConfig.SecretKey,
+		"Endpoint":  r.objContext.Endpoint,
 	}
-
-	secretName := fmt.Sprintf("rook-ceph-object-user-%s-%s", u.Spec.Store, u.Name)
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
+			Name:      generateCephUserSecretName(u),
 			Namespace: u.Namespace,
 			Labels: map[string]string{
 				"app":               appName,
@@ -361,7 +362,6 @@ func (r *ReconcileObjectStoreUser) generateCephUserSecret(u *cephv1.CephObjectSt
 		StringData: secrets,
 		Type:       k8sutil.RookType,
 	}
-
 	return secret
 }
 
@@ -386,11 +386,17 @@ func (r *ReconcileObjectStoreUser) reconcileCephUserSecret(cephObjectStoreUser *
 }
 
 func (r *ReconcileObjectStoreUser) objectStoreInitialized(cephObjectStoreUser *cephv1.CephObjectStoreUser) error {
-	err := r.getObjectStore(cephObjectStoreUser.Spec.Store)
+	_, err := r.getObjectStore(cephObjectStoreUser.Spec.Store)
 	if err != nil {
 		return err
 	}
 	logger.Debug("CephObjectStore exists")
+
+	// If the cluster is external just return
+	// since there are no pods running
+	if r.cephClusterSpec.External.Enable {
+		return nil
+	}
 
 	// There are no pods running when the cluster is external
 	// Unless you pass the admin key...
@@ -408,25 +414,25 @@ func (r *ReconcileObjectStoreUser) objectStoreInitialized(cephObjectStoreUser *c
 	return errors.New("no rgw pod found")
 }
 
-func (r *ReconcileObjectStoreUser) getObjectStore(storeName string) error {
+func (r *ReconcileObjectStoreUser) getObjectStore(storeName string) (*cephv1.CephObjectStore, error) {
 	// check if CephObjectStore CR is created
 	objectStores := &cephv1.CephObjectStoreList{}
 	err := r.client.List(context.TODO(), objectStores)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			return errors.Wrapf(err, "CephObjectStore %q could not be found", storeName)
+			return nil, errors.Wrapf(err, "CephObjectStore %q could not be found", storeName)
 		}
-		return errors.Wrap(err, "failed to get CephObjectStore")
+		return nil, errors.Wrap(err, "failed to get CephObjectStore")
 	}
 
 	for _, store := range objectStores.Items {
 		if store.Name == storeName {
 			logger.Infof("CephObjectStore %q found", storeName)
-			return nil
+			return &store, nil
 		}
 	}
 
-	return errors.Errorf("CephObjectStore %q could not be found", storeName)
+	return nil, errors.Errorf("CephObjectStore %q could not be found", storeName)
 }
 
 func (r *ReconcileObjectStoreUser) getRgwPodList(cephObjectStoreUser *cephv1.CephObjectStoreUser) (*corev1.PodList, error) {
@@ -493,10 +499,13 @@ func updateStatus(client client.Client, name types.NamespacedName, status string
 		return
 	}
 	if user.Status == nil {
-		user.Status = &cephv1.Status{}
+		user.Status = &cephv1.ObjectStoreUserStatus{}
 	}
 
 	user.Status.Phase = status
+	if user.Status.Phase == k8sutil.ReadyStatus {
+		user.Status.Info = generateStatusInfo(user)
+	}
 	if err := opcontroller.UpdateStatus(client, user); err != nil {
 		logger.Errorf("failed to set object store user %q status to %q. %v", name, status, err)
 		return

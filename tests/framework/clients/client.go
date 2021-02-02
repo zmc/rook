@@ -17,6 +17,7 @@ limitations under the License.
 package clients
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -49,9 +50,10 @@ func (c *ClientOperation) Create(name, namespace string, caps map[string]string)
 
 // Delete deletes a client in Rook
 func (c *ClientOperation) Delete(name, namespace string) error {
+	ctx := context.TODO()
 	options := &metav1.DeleteOptions{}
 	logger.Infof("Deleting filesystem %s in namespace %s", name, namespace)
-	err := c.k8sh.RookClientset.CephV1().CephClients(namespace).Delete(name, options)
+	err := c.k8sh.RookClientset.CephV1().CephClients(namespace).Delete(ctx, name, *options)
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
@@ -61,9 +63,9 @@ func (c *ClientOperation) Delete(name, namespace string) error {
 }
 
 // Get shows user created in Rook
-func (c *ClientOperation) Get(namespace string, clientName string) (key string, error error) {
+func (c *ClientOperation) Get(clusterInfo *client.ClusterInfo, clientName string) (key string, error error) {
 	context := c.k8sh.MakeContext()
-	key, err := client.AuthGetKey(context, namespace, clientName)
+	key, err := client.AuthGetKey(context, clusterInfo, clientName)
 	if err != nil {
 		return "", fmt.Errorf("failed to get client %s: %+v", clientName, err)
 	}
@@ -71,15 +73,15 @@ func (c *ClientOperation) Get(namespace string, clientName string) (key string, 
 }
 
 // Update updates provided user capabilities
-func (c *ClientOperation) Update(namespace string, clientName string, caps map[string]string) (updatedcaps map[string]string, error error) {
+func (c *ClientOperation) Update(clusterInfo *client.ClusterInfo, clientName string, caps map[string]string) (updatedcaps map[string]string, error error) {
 	context := c.k8sh.MakeContext()
 	logger.Infof("updating the client via CRD")
-	if err := c.k8sh.ResourceOperation("apply", c.manifests.GetClient(namespace, clientName, caps)); err != nil {
+	if err := c.k8sh.ResourceOperation("apply", c.manifests.GetClient(clusterInfo.Namespace, clientName, caps)); err != nil {
 		return nil, err
 	}
 
 	for i := 0; i < 30; i++ {
-		updatedcaps, _ = client.AuthGetCaps(context, namespace, "client."+clientName)
+		updatedcaps, _ = client.AuthGetCaps(context, clusterInfo, "client."+clientName)
 		if caps["mon"] == updatedcaps["mon"] {
 			logger.Infof("Finished updating the client via CRD")
 			return updatedcaps, nil

@@ -7,7 +7,7 @@ apiVersion: ceph.rook.io/v1
 kind: CephFilesystem
 metadata:
   name: myfs
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:cluster
 spec:
   metadataPool:
     replicated:
@@ -18,8 +18,7 @@ spec:
       replicated:
         size: 1
         requireSafeReplicaSize: false
-      compressionMode: none
-  preservePoolsOnDelete: false
+  preserveFilesystemOnDelete: false
   metadataServer:
     activeCount: 1
     activeStandby: true

@@ -17,6 +17,7 @@ limitations under the License.
 package clients
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
@@ -52,18 +53,18 @@ func (p *PoolOperation) createOrUpdatePool(name, namespace, action string, repli
 	return p.k8sh.ResourceOperation(action, p.manifests.GetBlockPoolDef(name, namespace, strconv.Itoa(replicas)))
 }
 
-func (p *PoolOperation) ListCephPools(namespace string) ([]client.CephStoragePoolSummary, error) {
+func (p *PoolOperation) ListCephPools(clusterInfo *client.ClusterInfo) ([]client.CephStoragePoolSummary, error) {
 	context := p.k8sh.MakeContext()
-	pools, err := client.ListPoolSummaries(context, namespace)
+	pools, err := client.ListPoolSummaries(context, clusterInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pools: %+v", err)
 	}
 	return pools, nil
 }
 
-func (p *PoolOperation) GetCephPoolDetails(namespace, name string) (client.CephStoragePoolDetails, error) {
+func (p *PoolOperation) GetCephPoolDetails(clusterInfo *client.ClusterInfo, name string) (client.CephStoragePoolDetails, error) {
 	context := p.k8sh.MakeContext()
-	details, err := client.GetPoolDetails(context, namespace, name)
+	details, err := client.GetPoolDetails(context, clusterInfo, name)
 	if err != nil {
 		return client.CephStoragePoolDetails{}, fmt.Errorf("failed to get pool %s details: %+v", name, err)
 	}
@@ -71,7 +72,8 @@ func (p *PoolOperation) GetCephPoolDetails(namespace, name string) (client.CephS
 }
 
 func (p *PoolOperation) ListPoolCRDs(namespace string) ([]cephv1.CephBlockPool, error) {
-	pools, err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).List(metav1.ListOptions{})
+	ctx := context.TODO()
+	pools, err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, nil
@@ -83,7 +85,8 @@ func (p *PoolOperation) ListPoolCRDs(namespace string) ([]cephv1.CephBlockPool, 
 }
 
 func (p *PoolOperation) PoolCRDExists(namespace, name string) (bool, error) {
-	_, err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Get(name, metav1.GetOptions{})
+	ctx := context.TODO()
+	_, err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return false, nil
@@ -94,7 +97,8 @@ func (p *PoolOperation) PoolCRDExists(namespace, name string) (bool, error) {
 }
 
 func (p *PoolOperation) CephPoolExists(namespace, name string) (bool, error) {
-	pools, err := p.ListCephPools(namespace)
+	clusterInfo := client.AdminClusterInfo(namespace)
+	pools, err := p.ListCephPools(clusterInfo)
 	if err != nil {
 		return false, err
 	}
@@ -107,27 +111,30 @@ func (p *PoolOperation) CephPoolExists(namespace, name string) (bool, error) {
 }
 
 // DeletePool deletes a pool after deleting all the block images contained by the pool
-func (p *PoolOperation) DeletePool(blockClient *BlockOperation, namespace, poolName string) error {
+func (p *PoolOperation) DeletePool(blockClient *BlockOperation, clusterInfo *client.ClusterInfo, poolName string) error {
+	ctx := context.TODO()
 	// Delete all the images in a pool
 	logger.Infof("listing images in pool %q", poolName)
-	blockImagesList, _ := blockClient.ListImagesInPool(namespace, poolName)
+	blockImagesList, _ := blockClient.ListImagesInPool(clusterInfo, poolName)
 	for _, blockImage := range blockImagesList {
 		logger.Infof("force deleting block image %q in pool %q", blockImage, poolName)
+		max := 10
 		// Wait and retry up to 10 times/seconds to delete RBD images
-		for i := 0; i < 10; i++ {
-			err := blockClient.DeleteBlockImage(blockImage, namespace)
-			if err != nil {
-				logger.Infof("failed deleting image %q from %q. %v", blockImage, poolName, err)
-				time.Sleep(2 * time.Second)
-			} else {
+		for i := 0; i < max; i++ {
+			err := blockClient.DeleteBlockImage(clusterInfo, blockImage)
+			if err == nil {
 				break
 			}
-			return fmt.Errorf("gave up waiting for image %q from %q to be deleted. %v", blockImage, poolName, err)
+			logger.Infof("failed deleting image %q from %q. %v", blockImage, poolName, err)
+			time.Sleep(2 * time.Second)
+			if i == max-1 {
+				return fmt.Errorf("gave up waiting for image %q from %q to be deleted. %v", blockImage, poolName, err)
+			}
 		}
 	}
 
 	logger.Infof("deleting pool CR %q", poolName)
-	err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Delete(poolName, &metav1.DeleteOptions{})
+	err := p.k8sh.RookClientset.CephV1().CephBlockPools(clusterInfo.Namespace).Delete(ctx, poolName, metav1.DeleteOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -136,9 +143,9 @@ func (p *PoolOperation) DeletePool(blockClient *BlockOperation, namespace, poolN
 	}
 
 	crdCheckerFunc := func() error {
-		_, err := p.k8sh.RookClientset.CephV1().CephBlockPools(namespace).Get(poolName, metav1.GetOptions{})
+		_, err := p.k8sh.RookClientset.CephV1().CephBlockPools(clusterInfo.Namespace).Get(ctx, poolName, metav1.GetOptions{})
 		return err
 	}
 
-	return p.k8sh.WaitForCustomResourceDeletion(namespace, crdCheckerFunc)
+	return p.k8sh.WaitForCustomResourceDeletion(clusterInfo.Namespace, crdCheckerFunc)
 }

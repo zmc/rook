@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: rook-ceph-toolbox-job
-  namespace: rook-ceph
+  namespace: rook-ceph # namespace:cluster
   labels:
     app: ceph-toolbox-job
 spec:
@@ -15,11 +15,16 @@ spec:
         args: ["--skip-watch"]
         imagePullPolicy: IfNotPresent
         env:
-        - name: ROOK_ADMIN_SECRET
+        - name: ROOK_CEPH_USERNAME
           valueFrom:
             secretKeyRef:
               name: rook-ceph-mon
-              key: admin-secret
+              key: ceph-username
+        - name: ROOK_CEPH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: rook-ceph-mon
+              key: ceph-secret
         volumeMounts:
         - mountPath: /etc/ceph
           name: ceph-config

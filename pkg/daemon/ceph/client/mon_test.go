@@ -19,13 +19,17 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pkg/errors"
+	"github.com/rook/rook/pkg/clusterd"
+	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCephArgs(t *testing.T) {
 	// cluster a under /etc
 	args := []string{}
-	command, args := FinalizeCephCommandArgs(CephTool, args, "/etc", "a", "client.admin")
+	clusterInfo := AdminClusterInfo("a")
+	command, args := FinalizeCephCommandArgs(CephTool, clusterInfo, args, "/etc")
 	assert.Equal(t, CephTool, command)
 	assert.Equal(t, 5, len(args))
 	assert.Equal(t, "--connect-timeout=15", args[0])
@@ -36,14 +40,14 @@ func TestCephArgs(t *testing.T) {
 
 	RunAllCephCommandsInToolbox = true
 	args = []string{}
-	command, args = FinalizeCephCommandArgs(CephTool, args, "/etc", "a", "client.admin")
+	command, args = FinalizeCephCommandArgs(CephTool, clusterInfo, args, "/etc")
 	assert.Equal(t, Kubectl, command)
 	assert.Equal(t, 8, len(args), fmt.Sprintf("%+v", args))
-	assert.Equal(t, "-it", args[0])
-	assert.Equal(t, "exec", args[1])
+	assert.Equal(t, "exec", args[0])
+	assert.Equal(t, "-i", args[1])
 	assert.Equal(t, "rook-ceph-tools", args[2])
 	assert.Equal(t, "-n", args[3])
-	assert.Equal(t, "a", args[4])
+	assert.Equal(t, clusterInfo.Namespace, args[4])
 	assert.Equal(t, "--", args[5])
 	assert.Equal(t, CephTool, args[6])
 	assert.Equal(t, "--connect-timeout=15", args[7])
@@ -51,19 +55,104 @@ func TestCephArgs(t *testing.T) {
 
 	// cluster under /var/lib/rook
 	args = []string{"myarg"}
-	command, args = FinalizeCephCommandArgs(RBDTool, args, "/var/lib/rook", "rook", "client.admin")
+	command, args = FinalizeCephCommandArgs(RBDTool, clusterInfo, args, "/var/lib/rook")
 	assert.Equal(t, RBDTool, command)
 	assert.Equal(t, 5, len(args))
 	assert.Equal(t, "myarg", args[0])
-	assert.Equal(t, "--cluster=rook", args[1])
-	assert.Equal(t, "--conf=/var/lib/rook/rook/rook.config", args[2])
+	assert.Equal(t, "--cluster="+clusterInfo.Namespace, args[1])
+	assert.Equal(t, "--conf=/var/lib/rook/a/a.config", args[2])
 	assert.Equal(t, "--name=client.admin", args[3])
-	assert.Equal(t, "--keyring=/var/lib/rook/rook/client.admin.keyring", args[4])
+	assert.Equal(t, "--keyring=/var/lib/rook/a/client.admin.keyring", args[4])
+}
 
-	// the default ceph cluster will not need the config args
-	args = []string{"myarg"}
-	command, args = FinalizeCephCommandArgs(CephTool, args, "/etc", "ceph", "client.admin")
-	assert.Equal(t, CephTool, command)
-	assert.Equal(t, 2, len(args))
-	assert.Equal(t, "myarg", args[0])
+func TestStretchElectionStrategy(t *testing.T) {
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		if args[0] == "mon" && args[1] == "set" && args[2] == "election_strategy" {
+			assert.Equal(t, "connectivity", args[3])
+			return "", nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	err := EnableStretchElectionStrategy(context, clusterInfo)
+	assert.NoError(t, err)
+}
+
+func TestStretchClusterSettings(t *testing.T) {
+	monName := "a"
+	failureDomain := "rack"
+	zone := "rack-x"
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		switch {
+		case args[0] == "mon" && args[1] == "set_location":
+			assert.Equal(t, monName, args[2])
+			assert.Equal(t, fmt.Sprintf("%s=%s", failureDomain, zone), args[3])
+			return "", nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	err := SetMonStretchZone(context, clusterInfo, monName, failureDomain, zone)
+	assert.NoError(t, err)
+}
+
+func TestStretchClusterMonTiebreaker(t *testing.T) {
+	monName := "a"
+	failureDomain := "rack"
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		switch {
+		case args[0] == "mon" && args[1] == "enable_stretch_mode":
+			assert.Equal(t, monName, args[2])
+			assert.Equal(t, defaultStretchCrushRuleName, args[3])
+			assert.Equal(t, failureDomain, args[4])
+			return "", nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	err := SetMonStretchTiebreaker(context, clusterInfo, monName, failureDomain)
+	assert.NoError(t, err)
+}
+
+func TestMonDump(t *testing.T) {
+	executor := &exectest.MockExecutor{}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+		switch {
+		case args[0] == "mon" && args[1] == "dump":
+			return `{"epoch":3,"fsid":"6a31a264-9090-4048-8d95-4b8c3cde909d","modified":"2020-12-09T18:13:36.346150Z","created":"2020-12-09T18:13:13.014270Z","min_mon_release":15,"min_mon_release_name":"octopus",
+		"features":{"persistent":["kraken","luminous","mimic","osdmap-prune","nautilus","octopus"],"optional":[]},
+		"election_strategy":1,"mons":[
+		{"rank":0,"name":"a","crush_location":"{zone=a}","public_addrs":{"addrvec":[{"type":"v2","addr":"10.109.80.104:3300","nonce":0},{"type":"v1","addr":"10.109.80.104:6789","nonce":0}]},"addr":"10.109.80.104:6789/0","public_addr":"10.109.80.104:6789/0","priority":0,"weight":0},
+		{"rank":1,"name":"b","crush_location":"{zone=b}","public_addrs":{"addrvec":[{"type":"v2","addr":"10.107.12.199:3300","nonce":0},{"type":"v1","addr":"10.107.12.199:6789","nonce":0}]},"addr":"10.107.12.199:6789/0","public_addr":"10.107.12.199:6789/0","priority":0,"weight":0},
+		{"rank":2,"name":"c","crush_location":"{zone=c}","public_addrs":{"addrvec":[{"type":"v2","addr":"10.107.5.207:3300","nonce":0},{"type":"v1","addr":"10.107.5.207:6789","nonce":0}]},"addr":"10.107.5.207:6789/0","public_addr":"10.107.5.207:6789/0","priority":0,"weight":0}],
+		"quorum":[0,1,2]}`, nil
+		}
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+	context := &clusterd.Context{Executor: executor}
+	clusterInfo := AdminClusterInfo("mycluster")
+
+	dump, err := GetMonDump(context, clusterInfo)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, dump.ElectionStrategy)
+	assert.Equal(t, "{zone=a}", dump.Mons[0].CrushLocation)
+	assert.Equal(t, "a", dump.Mons[0].Name)
+	assert.Equal(t, 0, dump.Mons[0].Rank)
+	assert.Equal(t, "b", dump.Mons[1].Name)
+	assert.Equal(t, 1, dump.Mons[1].Rank)
+	assert.Equal(t, 3, len(dump.Mons))
+	assert.Equal(t, 3, len(dump.Quorum))
 }
