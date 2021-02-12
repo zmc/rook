@@ -137,7 +137,7 @@ func (c *Cluster) Start(rookImage string) error {
 		callback := func(action string) error {
 			return nil
 		}
-		if _, err := k8sutil.UpdateDeploymentAndWait(c.context, deployment, c.Namespace, callback); err != nil {
+		if err := k8sutil.UpdateDeploymentAndWait(c.context, deployment, c.Namespace, callback); err != nil {
 			return fmt.Errorf("failed to update mgr deployment %s. %+v", appName, err)
 		}
 	} else {

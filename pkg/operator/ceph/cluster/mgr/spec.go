@@ -280,8 +280,9 @@ func getDefaultMgrLivenessProbe() *v1.Probe {
 }
 
 // MakeMetricsService generates the Kubernetes service object for the monitoring service
-func (c *Cluster) MakeMetricsService(name, servicePortMetricName string) *v1.Service {
+func (c *Cluster) MakeMetricsService(name, activeDaemon, servicePortMetricName string) *v1.Service {
 	labels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -302,15 +303,18 @@ func (c *Cluster) MakeMetricsService(name, servicePortMetricName string) *v1.Ser
 
 	// If the cluster is external we don't need to add the selector
 	if name != ExternalMgrAppName {
-		svc.Spec.Selector = labels
+		svc.Spec.Selector = c.selectorLabels(activeDaemon)
 	}
 
 	k8sutil.SetOwnerRef(&svc.ObjectMeta, &c.clusterInfo.OwnerRef)
 	return svc
 }
 
-func (c *Cluster) makeDashboardService(name string) *v1.Service {
+func (c *Cluster) makeDashboardService(name, activeDaemon string) *v1.Service {
 	labels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+	selectorLabels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+	selectorLabels[controller.DaemonIDLabel] = activeDaemon
+
 	portName := "https-dashboard"
 	if !c.spec.Dashboard.SSL {
 		portName = "http-dashboard"
@@ -322,7 +326,7 @@ func (c *Cluster) makeDashboardService(name string) *v1.Service {
 			Labels:    labels,
 		},
 		Spec: v1.ServiceSpec{
-			Selector: labels,
+			Selector: selectorLabels,
 			Type:     v1.ServiceTypeClusterIP,
 			Ports: []v1.ServicePort{
 				{
@@ -392,4 +396,12 @@ func CreateExternalMetricsEndpoints(namespace string, monitoringSpec cephv1.Moni
 
 	k8sutil.SetOwnerRef(&endpoints.ObjectMeta, &ownerRef)
 	return endpoints
+}
+
+func (c *Cluster) selectorLabels(activeDaemon string) map[string]string {
+	labels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+	if activeDaemon != "" {
+		labels[controller.DaemonIDLabel] = activeDaemon
+	}
+	return labels
 }
