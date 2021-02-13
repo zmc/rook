@@ -493,7 +493,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 			v1.Container{
 				Args:            []string{"ceph", "osd", "init"},
 				Name:            controller.ConfigInitContainerName,
-				Image:           k8sutil.MakeRookImage(c.rookVersion),
+				Image:           c.rookVersion,
 				VolumeMounts:    configVolumeMounts,
 				Env:             configEnvVars,
 				SecurityContext: securityContext,
@@ -712,7 +712,7 @@ func (c *Cluster) getCopyBinariesContainer() (v1.Volume, *v1.Container) {
 			"copy-binaries",
 			"--copy-to-dir", rookBinariesMountPath},
 		Name:         "copy-bins",
-		Image:        k8sutil.MakeRookImage(c.rookVersion),
+		Image:        c.rookVersion,
 		VolumeMounts: []v1.VolumeMount{mount},
 	}
 }
