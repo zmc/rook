@@ -51,6 +51,7 @@ func TestDriveGroups(t *testing.T) {
 		},
 	}
 	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns"}
+	clusterInfo.SetName("clustername")
 	spec := cephv1.ClusterSpec{
 		DataDirHostPath: "/var/lib/rook",
 		CephVersion:     cephv1.CephVersionSpec{Image: "test-image"},

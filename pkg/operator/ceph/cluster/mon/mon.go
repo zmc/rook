@@ -666,7 +666,8 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 
 	// setup affinity settings for pod scheduling
 	p := c.getMonPlacement(mon.Zone)
-	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+	p.ApplyToPodSpec(&d.Spec.Template.Spec, true)
+	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec),
 		map[string]string{k8sutil.AppAttr: AppName}, nil)
 
 	// setup storage on the canary since scheduling will be affected when
@@ -1261,6 +1262,7 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 	}
 	p := c.getMonPlacement(zone)
 
+	p.ApplyToPodSpec(&d.Spec.Template.Spec, true)
 	if deploymentExists {
 		// the existing deployment may have a node selector. if the cluster
 		// isn't using host networking and the deployment is using pvc storage,
@@ -1269,10 +1271,10 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 		if c.spec.Network.IsHost() || !pvcExists {
 			p.PodAffinity = nil
 			p.PodAntiAffinity = nil
-			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec),
 				map[string]string{k8sutil.AppAttr: AppName}, existingDeployment.Spec.Template.Spec.NodeSelector)
 		} else {
-			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec),
 				map[string]string{k8sutil.AppAttr: AppName}, nil)
 		}
 		return c.updateMon(m, d)
@@ -1294,12 +1296,12 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 	}
 
 	if schedule == nil || schedule.Zone != "" {
-		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec),
 			map[string]string{k8sutil.AppAttr: AppName}, nil)
 	} else {
 		p.PodAffinity = nil
 		p.PodAntiAffinity = nil
-		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec),
 			map[string]string{k8sutil.AppAttr: AppName}, map[string]string{v1.LabelHostname: schedule.Hostname})
 	}
 
