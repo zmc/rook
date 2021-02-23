@@ -64,6 +64,7 @@ type clusterSettings struct {
 	StoreType        string
 	DataDirHostPath  string
 	Mons             int
+	MultipleMgrs     bool
 	RBDMirrorWorkers int
 	UsePVCs          bool
 	StorageClassName string
@@ -3415,6 +3416,10 @@ func (m *CephManifestsMaster) GetRookCluster(settings *clusterSettings) string {
 		crushRoot = `crushRoot: "custom-root"`
 	}
 
+	mgrCount := 1
+	if settings.MultipleMgrs {
+		mgrCount = 2
+	}
 	if settings.UsePVCs {
 		return `apiVersion: ceph.rook.io/v1
 kind: CephCluster
@@ -3438,6 +3443,9 @@ spec:
     allowUnsupported: ` + strconv.FormatBool(settings.CephVersion.AllowUnsupported) + `
   skipUpgradeChecks: false
   continueUpgradeAfterChecksEvenIfNotHealthy: false
+  mgr:
+    count: ` + strconv.Itoa(mgrCount) + `
+    allowMultiplePerNode: true
   dashboard:
     enabled: true
   network:
