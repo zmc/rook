@@ -78,8 +78,8 @@ func CreateOrUpdateServiceMonitor(serviceMonitorDefinition *monitoringv1.Service
 		}
 		return nil, fmt.Errorf("failed to retrieve servicemonitor. %v", err)
 	}
-	serviceMonitorDefinition.ResourceVersion = oldSm.ResourceVersion
-	sm, err := client.MonitoringV1().ServiceMonitors(namespace).Update(serviceMonitorDefinition)
+	oldSm.Spec = serviceMonitorDefinition.Spec
+	sm, err := client.MonitoringV1().ServiceMonitors(namespace).Update(oldSm)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update servicemonitor. %v", err)
 	}
@@ -120,9 +120,8 @@ func CreateOrUpdatePrometheusRule(prometheusRule *monitoringv1.PrometheusRule) (
 		if err != nil {
 			return nil, fmt.Errorf("failed to get prometheusRule object. %v", err)
 		}
-		prometheusRule.ObjectMeta.ResourceVersion = promRule.ObjectMeta.ResourceVersion
-
-		promRule, err = client.MonitoringV1().PrometheusRules(namespace).Update(prometheusRule)
+		promRule.Spec = prometheusRule.Spec
+		_, err = client.MonitoringV1().PrometheusRules(namespace).Update(promRule)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update prometheusRule. %v", err)
 		}
