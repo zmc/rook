@@ -49,7 +49,7 @@ pspEnable: true
 csi:
   enableRbdDriver: true
   enableCephfsDriver: true
-  enableGrpcMetrics: true
+  enableGrpcMetrics: false
   # (Optional) set user created priorityclassName for csi plugin pods.
   # pluginPriorityClassName: system-node-critical
 
