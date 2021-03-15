@@ -275,7 +275,7 @@ func setCommonPoolProperties(context *clusterd.Context, clusterInfo *ClusterInfo
 		}
 
 		// Schedule snapshots
-		if pool.Mirroring.SnapshotSchedulesEnabled() && clusterInfo.CephVersion.IsAtLeastOctopus() {
+		if pool.Mirroring.SnapshotSchedulesEnabled() && clusterInfo.CephVersion.IsAtLeastNautilus() {
 			err = enableSnapshotSchedules(context, clusterInfo, pool, poolName)
 			if err != nil {
 				return errors.Wrapf(err, "failed to enable snapshot scheduling for pool %q", poolName)
