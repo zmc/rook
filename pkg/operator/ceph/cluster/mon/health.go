@@ -237,9 +237,16 @@ func (c *Cluster) failMon(monCount, desiredMonCount int, name string) {
 			logger.Errorf("failed to remove mon %q. %v", name, err)
 		}
 	} else {
-		// bring up a new mon to replace the unhealthy mon
-		if err := c.failoverMon(name); err != nil {
-			logger.Errorf("failed to failover mon %q. %v", name, err)
+		// NOTE(leseb): monitors cannot be failed over in stretch mode
+		// This is a hot-fix intended for the 4.7 release **only**
+		// See https://bugzilla.redhat.com/show_bug.cgi?id=1939617 for more details
+		if !c.spec.IsStretchCluster() {
+			// bring up a new mon to replace the unhealthy mon
+			if err := c.failoverMon(name); err != nil {
+				logger.Errorf("failed to failover mon %q. %v", name, err)
+			}
+		} else {
+			logger.Warning("refusing to failover monitor on a stretched cluster")
 		}
 	}
 }
