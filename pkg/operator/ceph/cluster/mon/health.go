@@ -30,6 +30,7 @@ import (
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 var (
@@ -237,6 +238,11 @@ func (c *Cluster) failMon(monCount, desiredMonCount int, name string) {
 			logger.Errorf("failed to remove mon %q. %v", name, err)
 		}
 	} else {
+		//prevent any voluntary mon drain while failing over
+		if err := c.blockMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
+			logger.Errorf("failed to block mon drain. %v", err)
+		}
+
 		// NOTE(leseb): monitors cannot be failed over in stretch mode
 		// This is a hot-fix intended for the 4.7 release **only**
 		// See https://bugzilla.redhat.com/show_bug.cgi?id=1939617 for more details
@@ -247,6 +253,11 @@ func (c *Cluster) failMon(monCount, desiredMonCount int, name string) {
 			}
 		} else {
 			logger.Warning("refusing to failover monitor on a stretched cluster")
+		}
+
+		// allow any voluntary mon drain after failover
+		if err := c.allowMonDrain(types.NamespacedName{Name: monPDBName, Namespace: c.Namespace}); err != nil {
+			logger.Errorf("failed to allow mon drain. %v", err)
 		}
 	}
 }
