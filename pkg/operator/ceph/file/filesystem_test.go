@@ -19,6 +19,7 @@ package file
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path"
@@ -203,8 +204,10 @@ func TestCreateFilesystem(t *testing.T) {
 				return "", nil
 			} else if reflect.DeepEqual(args[0:6], []string{"osd", "pool", "set", "myfs-data1", "size", "1"}) {
 				return "", nil
+			} else if args[0] == "config" && args[1] == "set" {
+				return "", nil
 			}
-			assert.Fail(t, "Unexpected command")
+			assert.Fail(t, fmt.Sprintf("Unexpected command: %v", args))
 			return "", nil
 		},
 	}
