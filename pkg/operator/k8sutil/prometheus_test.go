@@ -18,16 +18,16 @@ limitations under the License.
 package k8sutil
 
 import (
-	"os"
 	"path"
 	"testing"
 
+	"github.com/rook/rook/pkg/util"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestGetServiceMonitor(t *testing.T) {
-	gopath := os.Getenv("GOPATH")
-	filePath := path.Join(gopath, "src/github.com/rook/rook/cluster/examples/kubernetes/ceph/monitoring/service-monitor.yaml")
+	projectRoot := util.PathToProjectRoot()
+	filePath := path.Join(projectRoot, "/cluster/examples/kubernetes/ceph/monitoring/service-monitor.yaml")
 	servicemonitor, err := GetServiceMonitor(filePath)
 	assert.Nil(t, err)
 	assert.Equal(t, "rook-ceph-mgr", servicemonitor.GetName())
@@ -37,8 +37,8 @@ func TestGetServiceMonitor(t *testing.T) {
 }
 
 func TestGetPrometheusRule(t *testing.T) {
-	gopath := os.Getenv("GOPATH")
-	filePath := path.Join(gopath, "src/github.com/rook/rook/cluster/examples/kubernetes/ceph/monitoring/prometheus-ceph-v14-rules.yaml")
+	projectRoot := util.PathToProjectRoot()
+	filePath := path.Join(projectRoot, "/cluster/examples/kubernetes/ceph/monitoring/prometheus-ceph-v14-rules.yaml")
 	rules, err := GetPrometheusRule(filePath)
 	assert.Nil(t, err)
 	assert.Equal(t, "prometheus-ceph-rules", rules.GetName())
