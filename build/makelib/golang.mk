@@ -127,11 +127,10 @@ go.install:
 	@echo === go install $(PLATFORM)
 	$(foreach p,$(GO_STATIC_PACKAGES),@CGO_ENABLED=0 $(GO) install -v $(GO_STATIC_FLAGS) $(p)${\n})
 
-# GOJUNIT and go.mod.vendor need to happen in order and NOT in parallel, so call them explicitly
+# GOJUNIT need to happen in order and NOT in parallel, so call them explicitly
 .PHONY: go.test.unit
-go.test.unit: 
-	@$(MAKE) $(GOJUNIT) 
-	@$(MAKE) go.mod.vendor
+go.test.unit:
+	@$(MAKE) $(GOJUNIT)
 	@echo === go test unit-tests
 	@mkdir -p $(GO_TEST_OUTPUT)
 	CGO_ENABLED=0 $(GOHOST) test -v -cover $(GO_STATIC_FLAGS) $(GO_PACKAGES)
@@ -166,11 +165,6 @@ go.validate: go.vet go.fmt
 go.mod.update:
 	@echo === updating modules
 	@$(GOHOST) get -u ./...
-
-.PHONY: go.mod.vendor
-go.mod.vendor:
-	@echo === ensuring vendor modules are installed
-	@$(GOHOST) mod vendor
 
 .PHONY: go.mod.check
 go.mod.check:
@@ -211,9 +205,9 @@ $(CONTROLLER_GEN) $(YQ):
 		CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
 		cd $$CONTROLLER_GEN_TMP_DIR ;\
 		go mod init tmp;\
-		unset GOOS GOARCH  # avoid error: "cannot install cross-compiled binaries when GOBIN is set" ;\
-		export CGO_ENABLED=0  # do not need gcc nor the errors that come with not having it ;\
-		export GOBIN=$$CONTROLLER_GEN_TMP_DIR  # go get dependencies into the temp dir ;\
+		unset GOOS GOARCH ;\
+		export CGO_ENABLED=0 ;\
+		export GOBIN=$$CONTROLLER_GEN_TMP_DIR ;\
 		echo === installing controller-gen ;\
 		go get sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION);\
 		mv $$CONTROLLER_GEN_TMP_DIR/controller-gen $(CONTROLLER_GEN) ;\
@@ -222,3 +216,9 @@ $(CONTROLLER_GEN) $(YQ):
 		mv $$CONTROLLER_GEN_TMP_DIR/yq $(YQ) ;\
 		rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
 	}
+
+export CODE_GENERATOR_VERSION=0.20.0
+export CODE_GENERATOR=$(TOOLS_HOST_DIR)/code-generator-$(CODE_GENERATOR_VERSION)
+$(CODE_GENERATOR):
+	mkdir -p $(TOOLS_HOST_DIR)
+	curl -sL https://github.com/kubernetes/code-generator/archive/refs/tags/v${CODE_GENERATOR_VERSION}.tar.gz | tar -xz -C $(TOOLS_HOST_DIR)

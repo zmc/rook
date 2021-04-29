@@ -37,7 +37,7 @@ spec:
   preservePoolsOnDelete: true
   gateway:
     type: s3
-    sslCertificateRef:
+    # sslCertificateRef:
     port: 80
     # securePort: 443
     instances: 1
@@ -92,9 +92,9 @@ When the `zone` section is set pools with the object stores name will not be cre
 The gateway settings correspond to the RGW daemon settings.
 
 * `type`: `S3` is supported
-* `sslCertificateRef`: If the certificate is not specified, SSL will not be configured. If specified, this is the name of the Kubernetes secret that contains the SSL certificate to be used for secure connections to the object store. Rook will look in the secret provided at the `cert` key name. The value of the `cert` key must be in the format expected by the [RGW service](https://docs.ceph.com/docs/master/install/ceph-deploy/install-ceph-gateway/#using-ssl-with-civetweb): "The server key, server certificate, and any other CA or intermediate certificates be supplied in one file. Each of these items must be in pem form."
+* `sslCertificateRef`: If specified, this is the name of the Kubernetes secret that contains the TLS certificate to be used for secure connections to the object store. Rook will look in the secret provided at the `cert` key name. The value of the `cert` key must be in the format expected by the [RGW service](https://docs.ceph.com/docs/master/install/ceph-deploy/install-ceph-gateway/#using-ssl-with-civetweb): "The server key, server certificate, and any other CA or intermediate certificates be supplied in one file. Each of these items must be in PEM form."
 * `port`: The port on which the Object service will be reachable. If host networking is enabled, the RGW daemons will also listen on that port. If running on SDN, the RGW daemon listening port will be 8080 internally.
-* `securePort`: The secure port on which RGW pods will be listening. An SSL certificate must be specified.
+* `securePort`: The secure port on which RGW pods will be listening. A TLS certificate must be specified either via `sslCerticateRef` or `service.annotations`
 * `instances`: The number of pods that will be started to load balance this object store.
 * `externalRgwEndpoints`: A list of IP addresses to connect to external existing Rados Gateways (works with external mode). This setting will be ignored if the `CephCluster` does not have `external` spec enabled. Refer to the [external cluster section](ceph-cluster-crd.md#external-cluster) for more details.
 * `annotations`: Key value pair list of annotations to add.
@@ -102,6 +102,13 @@ The gateway settings correspond to the RGW daemon settings.
 * `placement`: The Kubernetes placement settings to determine where the RGW pods should be started in the cluster.
 * `resources`: Set resource requests/limits for the Gateway Pod(s), see [Resource Requirements/Limits](ceph-cluster-crd.md#resource-requirementslimits).
 * `priorityClassName`: Set priority class name for the Gateway Pod(s)
+* `service`: The annotations to set on to the Kubernetes Service of RGW. The [service serving cert](https://docs.openshift.com/container-platform/4.6/security/certificates/service-serving-certificate.html) feature supported in Openshift is enabled by the following example:
+```yaml
+gateway:
+  service:
+    annotations:
+      service.beta.openshift.io/serving-cert-secret-name: <name of TLS secret for automatic generation>
+```
 
 Example of external rgw endpoints to connect to:
 
@@ -162,3 +169,33 @@ The endpoint health check procedure is the following:
 6. Update CR health status check
 
 Rook-Ceph always keeps the bucket and the user for the health check, it just does a PUT and GET of an s3 object since creating a bucket is an expensive operation.
+
+## Security settings
+
+Ceph RGW supports encryption via Key Management System (KMS) using HashiCorp Vault. Refer to the [vault kms section](ceph-cluster-crd.md#vault-kms) for detailed explanation.
+If these settings are defined, then RGW establish a connection between Vault and whenever S3 client sends a request with Server Side Encryption,
+it encrypts that using the key specified by the client. For more details w.r.t RGW, please refer [Ceph Vault documentation](https://docs.ceph.com/en/latest/radosgw/vault/)
+
+The `security` section contains settings related to KMS encryption of the RGW.
+
+```yaml
+security:
+  kms:
+    connectionDetails:
+      KMS_PROVIDER: vault
+      VAULT_ADDR: http://vault.default.svc.cluster.local:8200
+      VAULT_BACKEND_PATH: rgw
+      VAULT_SECRET_ENGINE: kv
+      VAULT_BACKEND: v2
+    # name of the k8s secret containing the kms authentication token
+    tokenSecretName: rgw-vault-token
+```
+
+For RGW, please note the following:
+
+* `VAULT_SECRET_ENGINE` option is specifically for RGW to mention about the secret engine which can be used, currently supports two: [kv](https://www.vaultproject.io/docs/secrets/kv) and [transit](https://www.vaultproject.io/docs/secrets/transit). And for kv engine only version 2 is supported.
+* The Storage administrator needs to create a secret in the Vault server so that S3 clients use that key for encryption
+$ vault kv put rook/<mybucketkey> key=$(openssl rand -base64 32) # kv engine
+$ vault write -f transit/keys/<mybucketkey> exportable=true # transit engine
+
+* TLS authentication with custom certs between Vault and RGW are yet to be supported.

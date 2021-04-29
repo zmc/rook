@@ -31,11 +31,6 @@ CRDS_BEFORE_1_16_FILE_PATH="${SCRIPT_ROOT}/cluster/examples/kubernetes/ceph/pre-
 #############
 # FUNCTIONS #
 #############
-# ensures the vendor dir has the right deps, e,g. volume replication controller
-if [ ! -d vendor/github.com/csi-addons/volume-replication-operator/api/v1alpha1 ];then
-  echo "Vendoring project"
-  go mod vendor
-fi
 
 copy_ob_obc_crds() {
   mkdir -p "$OLM_CATALOG_DIR"
@@ -52,7 +47,9 @@ generating_crds_v1() {
   $YQ_BIN_PATH w -i cluster/olm/ceph/deploy/crds/ceph.rook.io_cephclusters.yaml spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.storage.properties.nodes.items.properties.volumeClaimTemplates.items.properties.metadata.x-kubernetes-preserve-unknown-fields true
   $YQ_BIN_PATH w -i cluster/olm/ceph/deploy/crds/ceph.rook.io_cephclusters.yaml spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.storage.properties.storageClassDeviceSets.items.properties.volumeClaimTemplates.items.properties.metadata.x-kubernetes-preserve-unknown-fields true
   # fixes a bug in yq: https://github.com/mikefarah/yq/issues/351 where the '---' gets removed
-  sed -i '1i ---' cluster/olm/ceph/deploy/crds/ceph.rook.io_cephclusters.yaml
+  sed -i'' -e '1i\
+---
+' cluster/olm/ceph/deploy/crds/ceph.rook.io_cephclusters.yaml
 }
 
 generating_crds_v1alpha2() {
@@ -66,7 +63,7 @@ generating_crds_v1alpha2() {
 
 generate_vol_rep_crds() {
   echo "Generating volume replication crds in crds.yaml"
-  "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="./vendor/github.com/csi-addons/volume-replication-operator/api/v1alpha1" output:crd:artifacts:config="$OLM_CATALOG_DIR"
+  "$CONTROLLER_GEN_BIN_PATH" "$CRD_OPTIONS" paths="github.com/csi-addons/volume-replication-operator/api/v1alpha1" output:crd:artifacts:config="$OLM_CATALOG_DIR"
 }
 
 generating_main_crd() {

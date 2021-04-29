@@ -17,21 +17,25 @@ limitations under the License.
 package object
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	cephconfig "github.com/rook/rook/pkg/operator/ceph/config"
-	"github.com/rook/rook/pkg/operator/ceph/test"
+	cephtest "github.com/rook/rook/pkg/operator/ceph/test"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+	"github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestPodSpecs(t *testing.T) {
@@ -80,7 +84,7 @@ func TestPodSpecs(t *testing.T) {
 		getLabels(c.store.Name, c.store.Namespace, false),
 		s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchLabels)
 
-	podTemplate := test.NewPodTemplateSpecTester(t, &s)
+	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
 	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
@@ -102,7 +106,6 @@ func TestSSLPodSpec(t *testing.T) {
 	info := clienttest.CreateTestClusterInfo(1)
 	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
-	store.Spec.Gateway.SSLCertificateRef = "mycert"
 	store.Spec.Gateway.SecurePort = 443
 
 	c := &clusterConfig{
@@ -122,10 +125,29 @@ func TestSSLPodSpec(t *testing.T) {
 	rgwConfig := &rgwConfig{
 		ResourceName: resourceName,
 	}
+	_, err := c.makeRGWPodSpec(rgwConfig)
+	// No TLS certs specified, will return error
+	assert.Error(t, err)
+
+	// Using SSLCertificateRef
+	c.store.Spec.Gateway.SSLCertificateRef = "mycert"
+	secretVolSrc, _ := generateVolumeSourceWithTLSSecret(c.store.Spec)
+	assert.Equal(t, secretVolSrc.SecretName, "mycert")
 	s, err := c.makeRGWPodSpec(rgwConfig)
 	assert.NoError(t, err)
+	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
+	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
+		"200", "100", "1337", "500", /* resources */
+		"my-priority-class")
 
-	podTemplate := test.NewPodTemplateSpecTester(t, &s)
+	// Using service serving cert
+	c.store.Spec.Gateway.SSLCertificateRef = ""
+	c.store.Spec.Gateway.Service = &(cephv1.RGWServiceSpec{Annotations: rookv1.Annotations{cephv1.ServiceServingCertKey: "rgw-cert"}})
+	secretVolSrc, _ = generateVolumeSourceWithTLSSecret(c.store.Spec)
+	assert.Equal(t, secretVolSrc.SecretName, "rgw-cert")
+	s, err = c.makeRGWPodSpec(rgwConfig)
+	assert.NoError(t, err)
+	podTemplate = cephtest.NewPodTemplateSpecTester(t, &s)
 	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
 		"200", "100", "1337", "500", /* resources */
 		"my-priority-class")
@@ -237,4 +259,61 @@ func TestGenerateLiveProbe(t *testing.T) {
 	p = c.generateLiveProbe()
 	assert.Equal(t, v1.URISchemeHTTP, p.Handler.HTTPGet.Scheme)
 	assert.Equal(t, int32(123), p.Handler.HTTPGet.Port.IntVal)
+}
+
+func TestCheckRGWKMS(t *testing.T) {
+	ctx := context.TODO()
+	// Placeholder
+	context := &clusterd.Context{Clientset: test.New(t, 3)}
+	store := simpleStore()
+	store.Spec.Security = &cephv1.SecuritySpec{KeyManagementService: cephv1.KeyManagementServiceSpec{ConnectionDetails: map[string]string{}}}
+	c := &clusterConfig{
+		context: context,
+		store:   store,
+	}
+
+	// without KMS
+	b, err := c.CheckRGWKMS()
+	assert.False(t, b)
+	assert.NoError(t, err)
+
+	// setting KMS configurations
+	c.store.Spec.Security.KeyManagementService.TokenSecretName = "vault-token"
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["KMS_PROVIDER"] = "vault"
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_ADDR"] = "https://1.1.1.1:8200"
+	s := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      store.Spec.Security.KeyManagementService.TokenSecretName,
+			Namespace: store.Namespace,
+		},
+		Data: map[string][]byte{
+			"token": []byte("myt-otkenbenvqrev"),
+		},
+	}
+	_, err = context.Clientset.CoreV1().Secrets(store.Namespace).Create(ctx, s, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// no secret engine set, will fail
+	b, err = c.CheckRGWKMS()
+	assert.False(t, b)
+	assert.Error(t, err)
+
+	// kv engine version v1, will fail
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_SECRET_ENGINE"] = "kv"
+	b, err = c.CheckRGWKMS()
+	assert.False(t, b)
+	assert.Error(t, err)
+
+	// kv engine version v2, will pass
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_BACKEND"] = "v2"
+	b, err = c.CheckRGWKMS()
+	assert.True(t, b)
+	assert.NoError(t, err)
+
+	// transit engine, will pass
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_SECRET_ENGINE"] = "transit"
+	c.store.Spec.Security.KeyManagementService.ConnectionDetails["VAULT_BACKEND"] = ""
+	b, err = c.CheckRGWKMS()
+	assert.True(t, b)
+	assert.NoError(t, err)
 }

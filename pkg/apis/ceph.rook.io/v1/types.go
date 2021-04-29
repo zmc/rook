@@ -251,7 +251,7 @@ type KeyManagementServiceSpec struct {
 
 // CephVersionSpec represents the settings for the Ceph version that Rook is orchestrating.
 type CephVersionSpec struct {
-	// Image is the container image used to launch the ceph daemons, such as ceph/ceph:v15.2.9
+	// Image is the container image used to launch the ceph daemons, such as ceph/ceph:v15.2.11
 	Image string `json:"image"`
 
 	// Whether to allow unsupported versions (do not set to true in production)
@@ -574,8 +574,7 @@ type PoolSpec struct {
 	// +optional
 	CrushRoot string `json:"crushRoot,omitempty"`
 
-	// The device class the OSD should set to (options are: hdd, ssd, or nvme)
-	// +kubebuilder:validation:Enum=ssd;hdd;nvme;""
+	// The device class the OSD should set to for use in the pool
 	// +optional
 	DeviceClass string `json:"deviceClass,omitempty"`
 
@@ -1029,6 +1028,11 @@ type ObjectStoreSpec struct {
 	// +optional
 	// +nullable
 	HealthCheck BucketHealthCheckSpec `json:"healthCheck,omitempty"`
+
+	// Security represents security settings
+	// +optional
+	// +nullable
+	Security *SecuritySpec `json:"security,omitempty"`
 }
 
 // BucketHealthCheckSpec represents the health check of an object store
@@ -1102,6 +1106,11 @@ type GatewaySpec struct {
 	// +nullable
 	// +optional
 	ExternalRgwEndpoints []v1.EndpointAddress `json:"externalRgwEndpoints,omitempty"`
+
+	// The configuration related to add/set on each rgw service.
+	// +optional
+	// +nullable
+	Service *RGWServiceSpec `json:"service,omitempty"`
 }
 
 // ZoneSpec represents a Ceph Object Store Gateway Zone specification
@@ -1272,6 +1281,14 @@ type ObjectZoneSpec struct {
 
 	// The data pool settings
 	DataPool PoolSpec `json:"dataPool"`
+}
+
+// RGWServiceSpec represent the spec for RGW service
+type RGWServiceSpec struct {
+	// The annotations-related configuration to add/set on each rgw service.
+	// nullable
+	// optional
+	Annotations rookv1.Annotations `json:"annotations,omitempty"`
 }
 
 // CephNFS represents a Ceph NFS

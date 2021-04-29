@@ -32,7 +32,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -59,7 +59,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -128,9 +128,8 @@ spec:
       - name: b
       - name: c
   cephVersion:
-    # Stretch cluster support upstream is only planned starting in Ceph Pacific.
-    # Until Pacific is released, the stretch cluster is **experimental**.
-    image: ceph/daemon-base:latest-master
+    # Stretch cluster is supported in Ceph Pacific or newer.
+    image: ceph/ceph:v16.2.1
     allowUnsupported: true
   # Either storageClassDeviceSets or the storage section can be specified for creating OSDs.
   # This example uses all devices for simplicity.
@@ -168,12 +167,12 @@ Settings can be specified at the global level to apply to the cluster as a whole
 * `external`:
   * `enable`: if `true`, the cluster will not be managed by Rook but via an external entity. This mode is intended to connect to an existing cluster. In this case, Rook will only consume the external cluster. However, Rook will be able to deploy various daemons in Kubernetes such as object gateways, mds and nfs if an image is provided and will refuse otherwise. If this setting is enabled **all** the other options will be ignored except `cephVersion.image` and `dataDirHostPath`. See [external cluster configuration](#external-cluster). If `cephVersion.image` is left blank, Rook will refuse the creation of extra CRs like object, file and nfs.
 * `cephVersion`: The version information for launching the ceph daemons.
-  * `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v14.2.12` or `ceph/ceph:v15.2.9`. For more details read the [container images section](#ceph-container-images).
+  * `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v14.2.12` or `ceph/ceph:v15.2.11`. For more details read the [container images section](#ceph-container-images).
   For the latest ceph images, see the [Ceph DockerHub](https://hub.docker.com/r/ceph/ceph/tags/).
   To ensure a consistent version of the image is running across all nodes in the cluster, it is recommended to use a very specific image version.
   Tags also exist that would give the latest version, but they are only recommended for test environments. For example, the tag `v14` will be updated each time a new nautilus build is released.
   Using the `v14` or similar tag is not recommended in production because it may lead to inconsistent versions of the image running across different nodes in the cluster.
-  * `allowUnsupported`: If `true`, allow an unsupported major version of the Ceph release. Currently `nautilus` and `octopus` are supported. Future versions such as `pacific` would require this to be set to `true`. Should be set to `false` in production.
+  * `allowUnsupported`: If `true`, allow an unsupported major version of the Ceph release. Currently `nautilus`, `octopus`, and `pacific` are supported. Future versions such as `quincy` would require this to be set to `true`. Should be set to `false` in production.
 * `dataDirHostPath`: The path on the host ([hostPath](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath)) where config and data should be stored for each of the services. If the directory does not exist, it will be created. Because this directory persists on the host, it will remain after pods are deleted. Following paths and any of their subpaths **must not be used**: `/etc/ceph`, `/rook` or `/var/log/ceph`.
   * On **Minikube** environments, use `/data/rook`. Minikube boots into a tmpfs but it provides some [directories](https://github.com/kubernetes/minikube/blob/master/site/content/en/docs/handbook/persistent_volumes.md#a-note-on-mounts-persistence-and-minikube-hosts) where files can be persisted across reboots. Using one of these directories will ensure that Rook's data and configuration files are persisted and that enough storage space is available.
   * **WARNING**: For test scenarios, if you delete a cluster and start a new cluster on the same hosts, the path used by `dataDirHostPath` must be deleted. Otherwise, stale keys and other config will remain from the previous cluster and the new mons will fail to start.
@@ -303,10 +302,9 @@ Configure the network that will be enabled for the cluster and services.
 
 To use host networking, set `provider: host`.
 
-#### Multus (EXPERIMENTAL)
+#### Multus
 
-Rook has experimental support for Multus.
-Currently there is an [open issue](https://github.com/ceph/ceph-csi/issues/1323) in ceph-csi which explains the csi-rbdPlugin issue while using multus network.
+Rook supports addition of public and cluster network for ceph using Multus
 
 The selector keys are required to be `public` and `cluster` where each represent:
 
@@ -357,6 +355,7 @@ spec:
 * Ensure that `master` matches the network interface of the host that you want to use.
 * The NAD should be referenced along with the namespace in which it is present like `public: <namespace>/<name of NAD>`.
   e.g., the network attachment definition are in `rook-multus` namespace:
+* Ipam type `whereabouts` is required because it makes sure that all the pods get a unique IP address from the multus network.
 
 ```yaml
   public: rook-multus/rook-public-nw
@@ -712,7 +711,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -744,7 +743,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -784,7 +783,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -831,7 +830,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -937,7 +936,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -983,7 +982,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v15.2.9
+    image: ceph/ceph:v15.2.11
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -1428,7 +1427,7 @@ spec:
     enable: true
   dataDirHostPath: /var/lib/rook
   cephVersion:
-    image: ceph/ceph:v15.2.9 # Should match external cluster version
+    image: ceph/ceph:v15.2.11 # Should match external cluster version
 ```
 
 ### Cleanup policy
@@ -1468,10 +1467,6 @@ By default, the Key Encryption Keys (also known as Data Encryption Keys) are sto
 
 However, if a Key Management System exists Rook is capable of using it. HashiCorp Vault is the only KMS currently supported by Rook.
 Please refer to the next section.
-
-Ceph RGW supports encryption via KMS using HashiCorp Vault. If the below settings are defined, then RGW establish a connection between Vault
-and whenever S3 client sends a request with Server Side Encryption, it encrypts that using the key specified by the client.
-For more details w.r.t RGW, please refer [Ceph Vault documentation](https://docs.ceph.com/en/latest/radosgw/vault/)
 
 The `security` section contains settings related to encryption of the cluster.
 
@@ -1589,16 +1584,3 @@ data:
 
 Note: if you are using self-signed certificates (not known/approved by a proper CA) you must pass `VAULT_SKIP_VERIFY: true`.
 Communications will remain encrypted but the validity of the certificate will not be verified.
-
-For RGW, please note the following:
-
-* `VAULT_SECRET_ENGINE` option is specifically for RGW to mention about the secret engine which can be used, currently supports two: [kv](https://www.vaultproject.io/docs/secrets/kv) and [transit](https://www.vaultproject.io/docs/secrets/transit).
-* The Storage administrator needs to create a secret in the Vault server so that S3 clients use that key for encryption
-```console
-# kv engine
-vault kv put rook/mybucketkey key=$(openssl rand -base64 32)
-
-# transit engine
-vault write -f transit/keys/mybucketkey exportable=true
-```
-* TLS authentication with custom certs between Vault and RGW are yet to support.

@@ -47,12 +47,7 @@ spec:
                   description: The root of the crush hierarchy utilized by the pool
                   type: string
                 deviceClass:
-                  description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                  enum:
-                    - ssd
-                    - hdd
-                    - nvme
-                    - ""
+                  description: The device class the OSD should set to for use in the pool
                   type: string
                 enableRBDStats:
                   description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -479,7 +474,7 @@ spec:
                       description: Whether to allow unsupported versions (do not set to true in production)
                       type: boolean
                     image:
-                      description: Image is the container image used to launch the ceph daemons, such as ceph/ceph:v15.2.9
+                      description: Image is the container image used to launch the ceph daemons, such as ceph/ceph:v15.2.11
                       type: string
                   required:
                     - image
@@ -4792,12 +4787,7 @@ spec:
                         description: The root of the crush hierarchy utilized by the pool
                         type: string
                       deviceClass:
-                        description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                        enum:
-                          - ssd
-                          - hdd
-                          - nvme
-                          - ""
+                        description: The device class the OSD should set to for use in the pool
                         type: string
                       enableRBDStats:
                         description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -4931,12 +4921,7 @@ spec:
                       description: The root of the crush hierarchy utilized by the pool
                       type: string
                     deviceClass:
-                      description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                      enum:
-                        - ssd
-                        - hdd
-                        - nvme
-                        - ""
+                      description: The device class the OSD should set to for use in the pool
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -6226,12 +6211,7 @@ spec:
                       description: The root of the crush hierarchy utilized by the pool
                       type: string
                     deviceClass:
-                      description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                      enum:
-                        - ssd
-                        - hdd
-                        - nvme
-                        - ""
+                      description: The device class the OSD should set to for use in the pool
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -6868,6 +6848,16 @@ spec:
                       maximum: 65535
                       minimum: 0
                       type: integer
+                    service:
+                      description: The configuration related to add/set on each rgw service.
+                      nullable: true
+                      properties:
+                        annotations:
+                          additionalProperties:
+                            type: string
+                          description: The annotations-related configuration to add/set on each rgw service. nullable optional
+                          type: object
+                      type: object
                     sslCertificateRef:
                       description: The name of the secret that stores the ssl certificate for secure rgw connections
                       type: string
@@ -6999,12 +6989,7 @@ spec:
                       description: The root of the crush hierarchy utilized by the pool
                       type: string
                     deviceClass:
-                      description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                      enum:
-                        - ssd
-                        - hdd
-                        - nvme
-                        - ""
+                      description: The device class the OSD should set to for use in the pool
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -7123,6 +7108,26 @@ spec:
                 preservePoolsOnDelete:
                   description: Preserve pools on object store deletion
                   type: boolean
+                security:
+                  description: Security represents security settings
+                  nullable: true
+                  properties:
+                    kms:
+                      description: KeyManagementService is the main Key Management option
+                      nullable: true
+                      properties:
+                        connectionDetails:
+                          additionalProperties:
+                            type: string
+                          description: ConnectionDetails contains the KMS connection details (address, port etc)
+                          nullable: true
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        tokenSecretName:
+                          description: TokenSecretName is the kubernetes secret containing the KMS token
+                          type: string
+                      type: object
+                  type: object
                 zone:
                   description: The multisite info
                   nullable: true
@@ -7358,12 +7363,7 @@ spec:
                       description: The root of the crush hierarchy utilized by the pool
                       type: string
                     deviceClass:
-                      description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                      enum:
-                        - ssd
-                        - hdd
-                        - nvme
-                        - ""
+                      description: The device class the OSD should set to for use in the pool
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -7496,12 +7496,7 @@ spec:
                       description: The root of the crush hierarchy utilized by the pool
                       type: string
                     deviceClass:
-                      description: 'The device class the OSD should set to (options are: hdd, ssd, or nvme)'
-                      enum:
-                        - ssd
-                        - hdd
-                        - nvme
-                        - ""
+                      description: The device class the OSD should set to for use in the pool
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
