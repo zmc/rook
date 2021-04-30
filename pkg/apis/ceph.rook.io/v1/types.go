@@ -572,16 +572,19 @@ type PoolSpec struct {
 
 	// The root of the crush hierarchy utilized by the pool
 	// +optional
+	// +nullable
 	CrushRoot string `json:"crushRoot,omitempty"`
 
 	// The device class the OSD should set to for use in the pool
 	// +optional
+	// +nullable
 	DeviceClass string `json:"deviceClass,omitempty"`
 
 	// The inline compression mode in Bluestore OSD to set to (options are: none, passive, aggressive, force)
 	// +kubebuilder:validation:Enum=none;passive;aggressive;force;""
 	// +kubebuilder:default=none
 	// +optional
+	// +nullable
 	CompressionMode string `json:"compressionMode,omitempty"`
 
 	// The replication settings
@@ -886,6 +889,7 @@ type ErasureCodedSpec struct {
 // CephFilesystem represents a Ceph Filesystem
 // +kubebuilder:printcolumn:name="ActiveMDS",type=string,JSONPath=`.spec.metadataServer.activeCount`,description="Number of desired active MDS daemons"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:subresource:status
 type CephFilesystem struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -907,9 +911,11 @@ type CephFilesystemList struct {
 // FilesystemSpec represents the spec of a file system
 type FilesystemSpec struct {
 	// The metadata pool settings
+	// +nullable
 	MetadataPool PoolSpec `json:"metadataPool"`
 
 	// The data pool settings
+	// +nullable
 	DataPools []PoolSpec `json:"dataPools"`
 
 	// Preserve pools on filesystem deletion
@@ -1004,10 +1010,12 @@ type CephObjectStoreList struct {
 type ObjectStoreSpec struct {
 	// The metadata pool settings
 	// +optional
+	// +nullable
 	MetadataPool PoolSpec `json:"metadataPool,omitempty"`
 
 	// The data pool settings
 	// +optional
+	// +nullable
 	DataPool PoolSpec `json:"dataPool,omitempty"`
 
 	// Preserve pools on object store deletion
@@ -1277,9 +1285,11 @@ type ObjectZoneSpec struct {
 	ZoneGroup string `json:"zoneGroup"`
 
 	// The metadata pool settings
+	// +nullable
 	MetadataPool PoolSpec `json:"metadataPool"`
 
 	// The data pool settings
+	// +nullable
 	DataPool PoolSpec `json:"dataPool"`
 }
 

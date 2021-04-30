@@ -4,7 +4,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephblockpools.ceph.rook.io
@@ -42,12 +42,15 @@ spec:
                     - aggressive
                     - force
                     - ""
+                  nullable: true
                   type: string
                 crushRoot:
                   description: The root of the crush hierarchy utilized by the pool
+                  nullable: true
                   type: string
                 deviceClass:
                   description: The device class the OSD should set to for use in the pool
+                  nullable: true
                   type: string
                 enableRBDStats:
                   description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -329,7 +332,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephclients.ceph.rook.io
@@ -400,7 +403,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephclusters.ceph.rook.io
@@ -812,8 +815,24 @@ spec:
                                     type: string
                                   metadata:
                                     description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                                    properties:
+                                      annotations:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      finalizers:
+                                        items:
+                                          type: string
+                                        type: array
+                                      labels:
+                                        additionalProperties:
+                                          type: string
+                                        type: object
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
                                     type: object
-                                    x-kubernetes-preserve-unknown-fields: true
                                   spec:
                                     description: 'Spec defines the desired characteristics of a volume requested by a pod author. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#persistentvolumeclaims'
                                     properties:
@@ -967,8 +986,24 @@ spec:
                           type: string
                         metadata:
                           description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                          properties:
+                            annotations:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            finalizers:
+                              items:
+                                type: string
+                              type: array
+                            labels:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            name:
+                              type: string
+                            namespace:
+                              type: string
                           type: object
-                          x-kubernetes-preserve-unknown-fields: true
                         spec:
                           description: 'Spec defines the desired characteristics of a volume requested by a pod author. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#persistentvolumeclaims'
                           properties:
@@ -1190,6 +1225,7 @@ spec:
                       type: string
                     provider:
                       description: Provider is what provides network connectivity to the cluster e.g. "host" or "multus"
+                      nullable: true
                       type: string
                     selectors:
                       additionalProperties:
@@ -1789,8 +1825,24 @@ spec:
                                   type: string
                                 metadata:
                                   description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                                  properties:
+                                    annotations:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                    finalizers:
+                                      items:
+                                        type: string
+                                      type: array
+                                    labels:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                    name:
+                                      type: string
+                                    namespace:
+                                      type: string
                                   type: object
-                                  x-kubernetes-preserve-unknown-fields: true
                                 spec:
                                   description: 'Spec defines the desired characteristics of a volume requested by a pod author. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#persistentvolumeclaims'
                                   properties:
@@ -2836,8 +2888,24 @@ spec:
                                   type: string
                                 metadata:
                                   description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                                  properties:
+                                    annotations:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                    finalizers:
+                                      items:
+                                        type: string
+                                      type: array
+                                    labels:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                    name:
+                                      type: string
+                                    namespace:
+                                      type: string
                                   type: object
-                                  x-kubernetes-preserve-unknown-fields: true
                                 spec:
                                   description: 'Spec defines the desired characteristics of a volume requested by a pod author. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#persistentvolumeclaims'
                                   properties:
@@ -2976,7 +3044,6 @@ spec:
                                   type: object
                               type: object
                             type: array
-                            x-kubernetes-preserve-unknown-fields: true
                         required:
                           - count
                           - name
@@ -3002,8 +3069,24 @@ spec:
                             type: string
                           metadata:
                             description: 'Standard object''s metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata'
+                            properties:
+                              annotations:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              finalizers:
+                                items:
+                                  type: string
+                                type: array
+                              labels:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              name:
+                                type: string
+                              namespace:
+                                type: string
                             type: object
-                            x-kubernetes-preserve-unknown-fields: true
                           spec:
                             description: 'Spec defines the desired characteristics of a volume requested by a pod author. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#persistentvolumeclaims'
                             properties:
@@ -4222,7 +4305,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephfilesystemmirrors.ceph.rook.io
@@ -4731,7 +4814,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephfilesystems.ceph.rook.io
@@ -4752,6 +4835,9 @@ spec:
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
+        - jsonPath: .status.phase
+          name: Phase
+          type: string
       name: v1
       schema:
         openAPIV3Schema:
@@ -4782,12 +4868,15 @@ spec:
                           - aggressive
                           - force
                           - ""
+                        nullable: true
                         type: string
                       crushRoot:
                         description: The root of the crush hierarchy utilized by the pool
+                        nullable: true
                         type: string
                       deviceClass:
                         description: The device class the OSD should set to for use in the pool
+                        nullable: true
                         type: string
                       enableRBDStats:
                         description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -4903,9 +4992,11 @@ spec:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
                     type: object
+                  nullable: true
                   type: array
                 metadataPool:
                   description: The metadata pool settings
+                  nullable: true
                   properties:
                     compressionMode:
                       default: none
@@ -4916,12 +5007,15 @@ spec:
                         - aggressive
                         - force
                         - ""
+                      nullable: true
                       type: string
                     crushRoot:
                       description: The root of the crush hierarchy utilized by the pool
+                      nullable: true
                       type: string
                     deviceClass:
                       description: The device class the OSD should set to for use in the pool
+                      nullable: true
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -5555,7 +5649,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephnfses.ceph.rook.io
@@ -6099,7 +6193,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephobjectrealms.ceph.rook.io
@@ -6165,7 +6259,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephobjectstores.ceph.rook.io
@@ -6196,6 +6290,7 @@ spec:
               properties:
                 dataPool:
                   description: The data pool settings
+                  nullable: true
                   properties:
                     compressionMode:
                       default: none
@@ -6206,12 +6301,15 @@ spec:
                         - aggressive
                         - force
                         - ""
+                      nullable: true
                       type: string
                     crushRoot:
                       description: The root of the crush hierarchy utilized by the pool
+                      nullable: true
                       type: string
                     deviceClass:
                       description: The device class the OSD should set to for use in the pool
+                      nullable: true
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -6974,6 +7072,7 @@ spec:
                   type: object
                 metadataPool:
                   description: The metadata pool settings
+                  nullable: true
                   properties:
                     compressionMode:
                       default: none
@@ -6984,12 +7083,15 @@ spec:
                         - aggressive
                         - force
                         - ""
+                      nullable: true
                       type: string
                     crushRoot:
                       description: The root of the crush hierarchy utilized by the pool
+                      nullable: true
                       type: string
                     deviceClass:
                       description: The device class the OSD should set to for use in the pool
+                      nullable: true
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -7186,7 +7288,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephobjectstoreusers.ceph.rook.io
@@ -7256,7 +7358,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephobjectzonegroups.ceph.rook.io
@@ -7317,7 +7419,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephobjectzones.ceph.rook.io
@@ -7348,6 +7450,7 @@ spec:
               properties:
                 dataPool:
                   description: The data pool settings
+                  nullable: true
                   properties:
                     compressionMode:
                       default: none
@@ -7358,12 +7461,15 @@ spec:
                         - aggressive
                         - force
                         - ""
+                      nullable: true
                       type: string
                     crushRoot:
                       description: The root of the crush hierarchy utilized by the pool
+                      nullable: true
                       type: string
                     deviceClass:
                       description: The device class the OSD should set to for use in the pool
+                      nullable: true
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -7481,6 +7587,7 @@ spec:
                   type: object
                 metadataPool:
                   description: The metadata pool settings
+                  nullable: true
                   properties:
                     compressionMode:
                       default: none
@@ -7491,12 +7598,15 @@ spec:
                         - aggressive
                         - force
                         - ""
+                      nullable: true
                       type: string
                     crushRoot:
                       description: The root of the crush hierarchy utilized by the pool
+                      nullable: true
                       type: string
                     deviceClass:
                       description: The device class the OSD should set to for use in the pool
+                      nullable: true
                       type: string
                     enableRBDStats:
                       description: EnableRBDStats is used to enable gathering of statistics for all RBD images in the pool
@@ -7646,7 +7756,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: cephrbdmirrors.ceph.rook.io
@@ -8293,7 +8403,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: volumereplicationclasses.replication.storage.openshift.io
@@ -8352,7 +8462,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: volumereplications.replication.storage.openshift.io
@@ -8487,7 +8597,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.5.0
+    controller-gen.kubebuilder.io/version: v0.5.1-0.20210420220833-f284e2e8098c
     helm.sh/resource-policy: keep
   creationTimestamp: null
   name: volumes.rook.io
