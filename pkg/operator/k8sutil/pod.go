@@ -360,3 +360,21 @@ func ForceDeletePodIfStuck(context *clusterd.Context, pod v1.Pod) error {
 	logger.Infof("pod %q deletion succeeded", pod.Name)
 	return nil
 }
+
+func IsPodScheduled(clientSet kubernetes.Interface, namespace, selector string) (bool, error) {
+	listOpts := metav1.ListOptions{LabelSelector: selector}
+	podList, err := clientSet.CoreV1().Pods(namespace).List(listOpts)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to list pods with label selector %q in namespace %q", selector, namespace)
+	}
+
+	if len(podList.Items) == 0 {
+		return false, errors.Errorf("no pods found with label selector %q in namespace %q", selector, namespace)
+	}
+
+	if podList.Items[0].Spec.NodeName == "" {
+		return false, nil
+	}
+
+	return true, nil
+}

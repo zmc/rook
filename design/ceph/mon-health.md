@@ -59,6 +59,8 @@ healthCheck:
       timeout: 45s
 ```
 
+If the mon pod is in pending state and couldn't be assigned to a node (say, due to node drain), then the operator will wait for the timeout again before the mon failover. So the timeout waiting for the mon failover will be doubled in this case.
+
 ### Example Failover
 Rook will create mons with pod names such as mon0, mon1, and mon2. Let's say mon1 had an issue and the pod failed.
 ```
