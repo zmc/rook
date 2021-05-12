@@ -234,7 +234,7 @@ func (c *Cluster) startMons(targetCount int) error {
 	// only once and do it as early as possible in the mon orchestration.
 	setConfigsNeedsRetry := false
 	if existingCount > 0 {
-		err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+		err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 		if err != nil {
 			// If we fail here, it could be because the mons are not healthy, and this might be
 			// fixed by updating the mon deployments. Instead of returning error here, log a
@@ -260,7 +260,7 @@ func (c *Cluster) startMons(targetCount int) error {
 			// values in the config database. Do this only when the existing count is zero so that
 			// this is only done once when the cluster is created.
 			if existingCount == 0 {
-				err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+				err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 				if err != nil {
 					return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after creating the first mon")
 				}
@@ -268,7 +268,7 @@ func (c *Cluster) startMons(targetCount int) error {
 				// Or if we need to retry, only do this when we are on the first iteration of the
 				// loop. This could be in the same if statement as above, but separate it to get a
 				// different error message.
-				err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+				err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 				if err != nil {
 					return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after updating the existing mons")
 				}
@@ -282,7 +282,7 @@ func (c *Cluster) startMons(targetCount int) error {
 		}
 
 		if setConfigsNeedsRetry {
-			err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+			err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 			if err != nil {
 				return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after forcefully updating the existing mons")
 			}
@@ -500,11 +500,6 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 	// save the mon config after we have "initiated the IPs"
 	if err := c.saveMonConfig(); err != nil {
 		return errors.Wrap(err, "failed to save mons")
-	}
-
-	// make sure we have the connection info generated so connections can happen
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return err
 	}
 
 	// Start the deployment
@@ -1056,6 +1051,29 @@ func (c *Cluster) waitForMonsToJoin(mons []*monConfig, requireAllInQuorum bool) 
 }
 
 func (c *Cluster) saveMonConfig() error {
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mons")
+	}
+
+	// Every time the mon config is updated, must also update the global config so that all daemons
+	// have the most updated version if they restart.
+	if err := config.GetStore(c.context, c.Namespace, c.ownerInfo).CreateOrUpdate(c.ClusterInfo); err != nil {
+		return errors.Wrap(err, "failed to update the global config")
+	}
+
+	// write the latest config to the config dir
+	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
+		return errors.Wrap(err, "failed to write connection config for new mons")
+	}
+
+	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
+		return errors.Wrap(err, "failed to update csi cluster config")
+	}
+
+	return nil
+}
+
+func (c *Cluster) persistExpectedMonDaemons() error {
 	ctx := context.TODO()
 	configMap := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1067,7 +1085,6 @@ func (c *Cluster) saveMonConfig() error {
 	if err != nil {
 		return errors.Wrapf(err, "failed to set owner reference mon configmap %q", configMap.Name)
 	}
-
 	monMapping, err := json.Marshal(c.mapping)
 	if err != nil {
 		return errors.Wrap(err, "failed to marshal mon mapping")
@@ -1106,24 +1123,7 @@ func (c *Cluster) saveMonConfig() error {
 			return errors.Wrap(err, "failed to update mon endpoint config map")
 		}
 	}
-
 	logger.Infof("saved mon endpoints to config map %+v", configMap.Data)
-
-	// Every time the mon config is updated, must also update the global config so that all daemons
-	// have the most updated version if they restart.
-	if err := config.GetStore(c.context, c.Namespace, c.ownerInfo).CreateOrUpdate(c.ClusterInfo); err != nil {
-		return errors.Wrap(err, "failed to update the global config")
-	}
-
-	// write the latest config to the config dir
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return errors.Wrap(err, "failed to write connection config for new mons")
-	}
-
-	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
-		return errors.Wrap(err, "failed to update csi cluster config")
-	}
-
 	return nil
 }
 
@@ -1335,6 +1335,12 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 	// Commit the maxMonID after a mon deployment has been started (and not just scheduled)
 	if err := c.commitMaxMonID(m.DaemonName); err != nil {
 		return errors.Wrapf(err, "failed to commit maxMonId after starting mon %q", m.DaemonName)
+	}
+
+	// Persist the expected list of mons to the configmap in case the operator is interrupted before the mon failover is completed
+	// The config on disk won't be updated until the mon failover is completed
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mon daemons")
 	}
 
 	return nil
