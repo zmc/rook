@@ -229,11 +229,17 @@ func loadMonConfig(clientset kubernetes.Interface, namespace string) (map[string
 	}
 
 	// Parse the max monitor id
+	storedMaxMonID := -1
 	if id, ok := cm.Data[MaxMonIDKey]; ok {
-		maxMonID, err = strconv.Atoi(id)
+		storedMaxMonID, err = strconv.Atoi(id)
 		if err != nil {
 			logger.Errorf("invalid max mon id %q. %v", id, err)
+		} else {
+			maxMonID = storedMaxMonID
 		}
+	}
+	if maxMonID != storedMaxMonID {
+		logger.Infof("updating obsolete maxMonID %d to actual value %d", storedMaxMonID, maxMonID)
 	}
 
 	// Make sure the max id is consistent with the current monitors

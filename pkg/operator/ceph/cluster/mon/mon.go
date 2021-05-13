@@ -327,11 +327,6 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 		return errors.Wrap(err, "failed to save mons")
 	}
 
-	// make sure we have the connection info generated so connections can happen
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return err
-	}
-
 	// Start the deployment
 	if err := c.startDeployments(mons[0:expectedMonCount], requireAllInQuorum); err != nil {
 		return errors.Wrap(err, "failed to start mon pods")
@@ -751,44 +746,9 @@ func (c *Cluster) waitForMonsToJoin(mons []*monConfig, requireAllInQuorum bool) 
 }
 
 func (c *Cluster) saveMonConfig() error {
-	configMap := &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      EndpointConfigMapName,
-			Namespace: c.Namespace,
-		},
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mons")
 	}
-	k8sutil.SetOwnerRef(&configMap.ObjectMeta, &c.ownerRef)
-
-	monMapping, err := json.Marshal(c.mapping)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal mon mapping")
-	}
-
-	csiConfigValue, err := csi.FormatCsiClusterConfig(
-		c.Namespace, c.ClusterInfo.Monitors)
-	if err != nil {
-		return errors.Wrap(err, "failed to format csi config")
-	}
-
-	configMap.Data = map[string]string{
-		EndpointDataKey: FlattenMonEndpoints(c.ClusterInfo.Monitors),
-		MaxMonIDKey:     strconv.Itoa(c.maxMonID),
-		MappingKey:      string(monMapping),
-		csi.ConfigKey:   csiConfigValue,
-	}
-
-	if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(configMap); err != nil {
-		if !kerrors.IsAlreadyExists(err) {
-			return errors.Wrap(err, "failed to create mon endpoint config map")
-		}
-
-		logger.Debugf("updating config map %s that already exists", configMap.Name)
-		if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(configMap); err != nil {
-			return errors.Wrap(err, "failed to update mon endpoint config map")
-		}
-	}
-
-	logger.Infof("saved mon endpoints to config map %+v", configMap.Data)
 
 	// Every time the mon config is updated, must also update the global config so that all daemons
 	// have the most updated version if they restart.
@@ -805,6 +765,105 @@ func (c *Cluster) saveMonConfig() error {
 		return errors.Wrap(err, "failed to update csi cluster config")
 	}
 
+	return nil
+}
+
+func (c *Cluster) persistExpectedMonDaemons() error {
+	configMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      EndpointConfigMapName,
+			Namespace: c.Namespace,
+		},
+	}
+	k8sutil.SetOwnerRef(&configMap.ObjectMeta, &c.ownerRef)
+	monMapping, err := json.Marshal(c.mapping)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal mon mapping")
+	}
+
+	csiConfigValue, err := csi.FormatCsiClusterConfig(
+		c.Namespace, c.ClusterInfo.Monitors)
+	if err != nil {
+		return errors.Wrap(err, "failed to format csi config")
+	}
+
+	maxMonID, err := c.getStoredMaxMonID()
+	if err != nil {
+		return errors.Wrap(err, "failed to save maxMonID")
+	}
+
+	configMap.Data = map[string]string{
+		EndpointDataKey: FlattenMonEndpoints(c.ClusterInfo.Monitors),
+		// persist the maxMonID that was previously stored in the configmap. We are likely saving info
+		// about scheduling of the mons, but we only want to update the maxMonID once a new mon has
+		// actually been started. If the operator is restarted or the reconcile is otherwise restarted,
+		// we want to calculate the mon scheduling next time based on the committed maxMonID, rather
+		// than only a mon scheduling, which may not have completed.
+		MaxMonIDKey:   maxMonID,
+		MappingKey:    string(monMapping),
+		csi.ConfigKey: csiConfigValue,
+	}
+
+	if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(configMap); err != nil {
+		if !kerrors.IsAlreadyExists(err) {
+			return errors.Wrap(err, "failed to create mon endpoint config map")
+		}
+
+		logger.Debugf("updating config map %s that already exists", configMap.Name)
+		if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(configMap); err != nil {
+			return errors.Wrap(err, "failed to update mon endpoint config map")
+		}
+	}
+	logger.Infof("saved mon endpoints to config map %+v", configMap.Data)
+	return nil
+}
+
+func (c *Cluster) getStoredMaxMonID() (string, error) {
+	configmap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	if err != nil && !kerrors.IsNotFound(err) {
+		return "", errors.Wrap(err, "could not load maxMonId")
+	}
+	if err == nil {
+		if val, ok := configmap.Data[MaxMonIDKey]; ok {
+			return val, nil
+		}
+	}
+
+	// if the configmap cannot be loaded, assume a new cluster. If the mons have previously
+	// been created, the maxMonID will anyway analyze them to ensure the index is correct
+	// even if this error occurs.
+	logger.Infof("existing maxMonID not found or failed to load. %v", err)
+	return "-1", nil
+}
+
+func (c *Cluster) commitMaxMonID(monName string) error {
+	committedMonID, err := k8sutil.NameToIndex(monName)
+	if err != nil {
+		return errors.Wrapf(err, "invalid mon name %q", monName)
+	}
+
+	configmap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return errors.Wrap(err, "failed to find existing mon endpoint config map")
+	}
+
+	// set the new max key if greater
+	existingMax, err := strconv.Atoi(configmap.Data[MaxMonIDKey])
+	if err != nil {
+		return errors.Wrap(err, "failed to read existing maxMonId")
+	}
+
+	if existingMax >= committedMonID {
+		logger.Infof("no need to commit maxMonID %d since it is not greater than existing maxMonID %d", committedMonID, existingMax)
+		return nil
+	}
+
+	logger.Infof("updating maxMonID from %d to %d after committing mon %q", existingMax, committedMonID, monName)
+	configmap.Data[MaxMonIDKey] = strconv.Itoa(committedMonID)
+
+	if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(configmap); err != nil {
+		return errors.Wrap(err, "failed to update mon endpoint config map for the maxMonID")
+	}
 	return nil
 }
 
@@ -947,6 +1006,17 @@ func (c *Cluster) startMon(m *monConfig, node *NodeInfo) error {
 	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(d)
 	if err != nil {
 		return errors.Wrapf(err, "failed to create mon deployment %s", d.Name)
+	}
+
+	// Commit the maxMonID after a mon deployment has been started (and not just scheduled)
+	if err := c.commitMaxMonID(m.DaemonName); err != nil {
+		return errors.Wrapf(err, "failed to commit maxMonId after starting mon %q", m.DaemonName)
+	}
+
+	// Persist the expected list of mons to the configmap in case the operator is interrupted before the mon failover is completed
+	// The config on disk won't be updated until the mon failover is completed
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mon daemons")
 	}
 
 	return nil

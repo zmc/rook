@@ -34,6 +34,7 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/test"
@@ -230,6 +231,30 @@ func validateStart(t *testing.T, c *Cluster) {
 	assert.Nil(t, err)
 }
 
+func TestPersistMons(t *testing.T) {
+	clientset := test.New(t, 1)
+	c := New(&clusterd.Context{Clientset: clientset}, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
+
+	// Persist mon a
+	err := c.persistExpectedMonDaemons()
+	assert.NoError(t, err)
+
+	cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "a=1.2.3.1:6789", cm.Data[EndpointDataKey])
+
+	// Persist mon b, and remove mon a for simply testing the configmap is updated
+	c.ClusterInfo.Monitors["b"] = &cephclient.MonInfo{Name: "b", Endpoint: "4.5.6.7:3300"}
+	delete(c.ClusterInfo.Monitors, "a")
+	err = c.persistExpectedMonDaemons()
+	assert.NoError(t, err)
+
+	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, "b=4.5.6.7:3300", cm.Data[EndpointDataKey])
+}
+
 func TestSaveMonEndpoints(t *testing.T) {
 	clientset := test.New(t, 1)
 	configDir, _ := ioutil.TempDir("", "")
@@ -262,7 +287,61 @@ func TestSaveMonEndpoints(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, "a=2.3.4.5:6789", cm.Data[EndpointDataKey])
 	assert.Equal(t, `{"node":{"a":{"Name":"node0","Hostname":"myhost","Address":"1.1.1.1"}}}`, cm.Data[MappingKey])
-	assert.Equal(t, "2", cm.Data[MaxMonIDKey])
+	assert.Equal(t, "-1", cm.Data[MaxMonIDKey])
+
+	// Update the maxMonID to some random value
+	cm.Data[MaxMonIDKey] = "23"
+	_, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(cm)
+	assert.Nil(t, err)
+	// Confirm the maxMonId will be persisted and not updated to anything else.
+	// The value is only expected to be set directly to the configmap when a mon deployment is started.
+	err = c.saveMonConfig()
+	assert.Nil(t, err)
+	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
+	assert.Nil(t, err)
+	assert.Equal(t, "23", cm.Data[MaxMonIDKey])
+}
+
+func TestMaxMonID(t *testing.T) {
+	clientset := test.New(t, 1)
+	configDir, _ := ioutil.TempDir("", "")
+	defer os.RemoveAll(configDir)
+	c := New(&clusterd.Context{Clientset: clientset, ConfigDir: configDir}, "ns", cephv1.ClusterSpec{}, metav1.OwnerReference{}, &sync.Mutex{})
+
+	// when the configmap is not found, the maxMonID is -1
+	maxMonID, err := c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "-1", maxMonID)
+
+	// initialize the configmap
+	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
+	err = c.saveMonConfig()
+	assert.Nil(t, err)
+
+	// invalid mon names won't update the maxMonID
+	err = c.commitMaxMonID("bad-id")
+	assert.Error(t, err)
+
+	// starting a mon deployment will set the maxMonID
+	err = c.commitMaxMonID("a")
+	assert.Nil(t, err)
+	maxMonID, err = c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "0", maxMonID)
+
+	// set to a higher id
+	err = c.commitMaxMonID("d")
+	assert.Nil(t, err)
+	maxMonID, err = c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "3", maxMonID)
+
+	// setting to an id lower than the max will not update it
+	err = c.commitMaxMonID("c")
+	assert.Nil(t, err)
+	maxMonID, err = c.getStoredMaxMonID()
+	assert.Nil(t, err)
+	assert.Equal(t, "3", maxMonID)
 }
 
 func TestMonInQuorum(t *testing.T) {
