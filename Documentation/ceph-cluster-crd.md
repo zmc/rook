@@ -32,7 +32,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -59,7 +59,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -167,7 +167,7 @@ Settings can be specified at the global level to apply to the cluster as a whole
 * `external`:
   * `enable`: if `true`, the cluster will not be managed by Rook but via an external entity. This mode is intended to connect to an existing cluster. In this case, Rook will only consume the external cluster. However, Rook will be able to deploy various daemons in Kubernetes such as object gateways, mds and nfs if an image is provided and will refuse otherwise. If this setting is enabled **all** the other options will be ignored except `cephVersion.image` and `dataDirHostPath`. See [external cluster configuration](#external-cluster). If `cephVersion.image` is left blank, Rook will refuse the creation of extra CRs like object, file and nfs.
 * `cephVersion`: The version information for launching the ceph daemons.
-  * `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v14.2.12` or `ceph/ceph:v15.2.12`. For more details read the [container images section](#ceph-container-images).
+  * `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v14.2.12` or `ceph/ceph:v15.2.13`. For more details read the [container images section](#ceph-container-images).
   For the latest ceph images, see the [Ceph DockerHub](https://hub.docker.com/r/ceph/ceph/tags/).
   To ensure a consistent version of the image is running across all nodes in the cluster, it is recommended to use a very specific image version.
   Tags also exist that would give the latest version, but they are only recommended for test environments. For example, the tag `v14` will be updated each time a new nautilus build is released.
@@ -317,14 +317,32 @@ If you want to learn more, please read
 
 Based on the configuration, the operator will do the following:
 
-  1. if only the `public` selector is specified both communication and replication will happen on that network
-  2. if both `public` and `cluster` selectors are specified the first one will run the communication network and the second the replication network
+  1. If only the `public` selector is specified, all communication will happen on that network
+```yaml
+  network:
+    provider: multus
+    selectors:
+      public: rook-ceph/rook-public-nw
+```
+  2. If only the `cluster` selector is specified, the internal cluster traffic* will happen on that network. All other traffic to mons, OSDs, and other daemons will be on the default network.
+```yaml
+  network:
+    provider: multus
+    selectors:
+      cluster: rook-ceph/rook-cluster-nw
+```
+  3. If both `public` and `cluster` selectors are specified the first one will run all the communication network and the second the internal cluster network*
+```yaml
+  network:
+    provider: multus
+    selectors:
+      public: rook-ceph/rook-public-nw
+      cluster: rook-ceph/rook-cluster-nw
+```
+
+\* Internal cluster traffic includes OSD heartbeats, data replication, and data recovery
 
 In order to work, each selector value must match a `NetworkAttachmentDefinition` object name in Multus.
-For example, you can do:
-
-* `public`: "rook-ceph/my-public-storage-network"
-* `cluster`: "rook-ceph/my-replication-storage-network"
 
 For `multus` network provider, an already working cluster with Multus networking is required. Network attachment definition that later will be attached to the cluster needs to be created before the Cluster CRD.
 The Network attachment definitions should be using whereabouts cni.
@@ -353,17 +371,15 @@ spec:
 ```
 
 * Ensure that `master` matches the network interface of the host that you want to use.
-* The NAD should be referenced along with the namespace in which it is present like `public: <namespace>/<name of NAD>`.
-  e.g., the network attachment definition are in `rook-multus` namespace:
 * Ipam type `whereabouts` is required because it makes sure that all the pods get a unique IP address from the multus network.
-
-```yaml
-  public: rook-multus/rook-public-nw
-  cluster: rook-multus/rook-cluster-nw
-```
-
-This is required in order to use the NAD across namespaces.
-* In Openshift, to use the NetworkAttachmentDefinition across namespaces, the NAD must be deployed in the default namespace and it can be referenced as `default/myNAD` where `default` is the namespace and `myNAD` is the network attachment definition.
+* The NetworkAttachmentDefinition should be referenced along with the namespace in which it is present like `public: <namespace>/<name of NAD>`.
+  e.g., the network attachment definition are in `default` namespace:
+  ```yaml
+    public: default/rook-public-nw
+    cluster: default/rook-cluster-nw
+  ```
+  * This format is required in order to use the NetworkAttachmentDefinition across namespaces.
+  * In Openshift, to use a NetworkAttachmentDefinition (NAD) across namespaces, the NAD must be deployed in the `default` namespace. The NAD is then referenced with the namespace: `default/rook-public-nw`
 
 #### IPFamily
 
@@ -713,7 +729,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -745,7 +761,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -785,7 +801,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -832,7 +848,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -938,7 +954,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -984,7 +1000,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v15.2.12
+    image: ceph/ceph:v15.2.13
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -1442,7 +1458,7 @@ spec:
     enable: true
   dataDirHostPath: /var/lib/rook
   cephVersion:
-    image: ceph/ceph:v15.2.12 # Should match external cluster version
+    image: ceph/ceph:v15.2.13 # Should match external cluster version
 ```
 
 ### Cleanup policy
