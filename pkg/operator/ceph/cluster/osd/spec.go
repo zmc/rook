@@ -176,7 +176,11 @@ fi
 
 # TLS args
 if [ -n "$VAULT_CACERT" ]; then
-  ARGS+=(--capath $(dirname "${VAULT_CACERT}"))
+  if [ -z "$VAULT_CLIENT_CERT" ] && [ -z "$VAULT_CLIENT_KEY" ]; then
+    ARGS+=(--cacert "${VAULT_CACERT}")
+  else
+    ARGS+=(--capath $(dirname "${VAULT_CACERT}"))
+  fi
 fi
 if [ -n "$VAULT_CLIENT_CERT" ]; then
   ARGS+=(--cert "${VAULT_CLIENT_CERT}")
@@ -215,6 +219,9 @@ fi
 
 # Put the KEK in a file for cryptsetup to read
 python3 -c "import sys, json; print(json.load(sys.stdin)${PYTHON_DATA_PARSE}[\"$KEK_NAME\"], end='')" < "$CURL_PAYLOAD" > "$KEY_PATH"
+
+# purge payload file
+rm -f "$CURL_PAYLOAD"
 `
 
 	// If the disk identifier changes (different major and minor) we must force copy
