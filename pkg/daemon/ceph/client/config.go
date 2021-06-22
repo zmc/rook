@@ -240,3 +240,31 @@ func PopulateMonHostMembers(monitors map[string]*MonInfo) ([]string, []string) {
 
 	return monMembers, monHosts
 }
+
+// SetConfig applies a setting for a single mgr daemon
+func SetConfig(context *clusterd.Context, clusterInfo *ClusterInfo, daemonID string, key, val string, force bool) (bool, error) {
+	var getArgs, setArgs []string
+	getArgs = append(getArgs, "config", "get", daemonID, key)
+	if val == "" {
+		setArgs = append(setArgs, "config", "rm", daemonID, key)
+	} else {
+		setArgs = append(setArgs, "config", "set", daemonID, key, val)
+	}
+	if force {
+		setArgs = append(setArgs, "--force")
+	}
+
+	// Retrieve previous value to monitor changes
+	var prevVal string
+	buf, err := NewCephCommand(context, clusterInfo, getArgs).Run()
+	if err == nil {
+		prevVal = strings.TrimSpace(string(buf))
+	}
+
+	if _, err := NewCephCommand(context, clusterInfo, setArgs).Run(); err != nil {
+		return false, errors.Wrapf(err, "failed to set config key %s to %q", key, val)
+	}
+
+	hasChanged := prevVal != val
+	return hasChanged, nil
+}
