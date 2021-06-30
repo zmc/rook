@@ -44,8 +44,13 @@ func TestStartMgr(t *testing.T) {
 	var deploymentsUpdated *[]*apps.Deployment
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
+	foundUnsetPrometheus := false
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+			if args[0] == "config" && args[1] == "rm" && args[3] == "mgr/prometheus/a/server_addr" {
+				foundUnsetPrometheus = true
+				return "", nil
+			}
 			return "{\"key\":\"mysecurekey\"}", nil
 		},
 	}
@@ -82,6 +87,7 @@ func TestStartMgr(t *testing.T) {
 	validateStart(t, c)
 	assert.ElementsMatch(t, []string{}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
 	testopk8s.ClearDeploymentsUpdated(deploymentsUpdated)
+	assert.False(t, foundUnsetPrometheus)
 
 	c.spec.Dashboard.URLPrefix = "/test"
 	c.spec.Dashboard.Port = 12345
@@ -90,6 +96,8 @@ func TestStartMgr(t *testing.T) {
 	validateStart(t, c)
 	assert.ElementsMatch(t, []string{"rook-ceph-mgr-a"}, testopk8s.DeploymentNamesUpdated(deploymentsUpdated))
 	testopk8s.ClearDeploymentsUpdated(deploymentsUpdated)
+	// Only unset the preometheus binding during upgrade since this is the second call to Start()
+	assert.True(t, foundUnsetPrometheus)
 
 	// starting with more replicas
 	c.spec.Mgr.Count = 2
