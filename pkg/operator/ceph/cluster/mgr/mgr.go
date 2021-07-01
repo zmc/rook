@@ -29,6 +29,7 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
@@ -160,6 +161,15 @@ func (c *Cluster) Start() error {
 				return errors.Wrapf(err, "failed to create mgr deployment %s", resourceName)
 			}
 			logger.Infof("deployment for mgr %s already exists. updating if needed", resourceName)
+
+			// During an upgrade, make sure the server_addr setting is cleared or else the prometheus
+			// service may not be able to bind to the pod ip anymore, as was the setting in 4.7 and prior.
+			// This is only needed for 4.8 since upgrades to later clusters will always use the default.
+			logger.Info("ensuring the prometheus server_port is unset to binding to the localhost by default")
+			_, err = client.SetConfig(c.context, c.clusterInfo, fmt.Sprintf("mgr.%s", daemonID), fmt.Sprintf("mgr/prometheus/%s/server_addr", daemonID), "", false)
+			if err != nil {
+				logger.Warningf("failed to unset the prometheus server_port. %v", err)
+			}
 
 			if err := updateDeploymentAndWait(c.context, c.clusterInfo, d, config.MgrType, mgrConfig.DaemonID, c.spec.SkipUpgradeChecks, false); err != nil {
 				logger.Errorf("failed to update mgr deployment %q. %v", resourceName, err)
