@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - release-*
+      # do not match branches like release-4.9-temp
+      - !release-*-*
 
 #
 # NOTE: this MUST be backported to each release-X.Y branch on which the workflow should run!
