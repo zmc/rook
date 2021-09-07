@@ -467,6 +467,7 @@ const (
 type MonSpec struct {
 	// Count is the number of Ceph monitors
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=9
 	// +optional
 	Count int `json:"count,omitempty"`
 	// AllowMultiplePerNode determines if we can run multiple monitors on the same node (not recommended)
@@ -1643,7 +1644,6 @@ type NetworkSpec struct {
 
 	// IPFamily is the single stack IPv6 or IPv4 protocol
 	// +kubebuilder:validation:Enum=IPv4;IPv6
-	// +kubebuilder:default=IPv4
 	// +nullable
 	// +optional
 	IPFamily IPFamilyType `json:"ipFamily,omitempty"`
