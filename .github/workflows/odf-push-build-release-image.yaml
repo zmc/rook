@@ -2,9 +2,9 @@ name: ODF releases - Build and Push Image to Quay
 on:
   push:
     branches:
-      - release-*
+      - "release-*"
       # do not match branches like release-4.9-temp
-      - !release-*-*
+      - "!release-*-*"
 
 #
 # NOTE: this MUST be backported to each release-X.Y branch on which the workflow should run!
