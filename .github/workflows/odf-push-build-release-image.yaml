@@ -1,0 +1,69 @@
+name: ODF releases - Build and Push Image to Quay
+on:
+  push:
+    branches:
+      - release-*
+      # do not match branches like release-4.9-temp
+      - !release-*-*
+
+#
+# NOTE: this MUST be backported to each release-X.Y branch on which the workflow should run!
+#
+
+defaults:
+  run:
+    # reference: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#using-a-specific-shell
+    shell: bash --noprofile --norc -eo pipefail -x {0}
+
+jobs:
+  build-and-push-to-quay:
+    name: build and push release images to quay
+    runs-on: ubuntu-18.04
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v2
+
+    - name: setup golang
+      uses: actions/setup-go@v2
+      with:
+        go-version: 1.16
+
+    - name: unshallow repository
+      run: git fetch --prune --unshallow --tags
+
+    - name: build x86_64 image
+      id: build-image
+      run: |
+        branch_name="${GITHUB_REF##*/}" # e.g., refs/heads/release-4.9 -> release-4.9
+        odf_release="${branch_name#release-}"  # e.g., release-4.9 -> 4.9
+        commits="$(git rev-list --count HEAD)" # monotonically increasing number of commits
+        hash="$(git rev-parse --short HEAD)"
+        # config build with env vars and do the build
+        export GOPATH=$(go env GOPATH)
+        export IMAGES='ceph'
+        export BUILD_REGISTRY='rook-build'
+        export VERSION="${odf_release}-${commits}.${hash}" # e.g., 4.9-7094.5e3d5026a
+        make build
+        # find and re-tag the built image
+        built_image="$(docker images --format "{{.Repository}}" | grep rook-build)"
+        out_image="rook-ceph"
+        latest_tag="latest-${odf_release}"
+        docker tag "$built_image" "${out_image}:${VERSION}" # e.g., rook-ceph:4.9-7094.5e3d5026a
+        docker tag "$built_image" "${out_image}:${latest_tag}" # e.g., rook-ceph:latest-4.9
+        # set step outputs that can be referenced by later steps
+        echo "::set-output name=image::${out_image}" # e.g., rook-ceph
+        echo "::set-output name=tags::${VERSION} ${latest_tag}" # e.g., 4.9-7094.5e3d5026a latest-4.9
+
+    - name: push To quay.io
+      id: push-to-quay
+      uses: redhat-actions/push-to-registry@v2
+      with:
+        image: ${{ steps.build-image.outputs.image }}
+        tags: ${{ steps.build-image.outputs.tags }}
+        registry: quay.io/${{ secrets.QUAY_OCS_DEV_REGISTRY }}
+        username: ${{ secrets.QUAY_OCS_DEV_ROBOT_USER }}
+        password: ${{ secrets.QUAY_OCS_DEV_ROBOT_PASSWORD }}
+
+    - name: print pushed image URLs
+      run: echo "Image pushed to ${{ steps.push-to-quay.outputs.registry-paths }}"
