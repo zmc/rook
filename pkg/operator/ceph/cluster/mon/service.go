@@ -17,7 +17,6 @@ limitations under the License.
 package mon
 
 import (
-	"context"
 	"strconv"
 
 	"github.com/pkg/errors"
@@ -29,11 +28,11 @@ import (
 )
 
 func (c *Cluster) createService(mon *monConfig) (string, error) {
-	ctx := context.TODO()
 	svcDef := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   mon.ResourceName,
-			Labels: c.getLabels(mon, false, true),
+			Name:      mon.ResourceName,
+			Namespace: c.Namespace,
+			Labels:    c.getLabels(mon, false, true),
 		},
 		Spec: v1.ServiceSpec{
 			Ports: []v1.ServicePort{
@@ -49,7 +48,10 @@ func (c *Cluster) createService(mon *monConfig) (string, error) {
 			Selector: c.getLabels(mon, false, false),
 		},
 	}
-	k8sutil.SetOwnerRef(&svcDef.ObjectMeta, &c.ownerRef)
+	err := c.ownerInfo.SetOwnerReference(svcDef)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to set owner reference to mon service %q", svcDef.Name)
+	}
 
 	// If deploying Nautilus or newer we need a new port for the monitor service
 	addServicePort(svcDef, "tcp-msgr2", DefaultMsgr2Port)
@@ -58,7 +60,7 @@ func (c *Cluster) createService(mon *monConfig) (string, error) {
 	// For example, in disaster recovery the service might have been deleted accidentally, but we have the
 	// expected endpoint from the mon configmap.
 	if mon.PublicIP != "" {
-		_, err := c.context.Clientset.CoreV1().Services(c.Namespace).Get(ctx, svcDef.Name, metav1.GetOptions{})
+		_, err := c.context.Clientset.CoreV1().Services(c.Namespace).Get(c.ClusterInfo.Context, svcDef.Name, metav1.GetOptions{})
 		if err != nil && kerrors.IsNotFound(err) {
 			logger.Infof("ensuring the clusterIP for mon %q is %q", mon.DaemonName, mon.PublicIP)
 			svcDef.Spec.ClusterIP = mon.PublicIP

@@ -17,12 +17,18 @@ limitations under the License.
 package client
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"testing"
 	"time"
 
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -35,11 +41,20 @@ type ClusterInfo struct {
 	Monitors      map[string]*MonInfo
 	CephVersion   cephver.CephVersion
 	Namespace     string
-	OwnerRef      metav1.OwnerReference
+	OwnerInfo     *k8sutil.OwnerInfo
 	// Hide the name of the cluster since in 99% of uses we want to use the cluster namespace.
 	// If the CR name is needed, access it through the NamespacedName() method.
 	name              string
 	OsdUpgradeTimeout time.Duration
+	NetworkSpec       cephv1.NetworkSpec
+	// A context to cancel the context it is used to determine whether the reconcile loop should
+	// exist (if the context has been cancelled). This cannot be in main clusterd context since this
+	// is a pointer passed through the entire life cycle or the operator. If the context is
+	// cancelled it will immedialy be re-created, thus existing reconciles loops will not be
+	// cancelled.
+	// Whereas if passed through clusterInfo, we don't have that problem since clusterInfo is
+	// re-hydrated when a context is cancelled.
+	Context context.Context
 }
 
 // MonInfo is a collection of information about a Ceph mon.
@@ -72,15 +87,19 @@ func (c *ClusterInfo) NamespacedName() types.NamespacedName {
 }
 
 // AdminClusterInfo() creates a ClusterInfo with the basic info to access the cluster
-// as an admin. Only the namespace and the ceph username fields are set in the struct,
+// as an admin. Only a few fields are set in the struct,
 // so this clusterInfo cannot be used to generate the mon config or request the
 // namespacedName. A full cluster info must be populated for those operations.
 func AdminClusterInfo(namespace string) *ClusterInfo {
+	ownerInfo := k8sutil.NewOwnerInfoWithOwnerRef(&metav1.OwnerReference{}, "")
 	return &ClusterInfo{
 		Namespace: namespace,
 		CephCred: CephCred{
 			Username: AdminUsername,
 		},
+		name:      "testing",
+		OwnerInfo: ownerInfo,
+		Context:   context.TODO(),
 	}
 }
 
@@ -111,6 +130,10 @@ func (c *ClusterInfo) IsInitialized(logError bool) bool {
 		if logError {
 			logger.Error("ceph secret is empty")
 		}
+	} else if c.Context == nil {
+		if logError {
+			logger.Error("nil context")
+		}
 	} else {
 		isInitialized = true
 	}
@@ -121,4 +144,16 @@ func (c *ClusterInfo) IsInitialized(logError bool) bool {
 // NewMonInfo returns a new Ceph mon info struct from the given inputs.
 func NewMonInfo(name, ip string, port int32) *MonInfo {
 	return &MonInfo{Name: name, Endpoint: net.JoinHostPort(ip, fmt.Sprintf("%d", port))}
+}
+
+func NewMinimumOwnerInfo(t *testing.T) *k8sutil.OwnerInfo {
+	cluster := &cephv1.CephCluster{}
+	scheme := runtime.NewScheme()
+	err := cephv1.AddToScheme(scheme)
+	assert.NoError(t, err)
+	return k8sutil.NewOwnerInfo(cluster, scheme)
+}
+
+func NewMinimumOwnerInfoWithOwnerRef() *k8sutil.OwnerInfo {
+	return k8sutil.NewOwnerInfoWithOwnerRef(&metav1.OwnerReference{}, "")
 }

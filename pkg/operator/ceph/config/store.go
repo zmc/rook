@@ -19,7 +19,6 @@ limitations under the License.
 package config
 
 import (
-	"context"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -47,24 +46,23 @@ type Store struct {
 	configMapStore *k8sutil.ConfigMapKVStore
 	namespace      string
 	context        *clusterd.Context
-	ownerRef       *metav1.OwnerReference
+	ownerInfo      *k8sutil.OwnerInfo
 }
 
 // GetStore returns the Store for the cluster.
-func GetStore(context *clusterd.Context, namespace string, ownerRef *metav1.OwnerReference) *Store {
+func GetStore(context *clusterd.Context, namespace string, ownerInfo *k8sutil.OwnerInfo) *Store {
 	return &Store{
-		configMapStore: k8sutil.NewConfigMapKVStore(namespace, context.Clientset, *ownerRef),
+		configMapStore: k8sutil.NewConfigMapKVStore(namespace, context.Clientset, ownerInfo),
 		namespace:      namespace,
 		context:        context,
-		ownerRef:       ownerRef,
+		ownerInfo:      ownerInfo,
 	}
 }
 
 // CreateOrUpdate creates or updates the stored Ceph config based on the cluster info.
 func (s *Store) CreateOrUpdate(clusterInfo *cephclient.ClusterInfo) error {
-	ctx := context.TODO()
 	// these are used for all ceph daemons on the commandline and must *always* be stored
-	if err := s.createOrUpdateMonHostSecrets(ctx, clusterInfo); err != nil {
+	if err := s.createOrUpdateMonHostSecrets(clusterInfo); err != nil {
 		return errors.Wrap(err, "failed to store mon host configs")
 	}
 
@@ -72,7 +70,7 @@ func (s *Store) CreateOrUpdate(clusterInfo *cephclient.ClusterInfo) error {
 }
 
 // update "mon_host" and "mon_initial_members" in the stored config
-func (s *Store) createOrUpdateMonHostSecrets(ctx context.Context, clusterInfo *cephclient.ClusterInfo) error {
+func (s *Store) createOrUpdateMonHostSecrets(clusterInfo *cephclient.ClusterInfo) error {
 
 	// extract a list of just the monitor names, which will populate the "mon initial members"
 	// and "mon hosts" global config field
@@ -92,13 +90,16 @@ func (s *Store) createOrUpdateMonHostSecrets(ctx context.Context, clusterInfo *c
 		Type: k8sutil.RookType,
 	}
 	clientset := s.context.Clientset
-	k8sutil.SetOwnerRef(&secret.ObjectMeta, s.ownerRef)
+	err := s.ownerInfo.SetControllerReference(secret)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set owner reference to moh host secret %q", secret.Name)
+	}
 
-	_, err := clientset.CoreV1().Secrets(s.namespace).Get(ctx, StoreName, metav1.GetOptions{})
+	_, err = clientset.CoreV1().Secrets(s.namespace).Get(clusterInfo.Context, StoreName, metav1.GetOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			logger.Debugf("creating config secret %+v", secret)
-			if _, err := clientset.CoreV1().Secrets(s.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			logger.Debugf("creating config secret %q", secret.Name)
+			if _, err := clientset.CoreV1().Secrets(s.namespace).Create(clusterInfo.Context, secret, metav1.CreateOptions{}); err != nil {
 				return errors.Wrapf(err, "failed to create config secret %+v", secret)
 			}
 		} else {
@@ -106,8 +107,8 @@ func (s *Store) createOrUpdateMonHostSecrets(ctx context.Context, clusterInfo *c
 		}
 	}
 
-	logger.Debugf("updating config secret %+v", secret)
-	if _, err := clientset.CoreV1().Secrets(s.namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+	logger.Debugf("updating config secret %q", secret.Name)
+	if _, err := clientset.CoreV1().Secrets(s.namespace).Update(clusterInfo.Context, secret, metav1.UpdateOptions{}); err != nil {
 		return errors.Wrapf(err, "failed to update config secret %+v", secret)
 	}
 

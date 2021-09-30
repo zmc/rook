@@ -27,7 +27,6 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -51,7 +50,6 @@ const (
 	ConfigOverrideName = "rook-config-override"
 	// ConfigOverrideVal config override value
 	ConfigOverrideVal = "config"
-	defaultVersion    = "rook/rook:latest"
 	configMountDir    = "/etc/rook/config"
 	overrideFilename  = "override.conf"
 )
@@ -203,15 +201,6 @@ func GetMatchingContainer(containers []v1.Container, name string) (v1.Container,
 	return *result, nil
 }
 
-// MakeRookImage formats the container name
-func MakeRookImage(version string) string {
-	if version == "" {
-		return defaultVersion
-	}
-
-	return version
-}
-
 // PodsRunningWithLabel returns the number of running pods with the given label
 func PodsRunningWithLabel(clientset kubernetes.Interface, namespace, label string) (int, error) {
 	running, _, err := podStatusWithLabel(clientset, namespace, label)
@@ -289,7 +278,7 @@ func GetPodLog(clientset kubernetes.Interface, namespace string, labelSelector s
 		if err != nil {
 			return "", errors.Wrapf(err, "error copying file from %s to %s", builder, readCloser)
 		}
-		return builder.String(), err //nolint, no else statement needed
+		return builder.String(), err //nolint // no else statement needed
 	}
 
 	return "", fmt.Errorf("did not find any pods with label %s", labelSelector)
@@ -322,9 +311,7 @@ func ClusterDaemonEnvVars(image string) []v1.EnvVar {
 }
 
 // SetNodeAntiAffinityForPod assign pod anti-affinity when pod should not be co-located
-func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuringScheduling bool,
-	labels, nodeSelector map[string]string) {
-	p.ApplyToPodSpec(pod)
+func SetNodeAntiAffinityForPod(pod *v1.PodSpec, requiredDuringScheduling bool, topologyKey string, labels, nodeSelector map[string]string) {
 	pod.NodeSelector = nodeSelector
 
 	// when a node selector is being used, skip the affinity business below
@@ -337,7 +324,7 @@ func SetNodeAntiAffinityForPod(pod *v1.PodSpec, p rookv1.Placement, requiredDuri
 		LabelSelector: &metav1.LabelSelector{
 			MatchLabels: labels,
 		},
-		TopologyKey: v1.LabelHostname,
+		TopologyKey: topologyKey,
 	}
 
 	// Ensures that pod.Affinity is non-nil
@@ -409,4 +396,22 @@ func removeDuplicateEnvVarsFromContainer(container *v1.Container) {
 		foundVars[v.Name] = v.Value
 	}
 	container.Env = vars
+}
+
+func IsPodScheduled(clientSet kubernetes.Interface, namespace, selector string) (bool, error) {
+	listOpts := metav1.ListOptions{LabelSelector: selector}
+	podList, err := clientSet.CoreV1().Pods(namespace).List(context.TODO(), listOpts)
+	if err != nil {
+		return false, errors.Wrapf(err, "failed to list pods with label selector %q in namespace %q", selector, namespace)
+	}
+
+	if len(podList.Items) == 0 {
+		return false, errors.Errorf("no pods found with label selector %q in namespace %q", selector, namespace)
+	}
+
+	if podList.Items[0].Spec.NodeName == "" {
+		return false, nil
+	}
+
+	return true, nil
 }

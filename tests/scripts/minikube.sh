@@ -1,7 +1,7 @@
 #!/bin/bash -e
 
 scriptdir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-# shellcheck disable=SC1090
+# source=build/common.sh
 source "${scriptdir}/../../build/common.sh"
 
 function wait_for_ssh() {
@@ -22,7 +22,7 @@ function copy_image_to_cluster() {
     local final_image=$2
     local docker_env_tag="${DOCKERCMD}-env"
     ${DOCKERCMD} save "${build_image}" | \
-        (eval "$(minikube ${docker_env_tag} --shell bash)" && \
+        (eval "$(minikube "${docker_env_tag}" --shell bash)" && \
         ${DOCKERCMD} load && \
         ${DOCKERCMD} tag "${build_image}" "${final_image}")
 }
@@ -31,8 +31,6 @@ function copy_images() {
     if [[ "$1" == "" || "$1" == "ceph" ]]; then
       echo "copying ceph images"
       copy_image_to_cluster "${BUILD_REGISTRY}/ceph-amd64" rook/ceph:master
-      # uncomment to push the nautilus image when needed
-      #copy_image_to_cluster ceph/ceph:v15 ceph/ceph:v15
     fi
 
     if [[ "$1" == "" || "$1" == "cassandra" ]]; then
@@ -43,11 +41,6 @@ function copy_images() {
     if [[ "$1" == "" || "$1" == "nfs" ]]; then
         echo "copying nfs image"
         copy_image_to_cluster "${BUILD_REGISTRY}/nfs-amd64" rook/nfs:master
-    fi
-
-    if [[ "$1" == "" || "$1" == "yugabytedb" ]]; then
-      echo "copying yugabytedb image"
-      copy_image_to_cluster "${BUILD_REGISTRY}/yugabytedb-amd64" rook/yugabytedb:master
     fi
 }
 
@@ -96,11 +89,11 @@ case "${1:-}" in
     ;;
   *)
     echo "usage:" >&2
-    echo "  $0 up [ceph | cassandra | nfs | yugabytedb]" >&2
+    echo "  $0 up [ceph | cassandra | nfs]" >&2
     echo "  $0 down" >&2
     echo "  $0 clean" >&2
     echo "  $0 ssh" >&2
-    echo "  $0 update [ceph | cassandra | nfs | yugabytedb]" >&2
+    echo "  $0 update [ceph | cassandra | nfs]" >&2
     echo "  $0 wordpress" >&2
     echo "  $0 helm" >&2
 esac

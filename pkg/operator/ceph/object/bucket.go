@@ -80,6 +80,7 @@ func bucketStatsFromRGW(stats rgwBucketStats) ObjectBucketStats {
 
 func GetBucketStats(c *Context, bucketName string) (*ObjectBucketStats, bool, error) {
 	result, err := runAdminCommand(c,
+		true,
 		"bucket",
 		"stats",
 		"--bucket", bucketName)
@@ -104,6 +105,7 @@ func GetBucketStats(c *Context, bucketName string) (*ObjectBucketStats, bool, er
 
 func GetBucketsStats(c *Context) (map[string]ObjectBucketStats, error) {
 	result, err := runAdminCommand(c,
+		true,
 		"bucket",
 		"stats")
 	if err != nil {
@@ -126,6 +128,7 @@ func GetBucketsStats(c *Context) (map[string]ObjectBucketStats, error) {
 
 func getBucketMetadata(c *Context, bucket string) (*ObjectBucketMetadata, bool, error) {
 	result, err := runAdminCommand(c,
+		false,
 		"metadata",
 		"get",
 		"bucket:"+bucket)
@@ -136,6 +139,10 @@ func getBucketMetadata(c *Context, bucket string) (*ObjectBucketMetadata, bool, 
 	if strings.Contains(result, "can't get key") {
 		return nil, true, errors.New("not found")
 	}
+	match, err := extractJSON(result)
+	if err != nil {
+		return nil, false, errors.Wrapf(err, "failed to read buckets list result=%s", result)
+	}
 
 	var s struct {
 		Data struct {
@@ -143,8 +150,8 @@ func getBucketMetadata(c *Context, bucket string) (*ObjectBucketMetadata, bool, 
 			CreationTime string `json:"creation_time"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result), &s); err != nil {
-		return nil, false, errors.Wrapf(err, "failed to read buckets list result=%s", result)
+	if err := json.Unmarshal([]byte(match), &s); err != nil {
+		return nil, false, errors.Wrapf(err, "failed to read buckets list result=%s", match)
 	}
 
 	timeParser := octopusAndAfterTime
@@ -164,28 +171,6 @@ func getBucketMetadata(c *Context, bucket string) (*ObjectBucketMetadata, bool, 
 	}
 
 	return &ObjectBucketMetadata{Owner: s.Data.Owner, CreatedAt: createdAt}, false, nil
-}
-
-func ListBuckets(c *Context) ([]ObjectBucket, error) {
-	logger.Infof("Listing buckets")
-
-	stats, err := GetBucketsStats(c)
-	if err != nil {
-		return nil, errors.Wrap(err, "Failed to get bucket stats")
-	}
-
-	buckets := []ObjectBucket{}
-
-	for bucket, stat := range stats {
-		metadata, _, err := getBucketMetadata(c, bucket)
-		if err != nil {
-			return nil, err
-		}
-
-		buckets = append(buckets, ObjectBucket{Name: bucket, ObjectBucketMetadata: ObjectBucketMetadata{Owner: metadata.Owner, CreatedAt: metadata.CreatedAt}, ObjectBucketStats: stat})
-	}
-
-	return buckets, nil
 }
 
 func GetBucket(c *Context, bucket string) (*ObjectBucket, int, error) {
@@ -208,26 +193,4 @@ func GetBucket(c *Context, bucket string) (*ObjectBucket, int, error) {
 	}
 
 	return &ObjectBucket{Name: bucket, ObjectBucketMetadata: ObjectBucketMetadata{Owner: metadata.Owner, CreatedAt: metadata.CreatedAt}, ObjectBucketStats: *stat}, RGWErrorNone, nil
-}
-
-func DeleteObjectBucket(c *Context, bucketName string, purge bool) (int, error) {
-	options := []string{"bucket", "rm", "--bucket", bucketName}
-	if purge {
-		options = append(options, "--purge-objects")
-	}
-
-	result, err := runAdminCommand(c, options...)
-	if err != nil {
-		return RGWErrorUnknown, errors.Wrap(err, "failed to delete bucket")
-	}
-
-	if result == "" {
-		return RGWErrorNone, nil
-	}
-
-	if strings.Contains(result, "could not get bucket info for bucket=") {
-		return RGWErrorNotFound, errors.New("Bucket not found")
-	}
-
-	return RGWErrorUnknown, errors.Wrap(err, "failed to delete bucket")
 }

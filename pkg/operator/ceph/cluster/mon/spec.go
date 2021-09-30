@@ -50,8 +50,11 @@ func (c *Cluster) getLabels(monConfig *monConfig, canary, includeNewLabels bool)
 		labels["mon_canary"] = "true"
 	}
 	if includeNewLabels {
-		if c.monVolumeClaimTemplate(monConfig) != nil {
+		monVolumeClaimTemplate := c.monVolumeClaimTemplate(monConfig)
+		if monVolumeClaimTemplate != nil {
+			size := monVolumeClaimTemplate.Spec.Resources.Requests[v1.ResourceStorage]
 			labels["pvc_name"] = monConfig.ResourceName
+			labels["pvc_size"] = size.String()
 		}
 		if monConfig.Zone != "" {
 			labels["stretch-zone"] = monConfig.Zone
@@ -62,7 +65,7 @@ func (c *Cluster) getLabels(monConfig *monConfig, canary, includeNewLabels bool)
 }
 
 func (c *Cluster) stretchFailureDomainName() string {
-	label := c.stretchFailureDomainLabel()
+	label := StretchFailureDomainLabel(c.spec)
 	index := strings.Index(label, "/")
 	if index == -1 {
 		return label
@@ -70,9 +73,9 @@ func (c *Cluster) stretchFailureDomainName() string {
 	return label[index+1:]
 }
 
-func (c *Cluster) stretchFailureDomainLabel() string {
-	if c.spec.Mon.StretchCluster.FailureDomainLabel != "" {
-		return c.spec.Mon.StretchCluster.FailureDomainLabel
+func StretchFailureDomainLabel(spec cephv1.ClusterSpec) string {
+	if spec.Mon.StretchCluster.FailureDomainLabel != "" {
+		return spec.Mon.StretchCluster.FailureDomainLabel
 	}
 	// The default topology label is for a zone
 	return corev1.LabelZoneFailureDomainStable
@@ -90,7 +93,10 @@ func (c *Cluster) makeDeployment(monConfig *monConfig, canary bool) (*apps.Deplo
 	cephv1.GetMonAnnotations(c.spec.Annotations).ApplyToObjectMeta(&d.ObjectMeta)
 	cephv1.GetMonLabels(c.spec.Labels).ApplyToObjectMeta(&d.ObjectMeta)
 	controller.AddCephVersionLabelToDeployment(c.ClusterInfo.CephVersion, d)
-	k8sutil.SetOwnerRef(&d.ObjectMeta, &c.ownerRef)
+	err := c.ownerInfo.SetControllerReference(d)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to mon deployment %q", d.Name)
+	}
 
 	pod, err := c.makeMonPod(monConfig, canary)
 	if err != nil {
@@ -101,7 +107,7 @@ func (c *Cluster) makeDeployment(monConfig *monConfig, canary bool) (*apps.Deplo
 		Selector: &metav1.LabelSelector{
 			MatchLabels: c.getLabels(monConfig, canary, false),
 		},
-		Template: v1.PodTemplateSpec{
+		Template: corev1.PodTemplateSpec{
 			ObjectMeta: pod.ObjectMeta,
 			Spec:       pod.Spec,
 		},
@@ -114,18 +120,18 @@ func (c *Cluster) makeDeployment(monConfig *monConfig, canary bool) (*apps.Deplo
 	return d, nil
 }
 
-func (c *Cluster) makeDeploymentPVC(m *monConfig, canary bool) (*v1.PersistentVolumeClaim, error) {
+func (c *Cluster) makeDeploymentPVC(m *monConfig, canary bool) (*corev1.PersistentVolumeClaim, error) {
 	template := c.monVolumeClaimTemplate(m)
-	volumeMode := v1.PersistentVolumeFilesystem
-	pvc := &v1.PersistentVolumeClaim{
+	volumeMode := corev1.PersistentVolumeFilesystem
+	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      m.ResourceName,
 			Namespace: c.Namespace,
 			Labels:    c.getLabels(m, canary, true),
 		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{
-				v1.ReadWriteOnce,
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
 			},
 			Resources:        template.Spec.Resources,
 			StorageClassName: template.Spec.StorageClassName,
@@ -135,15 +141,18 @@ func (c *Cluster) makeDeploymentPVC(m *monConfig, canary bool) (*v1.PersistentVo
 	k8sutil.AddRookVersionLabelToObjectMeta(&pvc.ObjectMeta)
 	cephv1.GetMonAnnotations(c.spec.Annotations).ApplyToObjectMeta(&pvc.ObjectMeta)
 	controller.AddCephVersionLabelToObjectMeta(c.ClusterInfo.CephVersion, &pvc.ObjectMeta)
-	k8sutil.SetOwnerRef(&pvc.ObjectMeta, &c.ownerRef)
+	err := c.ownerInfo.SetControllerReference(pvc)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to mon pvc %q", pvc.Name)
+	}
 
 	// k8s uses limit as the resource request fallback
-	if _, ok := pvc.Spec.Resources.Limits[v1.ResourceStorage]; ok {
+	if _, ok := pvc.Spec.Resources.Limits[corev1.ResourceStorage]; ok {
 		return pvc, nil
 	}
 
 	// specific request in the crd
-	if _, ok := pvc.Spec.Resources.Requests[v1.ResourceStorage]; ok {
+	if _, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 		return pvc, nil
 	}
 
@@ -153,24 +162,24 @@ func (c *Cluster) makeDeploymentPVC(m *monConfig, canary bool) (*v1.PersistentVo
 	}
 
 	if pvc.Spec.Resources.Requests == nil {
-		pvc.Spec.Resources.Requests = v1.ResourceList{}
+		pvc.Spec.Resources.Requests = corev1.ResourceList{}
 	}
-	pvc.Spec.Resources.Requests[v1.ResourceStorage] = req
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = req
 
 	return pvc, nil
 }
 
-func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool) (*v1.Pod, error) {
+func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool) (*corev1.Pod, error) {
 	logger.Debugf("monConfig: %+v", monConfig)
-	podSpec := v1.PodSpec{
-		InitContainers: []v1.Container{
+	podSpec := corev1.PodSpec{
+		InitContainers: []corev1.Container{
 			c.makeChownInitContainer(monConfig),
 			c.makeMonFSInitContainer(monConfig),
 		},
-		Containers: []v1.Container{
+		Containers: []corev1.Container{
 			c.makeMonDaemonContainer(monConfig),
 		},
-		RestartPolicy: v1.RestartPolicyAlways,
+		RestartPolicy: corev1.RestartPolicyAlways,
 		// we decide later whether to use a PVC volume or host volumes for mons, so only populate
 		// the base volumes at this point.
 		Volumes:           controller.DaemonVolumesBase(monConfig.DataPathMap, keyringStoreName),
@@ -190,7 +199,7 @@ func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool) (*v1.Pod, error)
 		k8sutil.AddUnreachableNodeToleration(&podSpec)
 	}
 
-	pod := &v1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      monConfig.ResourceName,
 			Namespace: c.Namespace,
@@ -202,19 +211,19 @@ func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool) (*v1.Pod, error)
 	cephv1.GetMonLabels(c.spec.Labels).ApplyToObjectMeta(&pod.ObjectMeta)
 
 	if c.spec.Network.IsHost() {
-		pod.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	} else if c.spec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(c.spec.Network.NetworkSpec, &pod.ObjectMeta); err != nil {
+		pod.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
+	} else if c.spec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(c.spec.Network, &pod.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}
 
 	if c.spec.IsStretchCluster() {
-		nodeAffinity, err := k8sutil.GenerateNodeAffinity(fmt.Sprintf("%s=%s", c.stretchFailureDomainLabel(), monConfig.Zone))
+		nodeAffinity, err := k8sutil.GenerateNodeAffinity(fmt.Sprintf("%s=%s", StretchFailureDomainLabel(c.spec), monConfig.Zone))
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to generate mon %q node affinity", monConfig.DaemonName)
 		}
-		pod.Spec.Affinity = &v1.Affinity{NodeAffinity: nodeAffinity}
+		pod.Spec.Affinity = &corev1.Affinity{NodeAffinity: nodeAffinity}
 	}
 
 	return pod, nil
@@ -226,7 +235,7 @@ func (c *Cluster) makeMonPod(monConfig *monConfig, canary bool) (*v1.Pod, error)
 
 // Init and daemon containers require the same context, so we call it 'pod' context
 
-func (c *Cluster) makeChownInitContainer(monConfig *monConfig) v1.Container {
+func (c *Cluster) makeChownInitContainer(monConfig *monConfig) corev1.Container {
 	return controller.ChownCephDataDirsInitContainer(
 		*monConfig.DataPathMap,
 		c.spec.CephVersion.Image,
@@ -236,8 +245,8 @@ func (c *Cluster) makeChownInitContainer(monConfig *monConfig) v1.Container {
 	)
 }
 
-func (c *Cluster) makeMonFSInitContainer(monConfig *monConfig) v1.Container {
-	return v1.Container{
+func (c *Cluster) makeMonFSInitContainer(monConfig *monConfig) corev1.Container {
+	return corev1.Container{
 		Name: "init-mon-fs",
 		Command: []string{
 			cephMonCommand,
@@ -258,7 +267,7 @@ func (c *Cluster) makeMonFSInitContainer(monConfig *monConfig) v1.Container {
 	}
 }
 
-func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
+func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) corev1.Container {
 	podIPEnvVar := "ROOK_POD_IP"
 	publicAddr := monConfig.PublicIP
 
@@ -270,7 +279,7 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 		publicAddr = fmt.Sprintf("%s:%d", publicAddr, monConfig.Port)
 	}
 
-	container := v1.Container{
+	container := corev1.Container{
 		Name: "mon",
 		Command: []string{
 			cephMonCommand,
@@ -292,11 +301,11 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 		Image:           c.spec.CephVersion.Image,
 		VolumeMounts:    controller.DaemonVolumeMounts(monConfig.DataPathMap, keyringStoreName),
 		SecurityContext: controller.PodSecurityContext(),
-		Ports: []v1.ContainerPort{
+		Ports: []corev1.ContainerPort{
 			{
 				Name:          "tcp-msgr1",
 				ContainerPort: monConfig.Port,
-				Protocol:      v1.ProtocolTCP,
+				Protocol:      corev1.ProtocolTCP,
 			},
 		},
 		Env: append(
@@ -306,6 +315,15 @@ func (c *Cluster) makeMonDaemonContainer(monConfig *monConfig) v1.Container {
 		Resources:     cephv1.GetMonResources(c.spec.Resources),
 		LivenessProbe: controller.GenerateLivenessProbeExecDaemon(config.MonType, monConfig.DaemonName),
 		WorkingDir:    config.VarLogCephDir,
+	}
+
+	if monConfig.Zone != "" {
+		desiredLocation := fmt.Sprintf("%s=%s", c.stretchFailureDomainName(), monConfig.Zone)
+		container.Args = append(container.Args, []string{"--set-crush-location", desiredLocation}...)
+		if monConfig.Zone == c.getArbiterZone() {
+			// remember the arbiter mon to be set later in the reconcile after the OSDs are configured
+			c.arbiterMon = monConfig.DaemonName
+		}
 	}
 
 	// If the liveness probe is enabled
@@ -352,7 +370,7 @@ func UpdateCephDeploymentAndWait(context *clusterd.Context, clusterInfo *client.
 			err := client.OkToContinue(context, clusterInfo, deployment.Name, daemonType, daemonName)
 			if err != nil {
 				if continueUpgradeAfterChecksEvenIfNotHealthy {
-					logger.Infof("The %s daemon %s is not ok-to-stop but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so continuing...", daemonType, daemonName)
+					logger.Infof("The %s daemon %s is not ok-to-continue but 'continueUpgradeAfterChecksEvenIfNotHealthy' is true, so continuing...", daemonType, daemonName)
 					return nil
 				}
 				return errors.Wrapf(err, "failed to check if we can %s the deployment %s", action, deployment.Name)
@@ -362,6 +380,6 @@ func UpdateCephDeploymentAndWait(context *clusterd.Context, clusterInfo *client.
 		return nil
 	}
 
-	_, err := k8sutil.UpdateDeploymentAndWait(context, deployment, clusterInfo.Namespace, callback)
+	err := k8sutil.UpdateDeploymentAndWait(context, deployment, clusterInfo.Namespace, callback)
 	return err
 }

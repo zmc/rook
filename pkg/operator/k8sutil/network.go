@@ -19,40 +19,53 @@ package k8sutil
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	netapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	// publicNetworkSelectorKeyName is the network selector key for the ceph public network
 	publicNetworkSelectorKeyName = "public"
+	// clusterNetworkSelectorKeyName is the network selector key for the ceph cluster network
+	clusterNetworkSelectorKeyName = "cluster"
 )
 
 // NetworkAttachmentConfig represents the configuration of the NetworkAttachmentDefinitions object
 type NetworkAttachmentConfig struct {
-	CniVersion string `json:"cniVersion"`
-	Type       string `json:"type"`
-	Master     string `json:"master"`
-	Mode       string `json:"mode"`
+	CniVersion string `json:"cniVersion,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Master     string `json:"master,omitempty"`
+	Mode       string `json:"mode,omitempty"`
 	Ipam       struct {
-		Type       string `json:"type"`
-		Subnet     string `json:"subnet"`
-		Range      string `json:"range"`
-		RangeStart string `json:"rangeStart"`
-		RangeEnd   string `json:"rangeEnd"`
+		Type      string `json:"type,omitempty"`
+		Subnet    string `json:"subnet,omitempty"`
+		Addresses []struct {
+			Address string `json:"address,omitempty"`
+			Gateway string `json:"gateway,omitempty"`
+		} `json:"addresses,omitempty"`
+		Ranges [][]struct {
+			Subnet     string `json:"subnet,omitempty"`
+			RangeStart string `json:"rangeStart,omitempty"`
+			RangeEnd   string `json:"rangeEnd,omitempty"`
+			Gateway    string `json:"gateway,omitempty"`
+		} `json:"ranges,omitempty"`
+		Range      string `json:"range,omitempty"`
+		RangeStart string `json:"rangeStart,omitempty"`
+		RangeEnd   string `json:"rangeEnd,omitempty"`
 		Routes     []struct {
-			Dst string `json:"dst"`
-		} `json:"routes"`
-		Gateway string `json:"gateway"`
-	} `json:"ipam"`
+			Dst string `json:"dst,omitempty"`
+		} `json:"routes,omitempty"`
+		Gateway string `json:"gateway,omitempty"`
+	} `json:"ipam,omitempty"`
 }
 
 // ApplyMultus apply multus selector to Pods
 // Multus supports short and json syntax, use only one kind at a time.
-func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
+func ApplyMultus(net cephv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 	v := make([]string, 0, 2)
 	shortSyntax := false
 	jsonSyntax := false
@@ -67,13 +80,16 @@ func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 			shortSyntax = true
 		}
 
-		isCsi := strings.Contains(objectMeta.Labels["app"], "csi-")
-		if isCsi {
+		var isExcluded bool
+		for _, clusterNetworkApps := range getClusterNetworkApps() {
+			isExcluded = strings.Contains(objectMeta.Labels["app"], clusterNetworkApps)
+		}
+		if isExcluded {
+			v = append(v, string(ns))
+		} else {
 			if k == publicNetworkSelectorKeyName {
 				v = append(v, string(ns))
 			}
-		} else {
-			v = append(v, string(ns))
 		}
 	}
 
@@ -81,17 +97,25 @@ func ApplyMultus(net rookv1.NetworkSpec, objectMeta *metav1.ObjectMeta) error {
 		return fmt.Errorf("ApplyMultus: Can't mix short and JSON form")
 	}
 
+	// Sort network strings so that pods/deployments won't need updated in a loop if nothing changes
+	sort.Strings(v)
+
 	networks := strings.Join(v, ", ")
 	if jsonSyntax {
 		networks = "[" + networks + "]"
 	}
 
-	t := rookv1.Annotations{
+	t := cephv1.Annotations{
 		"k8s.v1.cni.cncf.io/networks": networks,
 	}
 	t.ApplyToObjectMeta(objectMeta)
 
 	return nil
+}
+
+// getClusterNetworkApps returns the list of ceph apps that utilize cluster network
+func getClusterNetworkApps() []string {
+	return []string{"osd"}
 }
 
 // GetNetworkAttachmentConfig returns the NetworkAttachmentDefinitions configuration

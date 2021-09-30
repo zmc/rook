@@ -19,7 +19,6 @@ package osd
 import (
 	"strconv"
 
-	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	kms "github.com/rook/rook/pkg/daemon/ceph/osd/kms"
 	opmon "github.com/rook/rook/pkg/operator/ceph/cluster/mon"
@@ -32,19 +31,22 @@ const (
 	osdDatabaseSizeEnvVarName = "ROOK_OSD_DATABASE_SIZE"
 	osdWalSizeEnvVarName      = "ROOK_OSD_WAL_SIZE"
 	osdsPerDeviceEnvVarName   = "ROOK_OSDS_PER_DEVICE"
+	osdDeviceClassEnvVarName  = "ROOK_OSD_DEVICE_CLASS"
 	// EncryptedDeviceEnvVarName is used in the pod spec to indicate whether the OSD is encrypted or not
 	EncryptedDeviceEnvVarName = "ROOK_ENCRYPTED_DEVICE"
 	PVCNameEnvVarName         = "ROOK_PVC_NAME"
 	// CephVolumeEncryptedKeyEnvVarName is the env variable used by ceph-volume to encrypt the OSD (raw mode)
 	// Hardcoded in ceph-volume do NOT touch
-	CephVolumeEncryptedKeyEnvVarName    = "CEPH_VOLUME_DMCRYPT_SECRET"
-	osdMetadataDeviceEnvVarName         = "ROOK_METADATA_DEVICE"
-	osdWalDeviceEnvVarName              = "ROOK_WAL_DEVICE"
-	pvcBackedOSDVarName                 = "ROOK_PVC_BACKED_OSD"
+	CephVolumeEncryptedKeyEnvVarName = "CEPH_VOLUME_DMCRYPT_SECRET"
+	osdMetadataDeviceEnvVarName      = "ROOK_METADATA_DEVICE"
+	osdWalDeviceEnvVarName           = "ROOK_WAL_DEVICE"
+	// PVCBackedOSDVarName indicates whether the OSD is on PVC ("true") or not ("false")
+	PVCBackedOSDVarName                 = "ROOK_PVC_BACKED_OSD"
 	blockPathVarName                    = "ROOK_BLOCK_PATH"
 	cvModeVarName                       = "ROOK_CV_MODE"
 	lvBackedPVVarName                   = "ROOK_LV_BACKED_PV"
 	CrushDeviceClassVarName             = "ROOK_OSD_CRUSH_DEVICE_CLASS"
+	CrushInitialWeightVarName           = "ROOK_OSD_CRUSH_INITIAL_WEIGHT"
 	CrushRootVarName                    = "ROOK_CRUSHMAP_ROOT"
 	tcmallocMaxTotalThreadCacheBytesEnv = "TCMALLOC_MAX_TOTAL_THREAD_CACHE_BYTES"
 )
@@ -56,7 +58,8 @@ var (
 func (c *Cluster) getConfigEnvVars(osdProps osdProperties, dataDir string) []v1.EnvVar {
 	envVars := []v1.EnvVar{
 		nodeNameEnvVar(osdProps.crushHostname),
-		{Name: "ROOK_CLUSTER_ID", Value: string(c.clusterInfo.OwnerRef.UID)},
+		{Name: "ROOK_CLUSTER_ID", Value: string(c.clusterInfo.OwnerInfo.GetUID())},
+		{Name: "ROOK_CLUSTER_NAME", Value: string(c.clusterInfo.NamespacedName().Name)},
 		k8sutil.PodIPEnvVar(k8sutil.PrivateIPEnvVar),
 		k8sutil.PodIPEnvVar(k8sutil.PublicIPEnvVar),
 		opmon.PodNamespaceEnvVar(c.clusterInfo.Namespace),
@@ -106,24 +109,8 @@ func (c *Cluster) getConfigEnvVars(osdProps osdProperties, dataDir string) []v1.
 	return envVars
 }
 
-func (c *Cluster) getDriveGroupEnvVar(osdProps osdProperties) (v1.EnvVar, error) {
-	if len(osdProps.driveGroups) == 0 {
-		return v1.EnvVar{}, nil
-	}
-
-	b, err := MarshalAsDriveGroupBlobs(osdProps.driveGroups)
-	if err != nil {
-		return v1.EnvVar{}, errors.Wrap(err, "failed to marshal drive groups into an env var")
-	}
-	return driveGroupsEnvVar(b), nil
-}
-
 func nodeNameEnvVar(name string) v1.EnvVar {
 	return v1.EnvVar{Name: "ROOK_NODE_NAME", Value: name}
-}
-
-func driveGroupsEnvVar(driveGroups string) v1.EnvVar {
-	return v1.EnvVar{Name: "ROOK_DRIVE_GROUPS", Value: driveGroups}
 }
 
 func dataDevicesEnvVar(dataDevices string) v1.EnvVar {
@@ -138,12 +125,20 @@ func devicePathFilterEnvVar(filter string) v1.EnvVar {
 	return v1.EnvVar{Name: "ROOK_DATA_DEVICE_PATH_FILTER", Value: filter}
 }
 
+func dataDeviceClassEnvVar(deviceClass string) v1.EnvVar {
+	return v1.EnvVar{Name: osdDeviceClassEnvVarName, Value: deviceClass}
+}
+
 func metadataDeviceEnvVar(metadataDevice string) v1.EnvVar {
 	return v1.EnvVar{Name: osdMetadataDeviceEnvVarName, Value: metadataDevice}
 }
 
+func walDeviceEnvVar(walDevice string) v1.EnvVar {
+	return v1.EnvVar{Name: osdWalDeviceEnvVarName, Value: walDevice}
+}
+
 func pvcBackedOSDEnvVar(pvcBacked string) v1.EnvVar {
-	return v1.EnvVar{Name: pvcBackedOSDVarName, Value: pvcBacked}
+	return v1.EnvVar{Name: PVCBackedOSDVarName, Value: pvcBacked}
 }
 
 func setDebugLogLevelEnvVar(debug bool) v1.EnvVar {
@@ -168,6 +163,10 @@ func lvBackedPVEnvVar(lvBackedPV string) v1.EnvVar {
 
 func crushDeviceClassEnvVar(crushDeviceClass string) v1.EnvVar {
 	return v1.EnvVar{Name: CrushDeviceClassVarName, Value: crushDeviceClass}
+}
+
+func crushInitialWeightEnvVar(crushInitialWeight string) v1.EnvVar {
+	return v1.EnvVar{Name: CrushInitialWeightVarName, Value: crushInitialWeight}
 }
 
 func encryptedDeviceEnvVar(encryptedDevice bool) v1.EnvVar {

@@ -20,9 +20,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ghodss/yaml"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
 func TestClusterSpecMarshal(t *testing.T) {
@@ -49,7 +48,7 @@ storage:
     devicePathFilter: "^/dev/disk/by-id/.*foo.*"`)
 
 	// convert the raw spec yaml into JSON
-	rawJSON, err := yaml.YAMLToJSON(specYaml)
+	rawJSON, err := yaml.ToJSON(specYaml)
 	assert.Nil(t, err)
 	fmt.Printf("rawJSON: %s\n", string(rawJSON))
 
@@ -69,9 +68,9 @@ storage:
 		Network: NetworkSpec{
 			HostNetwork: true,
 		},
-		Storage: rookv1.StorageScopeSpec{
+		Storage: StorageScopeSpec{
 			UseAllNodes: false,
-			Selection: rookv1.Selection{
+			Selection: Selection{
 				UseAllDevices:    &useAllDevices,
 				DeviceFilter:     "^sd.",
 				DevicePathFilter: "^/dev/disk/by-path/pci-.*",
@@ -81,10 +80,10 @@ storage:
 				"journalSizeMB":  "1024",
 				"databaseSizeMB": "1024",
 			},
-			Nodes: []rookv1.Node{
+			Nodes: []Node{
 				{
 					Name: "node2",
-					Selection: rookv1.Selection{
+					Selection: Selection{
 						DeviceFilter:     "^foo*",
 						DevicePathFilter: "^/dev/disk/by-id/.*foo.*",
 					},

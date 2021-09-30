@@ -26,10 +26,9 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
-	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -47,7 +46,7 @@ type OSDHealthMonitor struct {
 	context                        *clusterd.Context
 	clusterInfo                    *client.ClusterInfo
 	removeOSDsIfOUTAndSafeToRemove bool
-	interval                       time.Duration
+	interval                       *time.Duration
 }
 
 // NewOSDHealthMonitor instantiates OSD monitoring
@@ -56,32 +55,30 @@ func NewOSDHealthMonitor(context *clusterd.Context, clusterInfo *client.ClusterI
 		context:                        context,
 		clusterInfo:                    clusterInfo,
 		removeOSDsIfOUTAndSafeToRemove: removeOSDsIfOUTAndSafeToRemove,
-		interval:                       defaultHealthCheckInterval,
+		interval:                       &defaultHealthCheckInterval,
 	}
 
 	// allow overriding the check interval
 	checkInterval := healthCheck.DaemonHealth.ObjectStorageDaemon.Interval
-	if checkInterval != "" {
-		if duration, err := time.ParseDuration(checkInterval); err == nil {
-			logger.Infof("ceph osd status in namespace %q check interval %q", h.clusterInfo.Namespace, checkInterval)
-			h.interval = duration
-		}
+	if checkInterval != nil {
+		logger.Infof("ceph osd status in namespace %q check interval %q", h.clusterInfo.Namespace, checkInterval.Duration.String())
+		h.interval = &checkInterval.Duration
 	}
 
 	return h
 }
 
 // Start runs monitoring logic for osds status at set intervals
-func (m *OSDHealthMonitor) Start(stopCh chan struct{}) {
+func (m *OSDHealthMonitor) Start(context context.Context) {
 
 	for {
 		select {
-		case <-time.After(m.interval):
+		case <-time.After(*m.interval):
 			logger.Debug("checking osd processes status.")
 			m.checkOSDHealth()
 
-		case <-stopCh:
-			logger.Infof("Stopping monitoring of OSDs in namespace %s", m.clusterInfo.Namespace)
+		case <-context.Done():
+			logger.Infof("stopping monitoring of OSDs in namespace %q", m.clusterInfo.Namespace)
 			return
 		}
 	}
@@ -144,11 +141,6 @@ func (m *OSDHealthMonitor) checkOSDDump() error {
 
 		logger.Debugf("osd.%d is marked 'DOWN'", id)
 
-		// check if the down osd is stuck terminating
-		if err := m.restartOSDIfStuck(id); err != nil {
-			logger.Warningf("failed to restart OSD %d. %v", id, err)
-		}
-
 		if in != inStatus {
 			logger.Debugf("osd.%d is marked 'OUT'", id)
 			if m.removeOSDsIfOUTAndSafeToRemove {
@@ -192,24 +184,6 @@ func (m *OSDHealthMonitor) removeOSDDeploymentIfSafeToDestroy(outOSDid int) erro
 	return nil
 }
 
-// restartOSDIfStuck will check if a portable OSD is on a node that is not ready.
-// If the pod is stuck in terminating state, go ahead and force delete the pod so K8s
-// will free up the volume and allow the OSD to be restarted on another node.
-func (m *OSDHealthMonitor) restartOSDIfStuck(osdID int) error {
-	ctx := context.TODO()
-	labels := fmt.Sprintf("ceph-osd-id=%d,portable=true", osdID)
-	pods, err := m.context.Clientset.CoreV1().Pods(m.clusterInfo.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels})
-	if err != nil {
-		return errors.Wrapf(err, "failed to get OSD with ID %d", osdID)
-	}
-	for _, pod := range pods.Items {
-		if err := k8sutil.ForceDeletePodIfStuck(m.context, pod); err != nil {
-			logger.Warningf("skipping restart of OSD %d. %v", osdID, err)
-		}
-	}
-	return nil
-}
-
 // updateCephStorage updates the CR with deviceclass details
 func (m *OSDHealthMonitor) updateCephStatus(devices []string) {
 	cephCluster := &cephv1.CephCluster{}
@@ -218,7 +192,7 @@ func (m *OSDHealthMonitor) updateCephStatus(devices []string) {
 	for _, device := range devices {
 		cephClusterStorage.DeviceClasses = append(cephClusterStorage.DeviceClasses, cephv1.DeviceClasses{Name: device})
 	}
-	err := m.context.Client.Get(context.TODO(), m.clusterInfo.NamespacedName(), cephCluster)
+	err := m.context.Client.Get(m.clusterInfo.Context, m.clusterInfo.NamespacedName(), cephCluster)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Debug("CephCluster resource not found. Ignoring since object must be deleted.")
@@ -229,7 +203,7 @@ func (m *OSDHealthMonitor) updateCephStatus(devices []string) {
 	}
 	if !reflect.DeepEqual(cephCluster.Status.CephStorage, &cephClusterStorage) {
 		cephCluster.Status.CephStorage = &cephClusterStorage
-		if err := opcontroller.UpdateStatus(m.context.Client, cephCluster); err != nil {
+		if err := reporting.UpdateStatus(m.context.Client, cephCluster); err != nil {
 			logger.Errorf("failed to update cluster %q Storage. %v", m.clusterInfo.NamespacedName().Name, err)
 			return
 		}

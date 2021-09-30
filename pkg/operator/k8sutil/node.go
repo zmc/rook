@@ -22,8 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
-	corev1 "k8s.io/api/core/v1"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -32,14 +31,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const (
-	TopologyLabelPrefix = "topology.rook.io/"
-)
-
 // ValidNodeNoSched returns true if the node (1) meets Rook's placement terms,
 // and (2) is ready. Unlike ValidNode, this method will ignore the
 // Node.Spec.Unschedulable flag. False otherwise.
-func ValidNodeNoSched(node v1.Node, placement rookv1.Placement) (bool, error) {
+func ValidNodeNoSched(node v1.Node, placement cephv1.Placement) (bool, error) {
 	p, err := NodeMeetsPlacementTerms(node, placement, false)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if node meets Rook placement terms. %+v", err)
@@ -57,7 +52,7 @@ func ValidNodeNoSched(node v1.Node, placement rookv1.Placement) (bool, error) {
 
 // ValidNode returns true if the node (1) is schedulable, (2) meets Rook's placement terms, and
 // (3) is ready. False otherwise.
-func ValidNode(node v1.Node, placement rookv1.Placement) (bool, error) {
+func ValidNode(node v1.Node, placement cephv1.Placement) (bool, error) {
 	if !GetNodeSchedulable(node) {
 		return false, nil
 	}
@@ -67,12 +62,12 @@ func ValidNode(node v1.Node, placement rookv1.Placement) (bool, error) {
 
 // GetValidNodes returns all nodes that (1) are not cordoned, (2) meet Rook's placement terms, and
 // (3) are ready.
-func GetValidNodes(rookStorage rookv1.StorageScopeSpec, clientset kubernetes.Interface, placement rookv1.Placement) []rookv1.Node {
+func GetValidNodes(rookStorage cephv1.StorageScopeSpec, clientset kubernetes.Interface, placement cephv1.Placement) []cephv1.Node {
 	matchingK8sNodes, err := GetKubernetesNodesMatchingRookNodes(rookStorage.Nodes, clientset)
 	if err != nil {
 		// cannot list nodes, return empty nodes
 		logger.Errorf("failed to list nodes: %+v", err)
-		return []rookv1.Node{}
+		return []cephv1.Node{}
 	}
 
 	validK8sNodes := []v1.Node{}
@@ -154,7 +149,7 @@ func GetNodeSchedulable(node v1.Node) bool {
 // and (2) its taints are tolerated by the placements tolerations.
 // There is the option to ignore well known taints defined in WellKnownTaints. See WellKnownTaints
 // for more information.
-func NodeMeetsPlacementTerms(node v1.Node, placement rookv1.Placement, ignoreWellKnownTaints bool) (bool, error) {
+func NodeMeetsPlacementTerms(node v1.Node, placement cephv1.Placement, ignoreWellKnownTaints bool) (bool, error) {
 	a, err := NodeMeetsAffinityTerms(node, placement.NodeAffinity)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if node %s meets affinity terms. regarding as not match. %+v", node.Name, err)
@@ -258,7 +253,7 @@ func NodeIsReady(node v1.Node) bool {
 	return false
 }
 
-func rookNodeMatchesKubernetesNode(rookNode rookv1.Node, kubernetesNode v1.Node) bool {
+func rookNodeMatchesKubernetesNode(rookNode cephv1.Node, kubernetesNode v1.Node) bool {
 	hostname := normalizeHostname(kubernetesNode)
 	return rookNode.Name == hostname || rookNode.Name == kubernetesNode.Name
 }
@@ -272,15 +267,9 @@ func normalizeHostname(kubernetesNode v1.Node) string {
 	return hostname
 }
 
-// GetNormalizedHostname returns the normalized hostname of the Kubernetes node. Rook uses
-// normalized hostnames as its internal reference for nodes.
-func GetNormalizedHostname(kubernetesNode v1.Node) string {
-	return normalizeHostname(kubernetesNode)
-}
-
 // GetKubernetesNodesMatchingRookNodes lists all the nodes in Kubernetes and returns all the
 // Kubernetes nodes that have a corresponding match in the list of Rook nodes.
-func GetKubernetesNodesMatchingRookNodes(rookNodes []rookv1.Node, clientset kubernetes.Interface) ([]v1.Node, error) {
+func GetKubernetesNodesMatchingRookNodes(rookNodes []cephv1.Node, clientset kubernetes.Interface) ([]v1.Node, error) {
 	ctx := context.TODO()
 	nodes := []v1.Node{}
 	k8sNodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -315,8 +304,8 @@ func GetNotReadyKubernetesNodes(clientset kubernetes.Interface) ([]v1.Node, erro
 
 // RookNodesMatchingKubernetesNodes returns only the given Rook nodes which have a corresponding
 // match in the list of Kubernetes nodes.
-func RookNodesMatchingKubernetesNodes(rookStorage rookv1.StorageScopeSpec, kubernetesNodes []v1.Node) []rookv1.Node {
-	nodes := []rookv1.Node{}
+func RookNodesMatchingKubernetesNodes(rookStorage cephv1.StorageScopeSpec, kubernetesNodes []v1.Node) []cephv1.Node {
+	nodes := []cephv1.Node{}
 	for _, kn := range kubernetesNodes {
 		for _, rn := range rookStorage.Nodes {
 			if rookNodeMatchesKubernetesNode(rn, kn) {
@@ -326,51 +315,6 @@ func RookNodesMatchingKubernetesNodes(rookStorage rookv1.StorageScopeSpec, kuber
 		}
 	}
 	return nodes
-}
-
-// ExtractTopologyFromLabels extracts rook topology from labels and returns a map from topology type to value
-func ExtractTopologyFromLabels(labels map[string]string, additionalTopologyIDs []string) map[string]string {
-	topology := make(map[string]string)
-
-	// check for the region k8s topology label that was deprecated in 1.17
-	const regionLabel = "region"
-	region, ok := labels[corev1.LabelZoneRegion]
-	if ok {
-		topology[regionLabel] = region
-	}
-
-	// check for the region k8s topology label that is GA in 1.17.
-	region, ok = labels[corev1.LabelZoneRegionStable]
-	if ok {
-		topology[regionLabel] = region
-	}
-
-	// check for the zone k8s topology label that was deprecated in 1.17
-	const zoneLabel = "zone"
-	zone, ok := labels[corev1.LabelZoneFailureDomain]
-	if ok {
-		topology[zoneLabel] = zone
-	}
-
-	// check for the zone k8s topology label that is GA in 1.17.
-	zone, ok = labels[corev1.LabelZoneFailureDomainStable]
-	if ok {
-		topology[zoneLabel] = zone
-	}
-
-	// get host
-	host, ok := labels[corev1.LabelHostname]
-	if ok {
-		topology["host"] = host
-	}
-
-	// get the labels for the CRUSH map hierarchy
-	for _, topologyID := range additionalTopologyIDs {
-		if value, ok := labels[TopologyLabelPrefix+topologyID]; ok {
-			topology[topologyID] = value
-		}
-	}
-	return topology
 }
 
 // GenerateNodeAffinity will return v1.NodeAffinity or error

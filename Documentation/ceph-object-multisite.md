@@ -3,9 +3,10 @@ title: Object Multisite
 weight: 2250
 indent: true
 ---
+
 # Object Multisite
 
-Multisite is a feature of Ceph that allows object stores to replicate their data over multiple Ceph clusters. 
+Multisite is a feature of Ceph that allows object stores to replicate their data over multiple Ceph clusters.
 
 Multisite also allows object stores to be independent and isolated from other object stores in a cluster.
 
@@ -21,7 +22,7 @@ To review core multisite concepts please read the [ceph-multisite design overvie
 
 ## Prerequisites
 
-This guide assumes a Rook cluster as explained in the [Quickstart](ceph-quickstart.md).
+This guide assumes a Rook cluster as explained in the [Quickstart](quickstart.md).
 
 # Creating Object Multisite
 
@@ -37,7 +38,7 @@ object-multisite.yaml in the [examples](/cluster/examples/kubernetes/ceph/) dire
 kubectl create -f object-multisite.yaml
 ```
 
-The first zone group created in a realm is the master zone group. The first zone created in a zone group is the master zone. 
+The first zone group created in a realm is the master zone group. The first zone created in a zone group is the master zone.
 
 When a non-master zone or non-master zone group is created, the zone group or zone is not in the Ceph Radosgw Multisite [Period](https://docs.ceph.com/docs/master/radosgw/multisite/) until an object-store is created in that zone (and zone group).
 
@@ -49,7 +50,7 @@ For more information on the multisite CRDs please read [ceph-object-multisite-cr
 
 # Pulling a Realm
 
-If an admin wants to sync data from another cluster, the admin needs to pull a realm on a Rook Ceph cluster from another Rook Ceph (or Ceph) cluster. 
+If an admin wants to sync data from another cluster, the admin needs to pull a realm on a Rook Ceph cluster from another Rook Ceph (or Ceph) cluster.
 
 To begin doing this, the admin needs 2 pieces of information:
 
@@ -58,31 +59,35 @@ To begin doing this, the admin needs 2 pieces of information:
 
 ## Getting the Pull Endpoint
 
-To pull a Ceph realm from a remote Ceph cluster, an `endpoint` must be added to the CephObjectRealm's `pull` section in the `spec`. This endpoint must be from the master zone in the master zone group of that realm. 
+To pull a Ceph realm from a remote Ceph cluster, an `endpoint` must be added to the CephObjectRealm's `pull` section in the `spec`. This endpoint must be from the master zone in the master zone group of that realm.
 
 If an admin does not know of an endpoint that fits this criteria, the admin can find such an endpoint on the remote Ceph cluster (via the tool box if it is a Rook Ceph Cluster) by running:
 
 ```
-radosgw-admin zonegroup get --rgw-realm=$REALM_NAME --rgw-zonegroup=$MASTER_ZONEGROUP_NAME
-{
-    ...
-    "endpoints": [http://10.17.159.77:80],
-    ...
-}
+$ radosgw-admin zonegroup get --rgw-realm=$REALM_NAME --rgw-zonegroup=$MASTER_ZONEGROUP_NAME
 ```
+>```
+>{
+>    ...
+>    "endpoints": [http://10.17.159.77:80],
+>    ...
+>}
+>```
 
 A list of endpoints in the master zone group in the master zone is in the `endpoints` section of the JSON output of the `zonegoup get` command.
 
 This endpoint must also be resolvable from the new Rook Ceph cluster. To test this run the `curl` command on the endpoint:
 
 ```
-curl -L http://10.17.159.77:80
-<?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Owner><ID>anonymous</ID><DisplayName></DisplayName></Owner><Buckets></Buckets></ListAllMyBucketsResult>
+$ curl -L http://10.17.159.77:80
 ```
+>```
+><?xml version="1.0" encoding="UTF-8"?><ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Owner><ID>anonymous</ID><DisplayName></DisplayName></Owner><Buckets></Buckets></ListAllMyBucketsResult>
+>```
 
 Finally add the endpoint to the `pull` section of the CephObjectRealm's spec. The CephObjectRealm should have the same name as the CephObjectRealm/Ceph realm it is pulling from.
 
-```
+```yaml
 apiVersion: ceph.rook.io/v1
 kind: CephObjectRealm
 metadata:
@@ -107,7 +112,7 @@ These keys for the user are exported as a kubernetes [secret](https://kubernetes
 
 To get these keys from the cluster the realm was originally created on, run:
 ```console
-kubectl -n $ORIGINAL_CLUSTER_NAMESPACE get secrets realm-a-keys -o yaml > realm-a-keys.yaml
+$ kubectl -n $ORIGINAL_CLUSTER_NAMESPACE get secrets realm-a-keys -o yaml > realm-a-keys.yaml
 ```
 Edit the `realm-a-keys.yaml` file, and change the `namespace` with the namespace that the new Rook Ceph cluster exists in.
 
@@ -121,23 +126,24 @@ kubectl create -f realm-a-keys.yaml
 The access key and the secret key of the system user can be found in the output of running the following command on a non-rook ceph cluster:
 ```
 radosgw-admin user info --uid="realm-a-system-user"
-{
-    ...
-    "keys": [
-        {
-            "user": "realm-a-system-user"
-            "access_key": "aSw4blZIKV9nKEU5VC0="
-            "secret_key": "JSlDXFt5TlgjSV9QOE9XUndrLiI5JEo9YDBsJg==",
-        }
-    ],
-    ...
-}
 ```
+>```{
+>    ...
+>    "keys": [
+>        {
+>            "user": "realm-a-system-user"
+>            "access_key": "aSw4blZIKV9nKEU5VC0="
+>            "secret_key": "JSlDXFt5TlgjSV9QOE9XUndrLiI5JEo9YDBsJg==",
+>        }
+>    ],
+>    ...
+>}
+>```
 
-Then base64 encode the each of the keys and create a `.yaml` file for the Kubernetes secret from the following template. 
+Then base64 encode the each of the keys and create a `.yaml` file for the Kubernetes secret from the following template.
 
 Only the `access-key`, `secret-key`, and `namespace` sections need to be replaced.
-```
+```yaml
 apiVersion: v1
 data:
   access-key: YVN3NGJsWklLVjluS0VVNVZDMD0=
@@ -180,7 +186,7 @@ When the ceph-object-realm resource is deleted or modified, the realm is not del
 
 ### Deleting a Realm
 
-The Rook toolbox can modify the Ceph Multisite state via the radosgw-admin command. 
+The Rook toolbox can modify the Ceph Multisite state via the radosgw-admin command.
 
 The following command, run via the toolbox, deletes the realm.
 
@@ -196,7 +202,7 @@ When the ceph-object-zone group resource is deleted or modified, the zone group 
 
 ### Deleting a Zone Group
 
-The Rook toolbox can modify the Ceph Multisite state via the radosgw-admin command. 
+The Rook toolbox can modify the Ceph Multisite state via the radosgw-admin command.
 
 The following command, run via the toolbox, deletes the zone group.
 
@@ -237,7 +243,7 @@ In the other scenario, there are more than one zones in a zone group.
 
 Care must be taken when changing which zone is the master zone.
 
-Please read the following [documentation](https://docs.ceph.com/docs/master/radosgw/multisite/#changing-the-metadata-master-zone) before running the below commands: 
+Please read the following [documentation](https://docs.ceph.com/docs/master/radosgw/multisite/#changing-the-metadata-master-zone) before running the below commands:
 
 The following commands, run via toolboxes, remove the zone from the zone group first, then delete the zone.
 
@@ -281,4 +287,3 @@ kubectl delete -f object-store.yaml
 ```
 
 Removing object store(s) from the master zone of the master zone group should be done with caution. When all of these object-stores are deleted the period cannot be updated and that realm cannot be pulled.
-

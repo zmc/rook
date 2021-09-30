@@ -7,16 +7,22 @@
       2,
       "always",
       [
-        "build",
         "bot",
-        "cassandra",
+        "build",
         "ceph",
+        "cephfs-mirror",
         "ci",
         "core",
+        "csi",
         "docs",
-        "nfs",
-        "test",
-        "yugabytedb"
+        "mds",
+        "mgr",
+        "mon",
+        "osd",
+        "pool",
+        "rbd-mirror",
+        "rgw",
+        "test"
       ]
     ],
     "body-leading-blank": [

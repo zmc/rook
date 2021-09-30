@@ -20,12 +20,12 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	cephtest "github.com/rook/rook/pkg/operator/ceph/test"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/test"
 	optest "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
@@ -34,14 +34,15 @@ import (
 
 func TestPodSpec(t *testing.T) {
 	clientset := optest.New(t, 1)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid"}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo}
 	clusterInfo.SetName("test")
 	clusterSpec := cephv1.ClusterSpec{
-		CephVersion:        cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"},
+		CephVersion:        cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:myceph"},
 		Dashboard:          cephv1.DashboardSpec{Port: 1234},
-		PriorityClassNames: map[rookv1.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
+		PriorityClassNames: map[cephv1.KeyType]string{cephv1.KeyMgr: "my-priority-class"},
 		DataDirHostPath:    "/var/lib/rook/",
-		Resources: rookv1.ResourceSpec{string(cephv1.KeyMgr): v1.ResourceRequirements{
+		Resources: cephv1.ResourceSpec{string(cephv1.KeyMgr): v1.ResourceRequirements{
 			Limits: v1.ResourceList{
 				v1.ResourceCPU:    *resource.NewQuantity(200.0, resource.BinarySI),
 				v1.ResourceMemory: *resource.NewQuantity(500.0, resource.BinarySI),
@@ -61,38 +62,60 @@ func TestPodSpec(t *testing.T) {
 		DataPathMap:  config.NewStatelessDaemonDataPathMap(config.MgrType, "a", "rook-ceph", "/var/lib/rook/"),
 	}
 
-	d, err := c.makeDeployment(&mgrTestConfig)
-	assert.NoError(t, err)
+	t.Run("traditional deployment", func(t *testing.T) {
+		d, err := c.makeDeployment(&mgrTestConfig)
+		assert.NoError(t, err)
 
-	// Deployment should have Ceph labels
-	cephtest.AssertLabelsContainCephRequirements(t, d.ObjectMeta.Labels,
-		config.MgrType, "a", AppName, "ns")
+		// Deployment should have Ceph labels
+		test.AssertLabelsContainCephRequirements(t, d.ObjectMeta.Labels,
+			config.MgrType, "a", AppName, "ns")
 
-	podTemplate := cephtest.NewPodTemplateSpecTester(t, &d.Spec.Template)
-	podTemplate.Spec().Containers().RequireAdditionalEnvVars(
-		"ROOK_OPERATOR_NAMESPACE", "ROOK_CEPH_CLUSTER_CRD_VERSION",
-		"ROOK_CEPH_CLUSTER_CRD_NAME")
-	podTemplate.RunFullSuite(config.MgrType, "a", AppName, "ns", "ceph/ceph:myceph",
-		"200", "100", "500", "250", /* resources */
-		"my-priority-class")
-	assert.Equal(t, 2, len(d.Spec.Template.Annotations))
+		podTemplate := test.NewPodTemplateSpecTester(t, &d.Spec.Template)
+		podTemplate.Spec().Containers().RequireAdditionalEnvVars(
+			"ROOK_OPERATOR_NAMESPACE", "ROOK_CEPH_CLUSTER_CRD_VERSION",
+			"ROOK_CEPH_CLUSTER_CRD_NAME")
+		podTemplate.RunFullSuite(config.MgrType, "a", AppName, "ns", "quay.io/ceph/ceph:myceph",
+			"200", "100", "500", "250", /* resources */
+			"my-priority-class")
+		assert.Equal(t, 2, len(d.Spec.Template.Annotations))
+		assert.Equal(t, 1, len(d.Spec.Template.Spec.Containers))
+		assert.Equal(t, 5, len(d.Spec.Template.Spec.Containers[0].VolumeMounts))
+	})
+
+	t.Run("deployment with multus with new sidecar proxy command container", func(t *testing.T) {
+		c.spec.Network.Provider = "multus"
+		d, err := c.makeDeployment(&mgrTestConfig)
+		assert.NoError(t, err)
+		assert.Equal(t, 3, len(d.Spec.Template.Annotations))                                                                                                                              // Multus annotations
+		assert.Equal(t, 2, len(d.Spec.Template.Spec.Containers))                                                                                                                          // mgr pod + sidecar
+		assert.Equal(t, client.CommandProxyInitContainerName, d.Spec.Template.Spec.Containers[1].Name)                                                                                    // sidecar pod
+		assert.Equal(t, 6, len(d.Spec.Template.Spec.Containers[1].VolumeMounts))                                                                                                          // + admin keyring
+		assert.Equal(t, "CEPH_ARGS", d.Spec.Template.Spec.Containers[1].Env[len(d.Spec.Template.Spec.Containers[1].Env)-1].Name)                                                          // connection info to the cluster
+		assert.Equal(t, "-m $(ROOK_CEPH_MON_HOST) -k /etc/ceph/admin-keyring-store/keyring", d.Spec.Template.Spec.Containers[1].Env[len(d.Spec.Template.Spec.Containers[1].Env)-1].Value) // connection info to the cluster
+	})
 }
 
 func TestServiceSpec(t *testing.T) {
 	clientset := optest.New(t, 1)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid"}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo}
 	clusterSpec := cephv1.ClusterSpec{}
 	c := New(&clusterd.Context{Clientset: clientset}, clusterInfo, clusterSpec, "myversion")
 
-	s := c.MakeMetricsService("rook-mgr", serviceMetricName)
+	s, err := c.MakeMetricsService("rook-mgr", "foo", serviceMetricName)
+	assert.NoError(t, err)
 	assert.NotNil(t, s)
 	assert.Equal(t, "rook-mgr", s.Name)
 	assert.Equal(t, 1, len(s.Spec.Ports))
+	assert.Equal(t, 3, len(s.Labels))
+	assert.Equal(t, 3, len(s.Spec.Selector))
+	assert.Equal(t, "foo", s.Spec.Selector[controller.DaemonIDLabel])
 }
 
 func TestHostNetwork(t *testing.T) {
 	clientset := optest.New(t, 1)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid"}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo}
 	clusterInfo.SetName("test")
 	clusterSpec := cephv1.ClusterSpec{
 		Network:         cephv1.NetworkSpec{HostNetwork: true},
@@ -115,37 +138,13 @@ func TestHostNetwork(t *testing.T) {
 	assert.Equal(t, v1.DNSClusterFirstWithHostNet, d.Spec.Template.Spec.DNSPolicy)
 }
 
-func TestHttpBindFix(t *testing.T) {
-	clientset := optest.New(t, 1)
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid"}
-	clusterInfo.SetName("test")
-	clusterSpec := cephv1.ClusterSpec{
-		Dashboard:       cephv1.DashboardSpec{Enabled: true, Port: 1234},
-		DataDirHostPath: "/var/lib/rook/",
-	}
-	c := New(&clusterd.Context{Clientset: clientset}, clusterInfo, clusterSpec, "myversion")
-
-	mgrTestConfig := mgrConfig{
-		DaemonID:     "a",
-		ResourceName: "mgr-a",
-		DataPathMap:  config.NewStatelessDaemonDataPathMap(config.MgrType, "a", "rook-ceph", "/var/lib/rook/"),
-	}
-
-	c.clusterInfo.CephVersion = cephver.Nautilus
-	expectedInitContainers := 3
-	d, err := c.makeDeployment(&mgrTestConfig)
-	assert.NoError(t, err)
-	assert.NotNil(t, d)
-	assert.Equal(t, expectedInitContainers,
-		len(d.Spec.Template.Spec.InitContainers))
-}
-
 func TestApplyPrometheusAnnotations(t *testing.T) {
 	clientset := optest.New(t, 1)
 	clusterSpec := cephv1.ClusterSpec{
 		DataDirHostPath: "/var/lib/rook/",
 	}
-	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid"}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns", FSID: "myfsid", OwnerInfo: ownerInfo}
 	clusterInfo.SetName("test")
 	c := New(&clusterd.Context{Clientset: clientset}, clusterInfo, clusterSpec, "myversion")
 
@@ -168,10 +167,10 @@ func TestApplyPrometheusAnnotations(t *testing.T) {
 	d, err = c.makeDeployment(&mgrTestConfig)
 	assert.NoError(t, err)
 
-	fakeAnnotations := rookv1.Annotations{
+	fakeAnnotations := cephv1.Annotations{
 		"foo.io/bar": "foobar",
 	}
-	c.spec.Annotations = map[rookv1.KeyType]rookv1.Annotations{cephv1.KeyMgr: fakeAnnotations}
+	c.spec.Annotations = map[cephv1.KeyType]cephv1.Annotations{cephv1.KeyMgr: fakeAnnotations}
 
 	c.applyPrometheusAnnotations(&d.ObjectMeta)
 	assert.Equal(t, 1, len(c.spec.Annotations))

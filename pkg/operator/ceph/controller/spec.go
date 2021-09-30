@@ -21,16 +21,23 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"reflect"
+	"strings"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/util/display"
 	v1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -44,6 +51,10 @@ const (
 	initialDelaySecondsNonOSDDaemon int32 = 10
 	initialDelaySecondsOSDDaemon    int32 = 45
 	logCollector                          = "log-collector"
+	DaemonIDLabel                         = "ceph_daemon_id"
+	daemonTypeLabel                       = "ceph_daemon_type"
+	ExternalMgrAppName                    = "rook-ceph-mgr-external"
+	ServiceExternalMetricName             = "http-external-metrics"
 )
 
 type daemonConfig struct {
@@ -55,8 +66,6 @@ var logger = capnslog.NewPackageLogger("github.com/rook/rook", "ceph-spec")
 
 var (
 	cronLogRotate = `
-set -xe
-
 CEPH_CLIENT_ID=%s
 PERIODICITY=%s
 LOG_ROTATE_CEPH_FILE=/etc/logrotate.d/ceph
@@ -299,7 +308,7 @@ func AddVolumeMountSubPath(podSpec *v1.PodSpec, volumeMountName string) {
 }
 
 // DaemonFlags returns the command line flags used by all Ceph daemons.
-func DaemonFlags(cluster *cephclient.ClusterInfo, spec *cephv1.ClusterSpec, daemonID string) []string {
+func DaemonFlags(cluster *client.ClusterInfo, spec *cephv1.ClusterSpec, daemonID string) []string {
 	flags := append(
 		config.DefaultFlags(cluster.FSID, keyring.VolumeMount().KeyringFilePath()),
 		config.NewFlag("id", daemonID),
@@ -310,21 +319,49 @@ func DaemonFlags(cluster *cephclient.ClusterInfo, spec *cephv1.ClusterSpec, daem
 		// run ceph daemon process under the 'ceph' group
 		config.NewFlag("setgroup", "ceph"),
 	)
-
-	if spec.Network.IPFamily == cephv1.IPv6 {
-		flags = append(flags, config.NewFlag("ms-bind-ipv6", "true"))
-	}
+	flags = append(flags, NetworkBindingFlags(cluster, spec)...)
 
 	return flags
 }
 
 // AdminFlags returns the command line flags used for Ceph commands requiring admin authentication.
-func AdminFlags(cluster *cephclient.ClusterInfo) []string {
+func AdminFlags(cluster *client.ClusterInfo) []string {
 	return append(
 		config.DefaultFlags(cluster.FSID, keyring.VolumeMount().AdminKeyringFilePath()),
 		config.NewFlag("setuser", "ceph"),
 		config.NewFlag("setgroup", "ceph"),
 	)
+}
+
+func NetworkBindingFlags(cluster *client.ClusterInfo, spec *cephv1.ClusterSpec) []string {
+	var args []string
+
+	// As of Pacific, Ceph supports dual-stack, so setting IPv6 family without disabling IPv4 binding actually enables dual-stack
+	// This is likely not user's intent, so on Pacific let's make sure to disable IPv4 when IPv6 is selected
+	if !spec.Network.DualStack {
+		switch spec.Network.IPFamily {
+		case cephv1.IPv4:
+			args = append(args, config.NewFlag("ms-bind-ipv4", "true"))
+			args = append(args, config.NewFlag("ms-bind-ipv6", "false"))
+
+		case cephv1.IPv6:
+			args = append(args, config.NewFlag("ms-bind-ipv4", "false"))
+			args = append(args, config.NewFlag("ms-bind-ipv6", "true"))
+		}
+	} else {
+		if cluster.CephVersion.IsAtLeastPacific() {
+			args = append(args, config.NewFlag("ms-bind-ipv4", "true"))
+			args = append(args, config.NewFlag("ms-bind-ipv6", "true"))
+		} else {
+			logger.Info("dual-stack is only supported on ceph pacific")
+			// Still acknowledge IPv6, nothing to do for IPv4 since it will always be "on"
+			if spec.Network.IPFamily == cephv1.IPv6 {
+				args = append(args, config.NewFlag("ms-bind-ipv6", "true"))
+			}
+		}
+	}
+
+	return args
 }
 
 // ContainerEnvVarReference returns a reference to a Kubernetes container env var of the given name
@@ -359,9 +396,9 @@ func CephDaemonAppLabels(appName, namespace, daemonType, daemonID string, includ
 
 	// New labels cannot be applied to match selectors during upgrade
 	if includeNewLabels {
-		labels["ceph_daemon_type"] = daemonType
+		labels[daemonTypeLabel] = daemonType
 	}
-	labels["ceph_daemon_id"] = daemonID
+	labels[DaemonIDLabel] = daemonID
 	// Also report the daemon id keyed by its daemon type: "mon: a", "mds: c", etc.
 	labels[daemonType] = daemonID
 	return labels
@@ -383,7 +420,7 @@ func CheckPodMemory(name string, resources v1.ResourceRequirements, cephPodMinim
 		// This means LIMIT and REQUEST are either identical or different but still we use LIMIT as a reference
 		if uint64(podMemoryLimit.Value()) < display.MbTob(cephPodMinimumMemory) {
 			// allow the configuration if less than the min, but print a warning
-			logger.Warningf("running the %q daemon(s) with %dmb of ram, but at least %dmb is recommended", name, display.BToMb(uint64(podMemoryLimit.Value())), cephPodMinimumMemory)
+			logger.Warningf("running the %q daemon(s) with %dMB of ram, but at least %dMB is recommended", name, display.BToMb(uint64(podMemoryLimit.Value())), cephPodMinimumMemory)
 		}
 
 		// This means LIMIT < REQUEST
@@ -450,7 +487,7 @@ func GenerateMinimalCephConfInitContainer(
 	resources v1.ResourceRequirements,
 	securityContext *v1.SecurityContext,
 ) v1.Container {
-	cfgPath := cephclient.DefaultConfigFilePath()
+	cfgPath := client.DefaultConfigFilePath()
 	// Note that parameters like $(PARAM) will be replaced by Kubernetes with env var content before
 	// container creation.
 	confScript := `
@@ -585,12 +622,102 @@ func LogCollectorContainer(daemonID, ns string, c cephv1.ClusterSpec) *v1.Contai
 		Name: logCollector,
 		Command: []string{
 			"/bin/bash",
-			"-c",
+			"-x", // Print commands and their arguments as they are executed
+			"-e", // Exit immediately if a command exits with a non-zero status.
+			"-m", // Terminal job control, allows job to be terminated by SIGTERM
+			"-c", // Command to run
 			fmt.Sprintf(cronLogRotate, daemonID, c.LogCollector.Periodicity),
 		},
 		Image:           c.CephVersion.Image,
 		VolumeMounts:    DaemonVolumeMounts(config.NewDatalessDaemonDataPathMap(ns, c.DataDirHostPath), ""),
 		SecurityContext: PodSecurityContext(),
 		Resources:       cephv1.GetLogCollectorResources(c.Resources),
+		// We need a TTY for the bash job control (enabled by -m)
+		TTY: true,
 	}
+}
+
+// CreateExternalMetricsEndpoints creates external metric endpoint
+func createExternalMetricsEndpoints(namespace string, monitoringSpec cephv1.MonitoringSpec, ownerInfo *k8sutil.OwnerInfo) (*v1.Endpoints, error) {
+	labels := AppLabels("rook-ceph-mgr", namespace)
+
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ExternalMgrAppName,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Subsets: []v1.EndpointSubset{
+			{
+				Addresses: monitoringSpec.ExternalMgrEndpoints,
+				Ports: []v1.EndpointPort{
+					{
+						Name:     ServiceExternalMetricName,
+						Port:     int32(monitoringSpec.ExternalMgrPrometheusPort),
+						Protocol: v1.ProtocolTCP,
+					},
+				},
+			},
+		},
+	}
+
+	err := ownerInfo.SetControllerReference(endpoints)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to metric endpoints %q", endpoints.Name)
+	}
+
+	return endpoints, nil
+}
+
+func ConfigureExternalMetricsEndpoint(ctx *clusterd.Context, monitoringSpec cephv1.MonitoringSpec, clusterInfo *client.ClusterInfo, ownerInfo *k8sutil.OwnerInfo) error {
+	if len(monitoringSpec.ExternalMgrEndpoints) == 0 {
+		logger.Debug("no metric endpoint configured, doing nothing")
+		return nil
+	}
+
+	// Get active mgr
+	var activeMgrAddr string
+	// We use mgr dump and not stat because we want the IP address
+	mgrMap, err := client.CephMgrMap(ctx, clusterInfo)
+	if err != nil {
+		logger.Errorf("failed to get mgr map. %v", err)
+	} else {
+		activeMgrAddr = extractMgrIP(mgrMap.ActiveAddr)
+	}
+	logger.Debugf("active mgr addr %q", activeMgrAddr)
+
+	// If the active manager is different than the one in the spec we override it
+	// This happens when a standby manager becomes active
+	if activeMgrAddr != monitoringSpec.ExternalMgrEndpoints[0].IP {
+		monitoringSpec.ExternalMgrEndpoints[0].IP = activeMgrAddr
+	}
+
+	// Create external monitoring Endpoints
+	endpoint, err := createExternalMetricsEndpoints(clusterInfo.Namespace, monitoringSpec, ownerInfo)
+	if err != nil {
+		return err
+	}
+
+	// Get the endpoint to see if anything needs to be updated
+	currentEndpoints, err := ctx.Clientset.CoreV1().Endpoints(clusterInfo.Namespace).Get(clusterInfo.Context, endpoint.Name, metav1.GetOptions{})
+	if err != nil && !kerrors.IsNotFound(err) {
+		return errors.Wrap(err, "failed to fetch endpoints")
+	}
+
+	// If endpoints are identical there is nothing to do
+	if reflect.DeepEqual(currentEndpoints, endpoint) {
+		return nil
+	}
+	logger.Debugf("diff between current endpoint and newly generated one: %v \n", cmp.Diff(currentEndpoints, endpoint, cmp.Comparer(func(x, y resource.Quantity) bool { return x.Cmp(y) == 0 })))
+
+	_, err = k8sutil.CreateOrUpdateEndpoint(ctx.Clientset, clusterInfo.Namespace, endpoint)
+	if err != nil {
+		return errors.Wrap(err, "failed to create or update mgr endpoint")
+	}
+
+	return nil
+}
+
+func extractMgrIP(rawActiveAddr string) string {
+	return strings.Split(rawActiveAddr, ":")[0]
 }

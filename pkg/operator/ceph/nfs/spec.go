@@ -17,8 +17,6 @@ limitations under the License.
 package nfs
 
 import (
-	"context"
-
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
@@ -71,16 +69,15 @@ func (r *ReconcileCephNFS) generateCephNFSService(nfs *cephv1.CephNFS, cfg daemo
 }
 
 func (r *ReconcileCephNFS) createCephNFSService(nfs *cephv1.CephNFS, cfg daemonConfig) error {
-	ctx := context.TODO()
 	s := r.generateCephNFSService(nfs, cfg)
 
 	// Set owner ref to the parent object
 	err := controllerutil.SetControllerReference(nfs, s, r.scheme)
 	if err != nil {
-		return errors.Wrap(err, "failed to set owner reference to ceph object store")
+		return errors.Wrapf(err, "failed to set owner reference to ceph nfs %q", s)
 	}
 
-	svc, err := r.context.Clientset.CoreV1().Services(nfs.Namespace).Create(ctx, s, metav1.CreateOptions{})
+	svc, err := r.context.Clientset.CoreV1().Services(nfs.Namespace).Create(r.opManagerContext, s, metav1.CreateOptions{})
 	if err != nil {
 		if !kerrors.IsAlreadyExists(err) {
 			return errors.Wrap(err, "failed to create ganesha service")
@@ -150,8 +147,8 @@ func (r *ReconcileCephNFS) makeDeployment(nfs *cephv1.CephNFS, cfg daemonConfig)
 
 	if r.cephClusterSpec.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	} else if r.cephClusterSpec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(r.cephClusterSpec.Network.NetworkSpec, &podTemplateSpec.ObjectMeta); err != nil {
+	} else if r.cephClusterSpec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(r.cephClusterSpec.Network, &podTemplateSpec.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}

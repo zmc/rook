@@ -19,21 +19,9 @@ package config
 
 import (
 	"strconv"
-
-	"github.com/rook/rook/pkg/operator/k8sutil"
 )
 
 const (
-	OSDFSStoreNameFmt  = "rook-ceph-osd-%d-fs-backup"
-	configStoreNameFmt = "rook-ceph-osd-%s-config"
-)
-
-func GetConfigStoreName(nodeName string) string {
-	return k8sutil.TruncateNodeName(configStoreNameFmt, nodeName)
-}
-
-const (
-	StoreTypeKey       = "storeType"
 	WalSizeMBKey       = "walSizeMB"
 	DatabaseSizeMBKey  = "databaseSizeMB"
 	JournalSizeMBKey   = "journalSizeMB"
@@ -41,17 +29,20 @@ const (
 	EncryptedDeviceKey = "encryptedDevice"
 	MetadataDeviceKey  = "metadataDevice"
 	DeviceClassKey     = "deviceClass"
+	InitialWeightKey   = "initialWeight"
+	PrimaryAffinityKey = "primaryAffinity"
 )
 
 // StoreConfig represents the configuration of an OSD on a device.
 type StoreConfig struct {
-	StoreType       string `json:"storeType,omitempty"`
 	WalSizeMB       int    `json:"walSizeMB,omitempty"`
 	DatabaseSizeMB  int    `json:"databaseSizeMB,omitempty"`
 	OSDsPerDevice   int    `json:"osdsPerDevice,omitempty"`
 	EncryptedDevice bool   `json:"encryptedDevice,omitempty"`
 	MetadataDevice  string `json:"metadataDevice,omitempty"`
 	DeviceClass     string `json:"deviceClass,omitempty"`
+	InitialWeight   string `json:"initialWeight,omitempty"`
+	PrimaryAffinity string `json:"primaryAffinity,omitempty"`
 }
 
 // NewStoreConfig returns a StoreConfig with proper defaults set.
@@ -66,8 +57,6 @@ func ToStoreConfig(config map[string]string) StoreConfig {
 	storeConfig := NewStoreConfig()
 	for k, v := range config {
 		switch k {
-		case StoreTypeKey:
-			storeConfig.StoreType = v
 		case WalSizeMBKey:
 			storeConfig.WalSizeMB = convertToIntIgnoreErr(v)
 		case DatabaseSizeMBKey:
@@ -83,6 +72,10 @@ func ToStoreConfig(config map[string]string) StoreConfig {
 			storeConfig.MetadataDevice = v
 		case DeviceClassKey:
 			storeConfig.DeviceClass = v
+		case InitialWeightKey:
+			storeConfig.InitialWeight = v
+		case PrimaryAffinityKey:
+			storeConfig.PrimaryAffinity = v
 		}
 	}
 
@@ -108,13 +101,6 @@ func convertToIntIgnoreErr(raw string) int {
 
 	return val
 }
-
-// A DriveGroupBlob is a simple JSON blob defining a Ceph Drive Group. Drive Group blobs are passed
-// to ceph-volume for node disk configuration.
-type DriveGroupBlob string
-
-// DriveGroupBlobs is a mapping from Ceph Drive Group names to JSON blobs of Drive Group specs.
-type DriveGroupBlobs map[string]string
 
 // ConfiguredDevice is a device with a corresponding configuration.
 type ConfiguredDevice struct {

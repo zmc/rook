@@ -76,7 +76,10 @@ func (c *Cluster) makeJob(osdProps osdProperties, provisionConfig *provisionConf
 
 	k8sutil.AddRookVersionLabelToJob(job)
 	controller.AddCephVersionLabelToJob(c.clusterInfo.CephVersion, job)
-	k8sutil.SetOwnerRef(&job.ObjectMeta, &c.clusterInfo.OwnerRef)
+	err = c.clusterInfo.OwnerInfo.SetControllerReference(job)
+	if err != nil {
+		return nil, err
+	}
 
 	// override the resources of all the init containers and main container with the expected osd prepare resources
 	c.applyResourcesToAllContainers(&podSpec.Spec, cephv1.GetPrepareOSDResources(c.spec.Resources))
@@ -153,14 +156,16 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 	if c.spec.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
-
-	p := cephv1.GetOSDPlacement(c.spec.Placement)
-	if !osdProps.onPVC() {
-		p.ApplyToPodSpec(&podSpec)
-	} else {
+	if osdProps.onPVC() {
+		c.applyAllPlacementIfNeeded(&podSpec)
+		// apply storageClassDeviceSets.preparePlacement
 		osdProps.getPreparePlacement().ApplyToPodSpec(&podSpec)
-		p.ApplyToPodSpec(&podSpec)
+	} else {
+		c.applyAllPlacementIfNeeded(&podSpec)
+		// apply spec.placement.prepareosd
+		c.spec.Placement[cephv1.KeyOSDPrepare].ApplyToPodSpec(&podSpec)
 	}
+
 	k8sutil.RemoveDuplicateEnvVars(&podSpec)
 
 	podMeta := metav1.ObjectMeta{
@@ -192,23 +197,6 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 	// enable debug logging in the prepare job
 	envVars = append(envVars, setDebugLogLevelEnvVar(true))
 
-	// Drive Groups cannot be used to configure OSDs on PVCs, so ignore if this is a PVC config
-	// This shouldn't ever happen, but do the PVC check to be sure
-	if len(osdProps.driveGroups) > 0 && !osdProps.onPVC() {
-		v, err := c.getDriveGroupEnvVar(osdProps)
-		if err != nil {
-			// Because OSD creation via drive groups should take precedent over other types of drive
-			// creation, if there is an error here, we should fail. Allowing OSD creation to proceed
-			// without drive group information could result in OSD configs being created which the
-			// user does not want.
-			return v1.Container{}, errors.Wrapf(err, "failed to get drive group info for OSD provisioning container")
-		}
-		// An env var with no name means there are no groups, don't add the var
-		if v.Name != "" {
-			envVars = append(envVars, v)
-		}
-	}
-
 	// only 1 of device list, device filter, device path filter and use all devices can be specified.  We prioritize in that order.
 	if len(osdProps.devices) > 0 {
 		configuredDevices := []config.ConfiguredDevice{}
@@ -237,6 +225,7 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 	}
 	envVars = append(envVars, v1.EnvVar{Name: "ROOK_CEPH_VERSION", Value: c.clusterInfo.CephVersion.CephVersionFormatted()})
 	envVars = append(envVars, crushDeviceClassEnvVar(osdProps.storeConfig.DeviceClass))
+	envVars = append(envVars, crushInitialWeightEnvVar(osdProps.storeConfig.InitialWeight))
 
 	if osdProps.metadataDevice != "" {
 		envVars = append(envVars, metadataDeviceEnvVar(osdProps.metadataDevice))
@@ -310,8 +299,8 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 	readOnlyRootFilesystem := false
 
 	osdProvisionContainer := v1.Container{
-		Command:      []string{path.Join(rookBinariesMountPath, "tini")},
-		Args:         []string{"--", path.Join(rookBinariesMountPath, "rook"), "ceph", "osd", "provision"},
+		Command:      []string{path.Join(rookBinariesMountPath, "rook")},
+		Args:         []string{"ceph", "osd", "provision"},
 		Name:         "provision",
 		Image:        c.spec.CephVersion.Image,
 		VolumeMounts: volumeMounts,

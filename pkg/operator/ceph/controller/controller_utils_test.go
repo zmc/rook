@@ -18,8 +18,10 @@ package controller
 
 import (
 	"testing"
+	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/util/exec"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -69,4 +71,17 @@ func TestCanIgnoreHealthErrStatusInReconcile(t *testing.T) {
 		},
 	})
 	assert.False(t, canIgnoreHealthErrStatusInReconcile(cluster, "controller"))
+}
+
+func TestSetCephCommandsTimeout(t *testing.T) {
+	SetCephCommandsTimeout(map[string]string{})
+	assert.Equal(t, 15*time.Second, exec.CephCommandsTimeout)
+
+	exec.CephCommandsTimeout = 0
+	SetCephCommandsTimeout(map[string]string{"ROOK_CEPH_COMMANDS_TIMEOUT_SECONDS": "0"})
+	assert.Equal(t, 15*time.Second, exec.CephCommandsTimeout)
+
+	exec.CephCommandsTimeout = 0
+	SetCephCommandsTimeout(map[string]string{"ROOK_CEPH_COMMANDS_TIMEOUT_SECONDS": "1"})
+	assert.Equal(t, 1*time.Second, exec.CephCommandsTimeout)
 }

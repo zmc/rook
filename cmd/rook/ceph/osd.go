@@ -17,6 +17,7 @@ limitations under the License.
 package ceph
 
 import (
+	ctx "context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -60,6 +61,7 @@ var (
 	osdDataDeviceFilter     string
 	osdDataDevicePathFilter string
 	ownerRefID              string
+	clusterName             string
 	osdID                   int
 	osdStoreType            string
 	osdStringID             string
@@ -68,8 +70,8 @@ var (
 	pvcBackedOSD            bool
 	blockPath               string
 	lvBackedPV              bool
-	driveGroups             string
 	osdIDsToRemove          string
+	preservePVC             bool
 )
 
 func addOSDFlags(command *cobra.Command) {
@@ -77,7 +79,6 @@ func addOSDFlags(command *cobra.Command) {
 	addOSDConfigFlags(provisionCmd)
 
 	// flags specific to provisioning
-	provisionCmd.Flags().StringVar(&driveGroups, "drive-groups", "", "JSON marshalled specification of Ceph Drive Groups")
 	provisionCmd.Flags().StringVar(&cfg.devices, "data-devices", "", "comma separated list of devices to use for storage")
 	provisionCmd.Flags().StringVar(&osdDataDeviceFilter, "data-device-filter", "", "a regex filter for the device names to use, or \"all\"")
 	provisionCmd.Flags().StringVar(&osdDataDevicePathFilter, "data-device-path-filter", "", "a regex filter for the device path names to use")
@@ -92,13 +93,14 @@ func addOSDFlags(command *cobra.Command) {
 	// flags for running osds that were provisioned by ceph-volume
 	osdStartCmd.Flags().StringVar(&osdStringID, "osd-id", "", "the osd ID")
 	osdStartCmd.Flags().StringVar(&osdUUID, "osd-uuid", "", "the osd UUID")
-	osdStartCmd.Flags().StringVar(&osdStoreType, "osd-store-type", "", "whether the osd is bluestore or filestore")
+	osdStartCmd.Flags().StringVar(&osdStoreType, "osd-store-type", "", "the osd store type such as bluestore")
 	osdStartCmd.Flags().BoolVar(&pvcBackedOSD, "pvc-backed-osd", false, "Whether the OSD backing store in PVC or not")
 	osdStartCmd.Flags().StringVar(&blockPath, "block-path", "", "Block path for the OSD created by ceph-volume")
 	osdStartCmd.Flags().BoolVar(&lvBackedPV, "lv-backed-pv", false, "Whether the PV located on LV")
 
 	// flags for removing OSDs that are unhealthy or otherwise should be purged from the cluster
 	osdRemoveCmd.Flags().StringVar(&osdIDsToRemove, "osd-ids", "", "OSD IDs to remove from the cluster")
+	osdRemoveCmd.Flags().BoolVar(&preservePVC, "preserve-pvc", false, "Whether PVCs for OSDs will be deleted")
 
 	// add the subcommands to the parent osd command
 	osdCmd.AddCommand(osdConfigCmd,
@@ -108,17 +110,18 @@ func addOSDFlags(command *cobra.Command) {
 }
 
 func addOSDConfigFlags(command *cobra.Command) {
-	command.Flags().StringVar(&ownerRefID, "cluster-id", "", "the UID of the cluster CRD that owns this cluster")
+	command.Flags().StringVar(&ownerRefID, "cluster-id", "", "the UID of the cluster CR that owns this cluster")
+	command.Flags().StringVar(&clusterName, "cluster-name", "", "the name of the cluster CR that owns this cluster")
 	command.Flags().StringVar(&cfg.location, "location", "", "location of this node for CRUSH placement")
 	command.Flags().StringVar(&cfg.nodeName, "node-name", os.Getenv("HOSTNAME"), "the host name of the node")
 
 	// OSD store config flags
 	command.Flags().IntVar(&cfg.storeConfig.WalSizeMB, "osd-wal-size", osdcfg.WalDefaultSizeMB, "default size (MB) for OSD write ahead log (WAL) (bluestore)")
 	command.Flags().IntVar(&cfg.storeConfig.DatabaseSizeMB, "osd-database-size", 0, "default size (MB) for OSD database (bluestore)")
-	command.Flags().StringVar(&cfg.storeConfig.StoreType, "osd-store", "", "type of backing OSD store to use (bluestore or filestore)")
 	command.Flags().IntVar(&cfg.storeConfig.OSDsPerDevice, "osds-per-device", 1, "the number of OSDs per device")
 	command.Flags().BoolVar(&cfg.storeConfig.EncryptedDevice, "encrypted-device", false, "whether to encrypt the OSD with dmcrypt")
 	command.Flags().StringVar(&cfg.storeConfig.DeviceClass, "osd-crush-device-class", "", "The device class for all OSDs configured on this node")
+	command.Flags().StringVar(&cfg.storeConfig.InitialWeight, "osd-crush-initial-weight", "", "The initial weight of OSD in TiB units")
 }
 
 func init() {
@@ -186,14 +189,6 @@ func prepareOSD(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var dgs osdcfg.DriveGroupBlobs
-	if driveGroups != "" {
-		err := json.Unmarshal([]byte(driveGroups), &dgs)
-		if err != nil {
-			return errors.Wrap(err, "failed to unmarshal Ceph Drive Groups spec")
-		}
-	}
-
 	var dataDevices []osddaemon.DesiredDevice
 	if osdDataDeviceFilter != "" {
 		if cfg.devices != "" || osdDataDevicePathFilter != "" {
@@ -221,20 +216,23 @@ func prepareOSD(cmd *cobra.Command, args []string) error {
 
 	context := createContext()
 	commonOSDInit(provisionCmd)
-	crushLocation, err := getLocation(context.Clientset)
+	crushLocation, topologyAffinity, err := getLocation(context.Clientset)
 	if err != nil {
 		rook.TerminateFatal(err)
 	}
 	logger.Infof("crush location of osd: %s", crushLocation)
 
 	forceFormat := false
-	ownerRef := opcontroller.ClusterOwnerRef(clusterInfo.Namespace, ownerRefID)
-	clusterInfo.OwnerRef = ownerRef
-	kv := k8sutil.NewConfigMapKVStore(clusterInfo.Namespace, context.Clientset, ownerRef)
-	agent := osddaemon.NewAgent(context, dgs, dataDevices, cfg.metadataDevice, forceFormat,
+
+	ownerRef := opcontroller.ClusterOwnerRef(clusterName, ownerRefID)
+	ownerInfo := k8sutil.NewOwnerInfoWithOwnerRef(&ownerRef, clusterInfo.Namespace)
+	clusterInfo.OwnerInfo = ownerInfo
+	clusterInfo.Context = ctx.Background()
+	kv := k8sutil.NewConfigMapKVStore(clusterInfo.Namespace, context.Clientset, ownerInfo)
+	agent := osddaemon.NewAgent(context, dataDevices, cfg.metadataDevice, forceFormat,
 		cfg.storeConfig, &clusterInfo, cfg.nodeName, kv, cfg.pvcBacked)
 
-	err = osddaemon.Provision(context, agent, crushLocation)
+	err = osddaemon.Provision(context, agent, crushLocation, topologyAffinity)
 	if err != nil {
 		// something failed in the OSD orchestration, update the status map with failure details
 		status := oposd.OrchestrationStatus{
@@ -242,7 +240,7 @@ func prepareOSD(cmd *cobra.Command, args []string) error {
 			Message:      err.Error(),
 			PvcBackedOSD: cfg.pvcBacked,
 		}
-		oposd.UpdateNodeStatus(kv, cfg.nodeName, status)
+		oposd.UpdateNodeOrPVCStatus(kv, cfg.nodeName, status)
 
 		rook.TerminateFatal(err)
 	}
@@ -266,7 +264,7 @@ func removeOSDs(cmd *cobra.Command, args []string) error {
 	context := createContext()
 
 	// Run OSD remove sequence
-	err := osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","))
+	err := osddaemon.RemoveOSDs(context, &clusterInfo, strings.Split(osdIDsToRemove, ","), preservePVC)
 	if err != nil {
 		rook.TerminateFatal(err)
 	}
@@ -281,21 +279,17 @@ func commonOSDInit(cmd *cobra.Command) {
 }
 
 // use zone/region/hostname labels in the crushmap
-func getLocation(clientset kubernetes.Interface) (string, error) {
+func getLocation(clientset kubernetes.Interface) (string, string, error) {
 	// get the value the operator instructed to use as the host name in the CRUSH map
 	hostNameLabel := os.Getenv("ROOK_CRUSHMAP_HOSTNAME")
 
 	rootLabel := os.Getenv(oposd.CrushRootVarName)
 
-	loc, err := oposd.GetLocationWithNode(clientset, os.Getenv(k8sutil.NodeNameEnvVar), rootLabel, hostNameLabel)
+	loc, topologyAffinity, err := oposd.GetLocationWithNode(clientset, os.Getenv(k8sutil.NodeNameEnvVar), rootLabel, hostNameLabel)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return loc, nil
-}
-
-func updateLocationWithNodeLabels(location *[]string, nodeLabels map[string]string) {
-	oposd.UpdateLocationWithNodeLabels(location, nodeLabels)
+	return loc, topologyAffinity, nil
 }
 
 // Parse the devices, which are sent as a JSON-marshalled list of device IDs with a StorageConfig spec
@@ -318,6 +312,7 @@ func parseDevices(devices string) ([]osddaemon.DesiredDevice, error) {
 		d.OSDsPerDevice = cd.StoreConfig.OSDsPerDevice
 		d.DatabaseSizeMB = cd.StoreConfig.DatabaseSizeMB
 		d.DeviceClass = cd.StoreConfig.DeviceClass
+		d.InitialWeight = cd.StoreConfig.InitialWeight
 		d.MetadataDevice = cd.StoreConfig.MetadataDevice
 
 		if d.OSDsPerDevice < 1 {

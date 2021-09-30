@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,23 +70,6 @@ func TestMergeResourceRequirements(t *testing.T) {
 	assert.Equal(t, "1337", result.Requests.Memory().String())
 }
 
-func TestOwnerRefCheck(t *testing.T) {
-	namespace := "ns"
-	resource := &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "myresource",
-			Namespace: namespace,
-		},
-		Data: map[string]string{},
-	}
-	ownerRef := &metav1.OwnerReference{Name: "myref"}
-
-	// test that the ownerref is set
-	SetOwnerRef(&resource.ObjectMeta, ownerRef)
-	require.Equal(t, 1, len(resource.OwnerReferences))
-	assert.Equal(t, ownerRef.Name, resource.OwnerReferences[0].Name)
-}
-
 func TestYamlToContainerResource(t *testing.T) {
 	var validData string = `
 - name: rbdplugin
@@ -119,4 +101,65 @@ func TestYamlToContainerResource(t *testing.T) {
 	res, err = YamlToContainerResource(invalidData)
 	assert.Len(t, res, 0)
 	assert.Error(t, err)
+}
+
+func TestValidateOwner(t *testing.T) {
+	// global-scoped owner
+	ownerRef := &metav1.OwnerReference{}
+	ownerInfo := NewOwnerInfoWithOwnerRef(ownerRef, "")
+	object := &v1.ConfigMap{}
+	err := ownerInfo.validateOwner(object)
+	assert.NoError(t, err)
+
+	// namespaced owner
+	ownerInfo = NewOwnerInfoWithOwnerRef(ownerRef, "test-ns")
+	object = &v1.ConfigMap{}
+	err = ownerInfo.validateOwner(object)
+	assert.Error(t, err)
+	object = &v1.ConfigMap{}
+	object.Namespace = "test-ns"
+	err = ownerInfo.validateOwner(object)
+	assert.NoError(t, err)
+	object.Namespace = "different-ns"
+	err = ownerInfo.validateOwner(object)
+	assert.Error(t, err)
+}
+
+func TestValidateController(t *testing.T) {
+	controllerRef := &metav1.OwnerReference{UID: "test-id"}
+	ownerInfo := NewOwnerInfoWithOwnerRef(controllerRef, "")
+	object := &v1.ConfigMap{}
+	err := ownerInfo.validateController(object)
+	assert.NoError(t, err)
+	err = ownerInfo.SetControllerReference(object)
+	assert.NoError(t, err)
+	err = ownerInfo.validateController(object)
+	assert.NoError(t, err)
+	err = ownerInfo.SetControllerReference(object)
+	assert.NoError(t, err)
+	newControllerRef := &metav1.OwnerReference{UID: "different-id"}
+	newOwnerInfo := NewOwnerInfoWithOwnerRef(newControllerRef, "")
+	err = newOwnerInfo.validateController(object)
+	assert.Error(t, err)
+}
+
+func TestSetOwnerReference(t *testing.T) {
+	info := OwnerInfo{
+		ownerRef: &metav1.OwnerReference{Name: "test-id"},
+	}
+	object := v1.ConfigMap{}
+	err := info.SetOwnerReference(&object)
+	assert.NoError(t, err)
+	assert.Equal(t, object.GetOwnerReferences(), []metav1.OwnerReference{*info.ownerRef})
+
+	err = info.SetOwnerReference(&object)
+	assert.NoError(t, err)
+	assert.Equal(t, object.GetOwnerReferences(), []metav1.OwnerReference{*info.ownerRef})
+
+	info2 := OwnerInfo{
+		ownerRef: &metav1.OwnerReference{Name: "test-id-2"},
+	}
+	err = info2.SetOwnerReference(&object)
+	assert.NoError(t, err)
+	assert.Equal(t, object.GetOwnerReferences(), []metav1.OwnerReference{*info.ownerRef, *info2.ownerRef})
 }

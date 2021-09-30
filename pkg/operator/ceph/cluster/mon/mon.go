@@ -20,7 +20,6 @@ limitations under the License.
 package mon
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -33,9 +32,7 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"github.com/rook/rook/pkg/operator/ceph/config"
@@ -120,7 +117,7 @@ type Cluster struct {
 	waitForStart       bool
 	monTimeoutList     map[string]time.Time
 	mapping            *Mapping
-	ownerRef           metav1.OwnerReference
+	ownerInfo          *k8sutil.OwnerInfo
 	csiConfigMutex     *sync.Mutex
 	isUpgrade          bool
 	arbiterMon         string
@@ -165,7 +162,7 @@ type SchedulingResult struct {
 }
 
 // New creates an instance of a mon cluster
-func New(context *clusterd.Context, namespace string, spec cephv1.ClusterSpec, ownerRef metav1.OwnerReference, csiConfigMutex *sync.Mutex) *Cluster {
+func New(context *clusterd.Context, namespace string, spec cephv1.ClusterSpec, ownerInfo *k8sutil.OwnerInfo, csiConfigMutex *sync.Mutex) *Cluster {
 	return &Cluster{
 		context:        context,
 		spec:           spec,
@@ -176,20 +173,22 @@ func New(context *clusterd.Context, namespace string, spec cephv1.ClusterSpec, o
 		mapping: &Mapping{
 			Schedule: map[string]*MonScheduleInfo{},
 		},
-		ownerRef:       ownerRef,
+		ownerInfo:      ownerInfo,
 		csiConfigMutex: csiConfigMutex,
 	}
 }
 
 // Start begins the process of running a cluster of Ceph mons.
 func (c *Cluster) Start(clusterInfo *cephclient.ClusterInfo, rookVersion string, cephVersion cephver.CephVersion, spec cephv1.ClusterSpec) (*cephclient.ClusterInfo, error) {
-
 	// Only one goroutine can orchestrate the mons at a time
 	c.acquireOrchestrationLock()
 	defer c.releaseOrchestrationLock()
 
-	clusterInfo.OwnerRef = c.ownerRef
+	clusterInfo.OwnerInfo = c.ownerInfo
 	c.ClusterInfo = clusterInfo
+	if c.ClusterInfo.Context == nil {
+		panic("nil context")
+	}
 	c.rookVersion = rookVersion
 	c.spec = spec
 
@@ -201,7 +200,7 @@ func (c *Cluster) Start(clusterInfo *cephclient.ClusterInfo, rookVersion string,
 	// Validate pod's memory if specified
 	err := controller.CheckPodMemory(cephv1.ResourcesKeyMon, cephv1.GetMonResources(c.spec.Resources), cephMonPodMinimumMemory)
 	if err != nil {
-		return nil, errors.Wrap(err, "error checking pod memory")
+		return nil, errors.Wrap(err, "failed to check pod memory")
 	}
 
 	logger.Infof("start running mons")
@@ -235,7 +234,7 @@ func (c *Cluster) startMons(targetCount int) error {
 	// only once and do it as early as possible in the mon orchestration.
 	setConfigsNeedsRetry := false
 	if existingCount > 0 {
-		err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+		err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 		if err != nil {
 			// If we fail here, it could be because the mons are not healthy, and this might be
 			// fixed by updating the mon deployments. Instead of returning error here, log a
@@ -248,11 +247,9 @@ func (c *Cluster) startMons(targetCount int) error {
 	if existingCount < len(mons) {
 		// Start the new mons one at a time
 		for i := existingCount; i < targetCount; i++ {
-			// Check whether we need to cancel the orchestration
-			if err := controller.CheckForCancelledOrchestration(c.context); err != nil {
-				return err
+			if c.ClusterInfo.Context.Err() != nil {
+				return c.ClusterInfo.Context.Err()
 			}
-
 			if err := c.ensureMonsRunning(mons, i, targetCount, true); err != nil {
 				return err
 			}
@@ -261,7 +258,7 @@ func (c *Cluster) startMons(targetCount int) error {
 			// values in the config database. Do this only when the existing count is zero so that
 			// this is only done once when the cluster is created.
 			if existingCount == 0 {
-				err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+				err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 				if err != nil {
 					return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after creating the first mon")
 				}
@@ -269,7 +266,7 @@ func (c *Cluster) startMons(targetCount int) error {
 				// Or if we need to retry, only do this when we are on the first iteration of the
 				// loop. This could be in the same if statement as above, but separate it to get a
 				// different error message.
-				err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+				err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 				if err != nil {
 					return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after updating the existing mons")
 				}
@@ -283,7 +280,7 @@ func (c *Cluster) startMons(targetCount int) error {
 		}
 
 		if setConfigsNeedsRetry {
-			err := config.SetDefaultConfigs(c.context, c.ClusterInfo, c.spec)
+			err := config.SetOrRemoveDefaultConfigs(c.context, c.ClusterInfo, c.spec)
 			if err != nil {
 				return errors.Wrap(err, "failed to set Rook and/or user-defined Ceph config options after forcefully updating the existing mons")
 			}
@@ -298,6 +295,11 @@ func (c *Cluster) startMons(targetCount int) error {
 
 	logger.Debugf("mon endpoints used are: %s", FlattenMonEndpoints(c.ClusterInfo.Monitors))
 
+	// reconcile mon PDB
+	if err := c.reconcileMonPDB(); err != nil {
+		return errors.Wrap(err, "failed to reconcile mon PDB")
+	}
+
 	// Check if there are orphaned mon resources that should be cleaned up at the end of a reconcile.
 	// There may be orphaned resources if a mon failover was aborted.
 	c.removeOrphanMonResources()
@@ -306,17 +308,13 @@ func (c *Cluster) startMons(targetCount int) error {
 }
 
 func (c *Cluster) configureStretchCluster(mons []*monConfig) error {
-	if err := c.assignStretchMonsToZones(mons); err != nil {
-		return errors.Wrap(err, "failed to assign mons to zones")
-	}
-
 	// Enable the mon connectivity strategy
-	if err := client.EnableStretchElectionStrategy(c.context, c.ClusterInfo); err != nil {
+	if err := cephclient.EnableStretchElectionStrategy(c.context, c.ClusterInfo); err != nil {
 		return errors.Wrap(err, "failed to enable stretch cluster")
 	}
 
 	// Create the default crush rule for stretch clusters, that by default will also apply to all pools
-	if err := client.CreateDefaultStretchCrushRule(c.context, c.ClusterInfo, &c.spec, c.stretchFailureDomainName()); err != nil {
+	if err := cephclient.CreateDefaultStretchCrushRule(c.context, c.ClusterInfo, &c.spec, c.stretchFailureDomainName()); err != nil {
 		return errors.Wrap(err, "failed to create default stretch rule")
 	}
 
@@ -339,51 +337,12 @@ func (c *Cluster) isArbiterZone(zone string) bool {
 	return c.getArbiterZone() == zone
 }
 
-func (c *Cluster) assignStretchMonsToZones(mons []*monConfig) error {
-	arbiterZone := c.getArbiterZone()
-
-	// Get the mon dump to see if the zones are already applied to the mons
-	monDump, err := client.GetMonDump(c.context, c.ClusterInfo)
-	if err != nil {
-		return errors.Wrap(err, "failed to detect if stretch mons are already assigned to zones")
-	}
-
-	// Set the location for each mon
-	domainName := c.stretchFailureDomainName()
-	for _, mon := range mons {
-		if mon.Zone == arbiterZone {
-			// remember the arbiter mon to be set later in the reconcile after the OSDs are configured
-			c.arbiterMon = mon.DaemonName
-		}
-		// Check if the zone is already set on the mon
-		alreadySet := false
-		for _, monInfo := range monDump.Mons {
-			if monInfo.Name == mon.DaemonName {
-				desiredLocation := fmt.Sprintf("{%s=%s}", domainName, mon.Zone)
-				if monInfo.CrushLocation == desiredLocation {
-					alreadySet = true
-				}
-				break
-			}
-		}
-		if alreadySet {
-			logger.Infof("mon %q stretch domain %q is already set to %q", mon.DaemonName, domainName, mon.Zone)
-			continue
-		}
-		logger.Infof("setting mon %q to stretch %s=%s", mon.DaemonName, domainName, mon.Zone)
-		if err := client.SetMonStretchZone(c.context, c.ClusterInfo, mon.DaemonName, domainName, mon.Zone); err != nil {
-			return errors.Wrapf(err, "failed to set mon %q zone", mon.DaemonName)
-		}
-	}
-	return nil
-}
-
 func (c *Cluster) ConfigureArbiter() error {
 	if c.arbiterMon == "" {
 		return errors.New("arbiter not specified for the stretch cluster")
 	}
 
-	monDump, err := client.GetMonDump(c.context, c.ClusterInfo)
+	monDump, err := cephclient.GetMonDump(c.context, c.ClusterInfo)
 	if err != nil {
 		logger.Warningf("attempting to enable arbiter after failed to detect if already enabled. %v", err)
 	} else if monDump.StretchMode {
@@ -406,7 +365,7 @@ func (c *Cluster) ConfigureArbiter() error {
 	}
 
 	// Set the mon tiebreaker
-	if err := client.SetMonStretchTiebreaker(c.context, c.ClusterInfo, c.arbiterMon, failureDomain); err != nil {
+	if err := cephclient.SetMonStretchTiebreaker(c.context, c.ClusterInfo, c.arbiterMon, failureDomain); err != nil {
 		return errors.Wrap(err, "failed to set mon tiebreaker")
 	}
 
@@ -429,7 +388,7 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 		}
 	}
 
-	crushMap, err := client.GetCrushMap(c.context, c.ClusterInfo)
+	crushMap, err := cephclient.GetCrushMap(c.context, c.ClusterInfo)
 	if err != nil {
 		return false, errors.Wrap(err, "failed to get crush map")
 	}
@@ -498,11 +457,6 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 		return errors.Wrap(err, "failed to save mons")
 	}
 
-	// make sure we have the connection info generated so connections can happen
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return err
-	}
-
 	// Start the deployment
 	if err := c.startDeployments(mons[0:expectedMonCount], requireAllInQuorum); err != nil {
 		return errors.Wrap(err, "failed to start mon pods")
@@ -516,21 +470,23 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 func (c *Cluster) initClusterInfo(cephVersion cephver.CephVersion) error {
 	var err error
 
+	context := c.ClusterInfo.Context
 	// get the cluster info from secret
-	c.ClusterInfo, c.maxMonID, c.mapping, err = CreateOrLoadClusterInfo(c.context, c.Namespace, &c.ownerRef)
+	c.ClusterInfo, c.maxMonID, c.mapping, err = CreateOrLoadClusterInfo(c.context, context, c.Namespace, c.ownerInfo)
 	if err != nil {
 		return errors.Wrap(err, "failed to get cluster info")
 	}
 
 	c.ClusterInfo.CephVersion = cephVersion
-	c.ClusterInfo.OwnerRef = c.ownerRef
+	c.ClusterInfo.OwnerInfo = c.ownerInfo
+	c.ClusterInfo.Context = context
 
 	// save cluster monitor config
 	if err = c.saveMonConfig(); err != nil {
 		return errors.Wrap(err, "failed to save mons")
 	}
 
-	k := keyring.GetSecretStore(c.context, c.ClusterInfo, &c.ownerRef)
+	k := keyring.GetSecretStore(c.context, c.ClusterInfo, c.ownerInfo)
 	// store the keyring which all mons share
 	if err := k.CreateOrUpdate(keyringStoreName, c.genMonSharedKeyring()); err != nil {
 		return errors.Wrap(err, "failed to save mon keyring secret")
@@ -580,8 +536,7 @@ func (c *Cluster) clusterInfoToMonConfig(excludedMon string) []*monConfig {
 			Port:         cephutil.GetPortFromEndpoint(monitor.Endpoint),
 			PublicIP:     cephutil.GetIPFromEndpoint(monitor.Endpoint),
 			Zone:         zone,
-			DataPathMap: config.NewStatefulDaemonDataPathMap(
-				c.spec.DataDirHostPath, dataDirRelativeHostPath(monitor.Name), config.MonType, monitor.Name, c.Namespace),
+			DataPathMap:  config.NewStatefulDaemonDataPathMap(c.spec.DataDirHostPath, dataDirRelativeHostPath(monitor.Name), config.MonType, monitor.Name, c.Namespace),
 		})
 	}
 	return mons
@@ -640,7 +595,6 @@ func resourceName(name string) string {
 // scheduleMonitor selects a node for a monitor deployment.
 // see startMon() and design/ceph/ceph-mon-pv.md for additional details.
 func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
-	ctx := context.TODO()
 	// build the canary deployment.
 	d, err := c.makeDeployment(mon, true)
 	if err != nil {
@@ -654,14 +608,15 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 	// to modify the storage by instead running an innocuous command.
 	d.Spec.Template.Spec.InitContainers = []v1.Container{}
 	d.Spec.Template.Spec.Containers[0].Image = c.rookVersion
-	d.Spec.Template.Spec.Containers[0].Command = []string{"/tini"}
-	d.Spec.Template.Spec.Containers[0].Args = []string{"--", "sleep", "3600"}
+	d.Spec.Template.Spec.Containers[0].Command = []string{"sleep"} // sleep responds to signals so we don't need to wrap it
+	d.Spec.Template.Spec.Containers[0].Args = []string{"3600"}
 	// remove the liveness probe on the canary pod
 	d.Spec.Template.Spec.Containers[0].LivenessProbe = nil
 
 	// setup affinity settings for pod scheduling
 	p := c.getMonPlacement(mon.Zone)
-	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+	p.ApplyToPodSpec(&d.Spec.Template.Spec)
+	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
 		map[string]string{k8sutil.AppAttr: AppName}, nil)
 
 	// setup storage on the canary since scheduling will be affected when
@@ -676,17 +631,17 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 		// to the real monitor deployment.
 		pvc, err := c.makeDeploymentPVC(mon, true)
 		if err != nil {
-			return nil, errors.Wrapf(err, "sched-mon: failed to make monitor %s pvc", d.Name)
+			return nil, errors.Wrapf(err, "failed to make monitor %s pvc", d.Name)
 		}
 
-		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(c.ClusterInfo.Context, pvc, metav1.CreateOptions{})
 		if err == nil {
-			logger.Infof("sched-mon: created canary monitor %s pvc %s", d.Name, pvc.Name)
+			logger.Infof("created canary monitor %s pvc %s", d.Name, pvc.Name)
 		} else {
 			if kerrors.IsAlreadyExists(err) {
-				logger.Debugf("sched-mon: creating mon %s pvc %s: already exists.", d.Name, pvc.Name)
+				logger.Debugf("creating mon %s pvc %s: already exists.", d.Name, pvc.Name)
 			} else {
-				return nil, errors.Wrapf(err, "sched-mon: error creating mon %s pvc %s", d.Name, pvc.Name)
+				return nil, errors.Wrapf(err, "failed to create mon %s pvc %s", d.Name, pvc.Name)
 			}
 		}
 
@@ -699,25 +654,28 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 	// already exists it may have been scheduled with a different crd config.
 	createdDeployment := false
 	for i := 0; i < canaryRetries; i++ {
-		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(ctx, d, metav1.CreateOptions{})
+		if c.ClusterInfo.Context.Err() != nil {
+			return nil, c.ClusterInfo.Context.Err()
+		}
+		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(c.ClusterInfo.Context, d, metav1.CreateOptions{})
 		if err == nil {
 			createdDeployment = true
-			logger.Infof("sched-mon: created canary deployment %s", d.Name)
+			logger.Infof("created canary deployment %s", d.Name)
 			break
 		} else if kerrors.IsAlreadyExists(err) {
 			if err := k8sutil.DeleteDeployment(c.context.Clientset, c.Namespace, d.Name); err != nil {
-				return nil, errors.Wrapf(err, "sched-mon: error deleting canary deployment %s", d.Name)
+				return nil, errors.Wrapf(err, "failed to delete canary deployment %s", d.Name)
 			}
-			logger.Infof("sched-mon: deleted existing canary deployment %s", d.Name)
+			logger.Infof("deleted existing canary deployment %s", d.Name)
 			time.Sleep(time.Second * canaryRetryDelaySeconds)
 		} else {
-			return nil, errors.Wrapf(err, "sched-mon: error creating canary monitor deployment %s", d.Name)
+			return nil, errors.Wrapf(err, "failed to create canary monitor deployment %s", d.Name)
 		}
 	}
 
 	// failed after retrying
 	if !createdDeployment {
-		return nil, errors.Errorf("sched-mon: failed to create canary deployment %s", d.Name)
+		return nil, errors.Errorf("failed to create canary deployment %s", d.Name)
 	}
 
 	// caller should arrange for the deployment to be removed
@@ -725,12 +683,12 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 }
 
 // GetMonPlacement returns the placement for the MON service
-func (c *Cluster) getMonPlacement(zone string) rookv1.Placement {
+func (c *Cluster) getMonPlacement(zone string) cephv1.Placement {
 	// If the mon is the arbiter in a stretch cluster and its placement is specified, return it
 	// without merging with the "all" placement so it can be handled separately from all other daemons
 	if c.isArbiterZone(zone) {
 		p := cephv1.GetArbiterPlacement(c.spec.Placement)
-		noPlacement := rookv1.Placement{}
+		noPlacement := cephv1.Placement{}
 		if !reflect.DeepEqual(p, noPlacement) {
 			// If the arbiter placement was specified, go ahead and use it.
 			return p
@@ -741,12 +699,14 @@ func (c *Cluster) getMonPlacement(zone string) rookv1.Placement {
 }
 
 func realWaitForMonitorScheduling(c *Cluster, d *apps.Deployment) (SchedulingResult, error) {
-	ctx := context.TODO()
 	// target node decision, and deployment/pvc to cleanup
 	result := SchedulingResult{}
 
 	// wait for the scheduler to make a placement decision
 	for i := 0; i < canaryRetries; i++ {
+		if c.ClusterInfo.Context.Err() != nil {
+			return result, c.ClusterInfo.Context.Err()
+		}
 		if i > 0 {
 			time.Sleep(time.Second * canaryRetryDelaySeconds)
 		}
@@ -755,42 +715,45 @@ func realWaitForMonitorScheduling(c *Cluster, d *apps.Deployment) (SchedulingRes
 			LabelSelector: labels.Set(d.Spec.Selector.MatchLabels).String(),
 		}
 
-		pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(ctx, listOptions)
+		pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(c.ClusterInfo.Context, listOptions)
 		if err != nil {
-			return result, errors.Wrapf(err, "sched-mon: error listing canary pods %s", d.Name)
+			return result, errors.Wrapf(err, "failed to list canary pods %s", d.Name)
 		}
 
 		if len(pods.Items) == 0 {
-			logger.Infof("sched-mon: waiting for canary pod creation %s", d.Name)
+			logger.Infof("waiting for canary pod creation %s", d.Name)
 			continue
 		}
 
 		pod := pods.Items[0]
 		if pod.Spec.NodeName == "" {
-			logger.Debugf("sched-mon: monitor %s canary pod %s not yet scheduled", d.Name, pod.Name)
+			logger.Debugf("monitor %s canary pod %s not yet scheduled", d.Name, pod.Name)
 			continue
 		}
 
-		node, err := c.context.Clientset.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+		node, err := c.context.Clientset.CoreV1().Nodes().Get(c.ClusterInfo.Context, pod.Spec.NodeName, metav1.GetOptions{})
 		if err != nil {
-			return result, errors.Wrapf(err, "sched-mon: error getting node %s", pod.Spec.NodeName)
+			return result, errors.Wrapf(err, "failed to get node %s", pod.Spec.NodeName)
 		}
 
 		result.Node = node
-		logger.Infof("sched-mon: canary monitor deployment %s scheduled to %s", d.Name, node.Name)
+		logger.Infof("canary monitor deployment %s scheduled to %s", d.Name, node.Name)
 		return result, nil
 	}
 
-	return result, errors.New("sched-mon: canary pod scheduling failed retries")
+	return result, errors.New("failed to schedule canary pod(s)")
 }
 
 func (c *Cluster) initMonIPs(mons []*monConfig) error {
 	for _, m := range mons {
+		if c.ClusterInfo.Context.Err() != nil {
+			return c.ClusterInfo.Context.Err()
+		}
 		if c.spec.Network.IsHost() {
 			logger.Infof("setting mon endpoints for hostnetwork mode")
 			node, ok := c.mapping.Schedule[m.DaemonName]
 			if !ok || node == nil {
-				return errors.Errorf("node for mon %q doesn't exist in assignment map", m.DaemonName)
+				return errors.Errorf("failed to found node for mon %q in assignment map", m.DaemonName)
 			}
 			m.PublicIP = node.Address
 		} else {
@@ -809,7 +772,6 @@ func (c *Cluster) initMonIPs(mons []*monConfig) error {
 // Delete mon canary deployments (and associated PVCs) using deployment labels
 // to select this kind of temporary deployments
 func (c *Cluster) removeCanaryDeployments() {
-	ctx := context.TODO()
 	canaryDeployments, err := k8sutil.GetDeployments(c.context.Clientset, c.Namespace, "app=rook-ceph-mon,mon_canary=true")
 	if err != nil {
 		logger.Warningf("failed to get the list of monitor canary deployments. %v", err)
@@ -822,7 +784,7 @@ func (c *Cluster) removeCanaryDeployments() {
 		var gracePeriod int64
 		propagation := metav1.DeletePropagationForeground
 		options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
-		if err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Delete(ctx, canary.Name, *options); err != nil {
+		if err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Delete(c.ClusterInfo.Context, canary.Name, *options); err != nil {
 			logger.Warningf("failed to delete canary monitor deployment %q. %v", canary.Name, err)
 		}
 	}
@@ -845,14 +807,12 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 	// enforced using a node selector, or (2) configuration permits k8s to handle
 	// scheduling for the monitor.
 	for _, mon := range mons {
-		// Check whether we need to cancel the orchestration
-		if err := controller.CheckForCancelledOrchestration(c.context); err != nil {
-			return err
+		if c.ClusterInfo.Context.Err() != nil {
+			return c.ClusterInfo.Context.Err()
 		}
-
 		// scheduling for this monitor has already been completed
 		if _, ok := c.mapping.Schedule[mon.DaemonName]; ok {
-			logger.Debugf("assignmon: mon %s already scheduled", mon.DaemonName)
+			logger.Debugf("mon %s already scheduled", mon.DaemonName)
 			continue
 		}
 
@@ -862,7 +822,7 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 		// before a decision is stored in the node mapping.
 		deployment, err := scheduleMonitor(c, mon)
 		if err != nil {
-			return errors.Wrap(err, "assignmon: error scheduling monitor")
+			return errors.Wrap(err, "failed to schedule monitor")
 		}
 
 		// start waiting for the deployment
@@ -881,7 +841,7 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 
 			nodeChoice := result.Node
 			if nodeChoice == nil {
-				logger.Errorf("assignmon: could not schedule monitor %q", mon.DaemonName)
+				logger.Errorf("failed to schedule monitor %q", mon.DaemonName)
 				failedMonSchedule = true
 				return
 			}
@@ -891,15 +851,15 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 			// directly to a node selector on the monitor pod.
 			var schedule *MonScheduleInfo
 			if c.spec.Network.IsHost() || c.monVolumeClaimTemplate(mon) == nil {
-				logger.Infof("assignmon: mon %s assigned to node %s", mon.DaemonName, nodeChoice.Name)
+				logger.Infof("mon %s assigned to node %s", mon.DaemonName, nodeChoice.Name)
 				schedule, err = getNodeInfoFromNode(*nodeChoice)
 				if err != nil {
-					logger.Errorf("assignmon: couldn't get node info for node %q. %v", nodeChoice.Name, err)
+					logger.Errorf("failed to get node info for node %q. %v", nodeChoice.Name, err)
 					failedMonSchedule = true
 					return
 				}
 			} else {
-				logger.Infof("assignmon: mon %q placement using native scheduler", mon.DaemonName)
+				logger.Infof("mon %q placement using native scheduler", mon.DaemonName)
 			}
 
 			if c.spec.IsStretchCluster() {
@@ -922,7 +882,7 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 		return errors.New("failed to schedule mons")
 	}
 
-	logger.Debug("assignmons: mons have been scheduled")
+	logger.Debug("mons have been scheduled")
 	return nil
 }
 
@@ -946,7 +906,6 @@ func (c *Cluster) monVolumeClaimTemplate(mon *monConfig) *v1.PersistentVolumeCla
 }
 
 func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) error {
-	ctx := context.TODO()
 	if len(mons) == 0 {
 		return errors.New("cannot start 0 mons")
 	}
@@ -956,7 +915,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	// 1) New clusters where we are starting one deployment at a time. We only need to check for quorum once when we add a new mon.
 	// 2) Clusters being restored where no mon deployments are running. We need to start all the deployments before checking quorum.
 	onlyCheckQuorumOnce := false
-	deployments, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", AppName)})
+	deployments, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).List(c.ClusterInfo.Context, metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", AppName)})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			logger.Infof("0 of %d expected mon deployments exist. creating new deployment(s).", len(mons))
@@ -1014,7 +973,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	// Final verification that **all** mons are in quorum
 	// Do not proceed if one monitor is still syncing
 	// Only do this when monitors versions are different so we don't block the orchestration if a mon is down.
-	versions, err := client.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
+	versions, err := cephclient.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
 	if err != nil {
 		logger.Warningf("failed to get ceph daemons versions; this likely means there is no cluster yet. %v", err)
 	} else {
@@ -1046,15 +1005,39 @@ func (c *Cluster) waitForMonsToJoin(mons []*monConfig, requireAllInQuorum bool) 
 }
 
 func (c *Cluster) saveMonConfig() error {
-	ctx := context.TODO()
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mons")
+	}
+
+	// Every time the mon config is updated, must also update the global config so that all daemons
+	// have the most updated version if they restart.
+	if err := config.GetStore(c.context, c.Namespace, c.ownerInfo).CreateOrUpdate(c.ClusterInfo); err != nil {
+		return errors.Wrap(err, "failed to update the global config")
+	}
+
+	// write the latest config to the config dir
+	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
+		return errors.Wrap(err, "failed to write connection config for new mons")
+	}
+
+	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
+		return errors.Wrap(err, "failed to update csi cluster config")
+	}
+
+	return nil
+}
+
+func (c *Cluster) persistExpectedMonDaemons() error {
 	configMap := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      EndpointConfigMapName,
 			Namespace: c.Namespace,
 		},
 	}
-	k8sutil.SetOwnerRef(&configMap.ObjectMeta, &c.ownerRef)
-
+	err := c.ownerInfo.SetControllerReference(configMap)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set owner reference mon configmap %q", configMap.Name)
+	}
 	monMapping, err := json.Marshal(c.mapping)
 	if err != nil {
 		return errors.Wrap(err, "failed to marshal mon mapping")
@@ -1083,39 +1066,22 @@ func (c *Cluster) saveMonConfig() error {
 		csi.ConfigKey: csiConfigValue,
 	}
 
-	if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(ctx, configMap, metav1.CreateOptions{}); err != nil {
+	if _, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Create(c.ClusterInfo.Context, configMap, metav1.CreateOptions{}); err != nil {
 		if !kerrors.IsAlreadyExists(err) {
 			return errors.Wrap(err, "failed to create mon endpoint config map")
 		}
 
 		logger.Debugf("updating config map %s that already exists", configMap.Name)
-		if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(ctx, configMap, metav1.UpdateOptions{}); err != nil {
+		if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(c.ClusterInfo.Context, configMap, metav1.UpdateOptions{}); err != nil {
 			return errors.Wrap(err, "failed to update mon endpoint config map")
 		}
 	}
-
 	logger.Infof("saved mon endpoints to config map %+v", configMap.Data)
-
-	// Every time the mon config is updated, must also update the global config so that all daemons
-	// have the most updated version if they restart.
-	if err := config.GetStore(c.context, c.Namespace, &c.ownerRef).CreateOrUpdate(c.ClusterInfo); err != nil {
-		return errors.Wrap(err, "failed to update the global config")
-	}
-
-	// write the latest config to the config dir
-	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
-		return errors.Wrap(err, "failed to write connection config for new mons")
-	}
-
-	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
-		return errors.Wrap(err, "failed to update csi cluster config")
-	}
-
 	return nil
 }
 
 func (c *Cluster) getStoredMaxMonID() (string, error) {
-	configmap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(context.TODO(), EndpointConfigMapName, metav1.GetOptions{})
+	configmap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(c.ClusterInfo.Context, EndpointConfigMapName, metav1.GetOptions{})
 	if err != nil && !kerrors.IsNotFound(err) {
 		return "", errors.Wrap(err, "could not load maxMonId")
 	}
@@ -1138,7 +1104,7 @@ func (c *Cluster) commitMaxMonID(monName string) error {
 		return errors.Wrapf(err, "invalid mon name %q", monName)
 	}
 
-	configmap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(context.TODO(), EndpointConfigMapName, metav1.GetOptions{})
+	configmap, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(c.ClusterInfo.Context, EndpointConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		return errors.Wrap(err, "failed to find existing mon endpoint config map")
 	}
@@ -1157,7 +1123,7 @@ func (c *Cluster) commitMaxMonID(monName string) error {
 	logger.Infof("updating maxMonID from %d to %d after committing mon %q", existingMax, committedMonID, monName)
 	configmap.Data[MaxMonIDKey] = strconv.Itoa(committedMonID)
 
-	if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(context.TODO(), configmap, metav1.UpdateOptions{}); err != nil {
+	if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(c.ClusterInfo.Context, configmap, metav1.UpdateOptions{}); err != nil {
 		return errors.Wrap(err, "failed to update mon endpoint config map for the maxMonID")
 	}
 	return nil
@@ -1166,13 +1132,22 @@ func (c *Cluster) commitMaxMonID(monName string) error {
 var updateDeploymentAndWait = UpdateCephDeploymentAndWait
 
 func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
+	// Expand mon PVC if storage request for mon has increased in cephcluster crd
+	if c.monVolumeClaimTemplate(m) != nil {
+		desiredPvc, err := c.makeDeploymentPVC(m, false)
+		if err != nil {
+			return errors.Wrapf(err, "failed to make mon %q pvc", d.Name)
+		}
+
+		existingPvc, err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Get(c.ClusterInfo.Context, m.ResourceName, metav1.GetOptions{})
+		if err != nil {
+			return errors.Wrapf(err, "failed to fetch pvc for mon %q", m.ResourceName)
+		}
+		k8sutil.ExpandPVCIfRequired(c.context.Client, desiredPvc, existingPvc)
+	}
+
 	logger.Infof("deployment for mon %s already exists. updating if needed",
 		d.Name)
-
-	// Restart the mon if it is stuck on a failed node
-	if err := c.restartMonIfStuckTerminating(m.DaemonName); err != nil {
-		logger.Error("failed to restart mon if it is stuck", err)
-	}
 
 	err := updateDeploymentAndWait(c.context, c.ClusterInfo, d, config.MonType, m.DaemonName, c.spec.SkipUpgradeChecks, false)
 	if err != nil {
@@ -1213,7 +1188,6 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 //           - if PVC      -> remove node selector, if present
 //
 func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
-	ctx := context.TODO()
 	// check if the monitor deployment already exists. if the deployment does
 	// exist, also determine if it using pvc storage.
 	pvcExists := false
@@ -1230,7 +1204,7 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 		return errors.Wrapf(err, "failed to set annotation for deployment %q", d.Name)
 	}
 
-	existingDeployment, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(ctx, d.Name, metav1.GetOptions{})
+	existingDeployment, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(c.ClusterInfo.Context, d.Name, metav1.GetOptions{})
 	if err == nil {
 		deploymentExists = true
 		pvcExists = controller.DaemonVolumesContainsPVC(existingDeployment.Spec.Template.Spec.Volumes)
@@ -1261,6 +1235,7 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 	}
 	p := c.getMonPlacement(zone)
 
+	p.ApplyToPodSpec(&d.Spec.Template.Spec)
 	if deploymentExists {
 		// the existing deployment may have a node selector. if the cluster
 		// isn't using host networking and the deployment is using pvc storage,
@@ -1269,21 +1244,22 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 		if c.spec.Network.IsHost() || !pvcExists {
 			p.PodAffinity = nil
 			p.PodAntiAffinity = nil
-			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
 				map[string]string{k8sutil.AppAttr: AppName}, existingDeployment.Spec.Template.Spec.NodeSelector)
 		} else {
-			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
+			k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
 				map[string]string{k8sutil.AppAttr: AppName}, nil)
 		}
 		return c.updateMon(m, d)
 	}
 
-	if c.monVolumeClaimTemplate(m) != nil {
+	monVolumeClaim := c.monVolumeClaimTemplate(m)
+	if monVolumeClaim != nil {
 		pvc, err := c.makeDeploymentPVC(m, false)
 		if err != nil {
 			return errors.Wrapf(err, "failed to make mon %s pvc", d.Name)
 		}
-		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(c.ClusterInfo.Context, pvc, metav1.CreateOptions{})
 		if err != nil {
 			if kerrors.IsAlreadyExists(err) {
 				logger.Debugf("cannot create mon %s pvc %s: already exists.", d.Name, pvc.Name)
@@ -1293,18 +1269,21 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 		}
 	}
 
-	if schedule == nil || schedule.Zone != "" {
-		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
-			map[string]string{k8sutil.AppAttr: AppName}, nil)
+	var nodeSelector map[string]string
+	if schedule == nil || (monVolumeClaim != nil && zone != "") {
+		// Schedule the mon according to placement settings, and allow it to be portable among nodes if allowed by the PV
+		nodeSelector = nil
 	} else {
+		// Schedule the mon on a specific host if specified, or else allow it to be portable according to the PV
 		p.PodAffinity = nil
 		p.PodAntiAffinity = nil
-		k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, p, requiredDuringScheduling(&c.spec),
-			map[string]string{k8sutil.AppAttr: AppName}, map[string]string{v1.LabelHostname: schedule.Hostname})
+		nodeSelector = map[string]string{v1.LabelHostname: schedule.Hostname}
 	}
+	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), v1.LabelHostname,
+		map[string]string{k8sutil.AppAttr: AppName}, nodeSelector)
 
 	logger.Debugf("Starting mon: %+v", d.Name)
-	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(ctx, d, metav1.CreateOptions{})
+	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(c.ClusterInfo.Context, d, metav1.CreateOptions{})
 	if err != nil {
 		return errors.Wrapf(err, "failed to create mon deployment %s", d.Name)
 	}
@@ -1312,6 +1291,12 @@ func (c *Cluster) startMon(m *monConfig, schedule *MonScheduleInfo) error {
 	// Commit the maxMonID after a mon deployment has been started (and not just scheduled)
 	if err := c.commitMaxMonID(m.DaemonName); err != nil {
 		return errors.Wrapf(err, "failed to commit maxMonId after starting mon %q", m.DaemonName)
+	}
+
+	// Persist the expected list of mons to the configmap in case the operator is interrupted before the mon failover is completed
+	// The config on disk won't be updated until the mon failover is completed
+	if err := c.persistExpectedMonDaemons(); err != nil {
+		return errors.Wrap(err, "failed to persist expected mon daemons")
 	}
 
 	return nil
@@ -1358,7 +1343,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 
 		// get the quorum_status response that contains info about all monitors in the mon map and
 		// their quorum status
-		monQuorumStatusResp, err := client.GetMonQuorumStatus(context, clusterInfo)
+		monQuorumStatusResp, err := cephclient.GetMonQuorumStatus(context, clusterInfo)
 		if err != nil {
 			logger.Debugf("failed to get quorum_status. %v", err)
 			continue
@@ -1389,7 +1374,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 	return nil
 }
 
-func logQuorumMembers(monQuorumStatusResp client.MonStatusResponse) {
+func logQuorumMembers(monQuorumStatusResp cephclient.MonStatusResponse) {
 	var monsInQuorum []string
 	for _, m := range monQuorumStatusResp.MonMap.Mons {
 		if monFoundInQuorum(m.Name, monQuorumStatusResp) {
@@ -1399,9 +1384,9 @@ func logQuorumMembers(monQuorumStatusResp client.MonStatusResponse) {
 	logger.Infof("Monitors in quorum: %v", monsInQuorum)
 }
 
-func monFoundInQuorum(name string, monQuorumStatusResp client.MonStatusResponse) bool {
+func monFoundInQuorum(name string, monQuorumStatusResp cephclient.MonStatusResponse) bool {
 	// first get the initial monitors corresponding mon map entry
-	var monMapEntry *client.MonMapEntry
+	var monMapEntry *cephclient.MonMapEntry
 	for i := range monQuorumStatusResp.MonMap.Mons {
 		if name == monQuorumStatusResp.MonMap.Mons[i].Name {
 			monMapEntry = &monQuorumStatusResp.MonMap.Mons[i]

@@ -21,10 +21,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"testing"
 	"time"
 
-	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/tests/framework/clients"
@@ -33,19 +31,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func checkSkipCSITest(t *testing.T, k8sh *utils.K8sHelper) {
-	if !k8sh.VersionAtLeast("v1.14.0") {
-		logger.Info("Skipping tests as kube version is less than 1.14.0 for the CSI driver")
-		t.Skip()
-	}
-}
 
 func skipSnapshotTest(k8sh *utils.K8sHelper) bool {
 	minVersion := "v1.17.0"
@@ -263,14 +251,10 @@ func blockCSISnapshotTest(helper *clients.TestClient, k8sh *utils.K8sHelper, s s
 // Smoke Test for Block Storage - Test check the following operations on Block Storage in order
 // Create,Mount,Write,Read,Expand,Unmount and Delete.
 func runBlockCSITest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, namespace string) {
-	checkSkipCSITest(s.T(), k8sh)
-
 	podName := "block-test"
 	poolName := "replicapool"
 	storageClassName := "rook-ceph-block"
 	blockName := "block-pv-claim"
-	systemNamespace := installer.SystemNamespace(namespace)
-
 	podNameWithPVRetained := "block-test-retained"
 	poolNameRetained := "replicapoolretained"
 	storageClassNameRetained := "rook-ceph-block-retained"
@@ -287,10 +271,10 @@ func runBlockCSITest(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.
 	assert.Equal(s.T(), 0, len(initBlockImages), "there should not already be any images in the pool")
 
 	logger.Infof("step 1: Create block storage")
-	err := helper.BlockClient.CreateStorageClassAndPVC(true, defaultNamespace, namespace, systemNamespace, poolName, storageClassName, "Delete", blockName, "ReadWriteOnce")
+	err := helper.BlockClient.CreateStorageClassAndPVC(defaultNamespace, poolName, storageClassName, "Delete", blockName, "ReadWriteOnce")
 	require.NoError(s.T(), err)
 	require.NoError(s.T(), retryBlockImageCountCheck(helper, clusterInfo, 1), "Make sure a new block is created")
-	err = helper.BlockClient.CreateStorageClassAndPVC(true, defaultNamespace, namespace, systemNamespace, poolNameRetained, storageClassNameRetained, "Retain", blockNameRetained, "ReadWriteOnce")
+	err = helper.BlockClient.CreateStorageClassAndPVC(defaultNamespace, poolNameRetained, storageClassNameRetained, "Retain", blockNameRetained, "ReadWriteOnce")
 	require.NoError(s.T(), err)
 	require.NoError(s.T(), retryBlockImageCountCheck(helper, clusterInfo, 2), "Make sure another new block is created")
 	logger.Infof("Block Storage created successfully")
@@ -405,7 +389,8 @@ func restartOSDPods(k8sh *utils.K8sHelper, s suite.Suite, namespace string) {
 		options := metav1.DeleteOptions{}
 		err := k8sh.Clientset.CoreV1().Pods(namespace).Delete(ctx, pod.Name, options)
 		assert.NoError(s.T(), err)
-
+	}
+	for _, pod := range pods.Items {
 		logger.Infof("Waiting for osd pod %s to be deleted", pod.Name)
 		deleted := k8sh.WaitUntilPodIsDeleted(pod.Name, namespace)
 		assert.True(s.T(), deleted)
@@ -417,20 +402,18 @@ func restartOSDPods(k8sh *utils.K8sHelper, s suite.Suite, namespace string) {
 	assert.NoError(s.T(), err)
 }
 
-func runBlockCSITestLite(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, clusterNamespace, systemNamespace string, version cephv1.CephVersionSpec) {
-	checkSkipCSITest(s.T(), k8sh)
-
+func runBlockCSITestLite(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, settings *installer.TestCephSettings) {
 	logger.Infof("Block Storage End to End Integration Test - create storageclass,pool and pvc")
-	logger.Infof("Running on Rook Cluster %s", clusterNamespace)
-	clusterInfo := client.AdminClusterInfo(clusterNamespace)
+	logger.Infof("Running on Rook Cluster %s", settings.Namespace)
+	clusterInfo := client.AdminClusterInfo(settings.Namespace)
 	poolName := "rookpool"
 	storageClassName := "rook-ceph-block-lite"
 	blockName := "test-block-claim-lite"
 	podName := "test-pod-lite"
 	defer blockTestDataCleanUp(helper, k8sh, s, clusterInfo, poolName, storageClassName, blockName, podName, true)
-	setupBlockLite(helper, k8sh, s, clusterInfo, systemNamespace, poolName, storageClassName, blockName, podName, version)
+	setupBlockLite(helper, k8sh, s, clusterInfo, poolName, storageClassName, blockName, podName)
 	if !skipSnapshotTest(k8sh) {
-		blockCSISnapshotTest(helper, k8sh, s, storageClassName, clusterNamespace)
+		blockCSISnapshotTest(helper, k8sh, s, storageClassName, settings.Namespace)
 	}
 
 	if !skipCloneTest(k8sh) {
@@ -439,7 +422,7 @@ func runBlockCSITestLite(helper *clients.TestClient, k8sh *utils.K8sHelper, s su
 }
 
 func setupBlockLite(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.Suite, clusterInfo *client.ClusterInfo,
-	systemNamespace, poolName, storageClassName, blockName, podName string, version cephv1.CephVersionSpec) {
+	poolName, storageClassName, blockName, podName string) {
 
 	// Check initial number of blocks
 	initialBlocks, err := helper.BlockClient.ListAllImages(clusterInfo)
@@ -449,7 +432,7 @@ func setupBlockLite(helper *clients.TestClient, k8sh *utils.K8sHelper, s suite.S
 
 	logger.Infof("step : Create Pool,StorageClass and PVC")
 
-	err = helper.BlockClient.CreateStorageClassAndPVC(true, defaultNamespace, clusterInfo.Namespace, systemNamespace, poolName, storageClassName, "Delete", blockName, "ReadWriteOnce")
+	err = helper.BlockClient.CreateStorageClassAndPVC(defaultNamespace, poolName, storageClassName, "Delete", blockName, "ReadWriteOnce")
 	require.NoError(s.T(), err)
 
 	require.True(s.T(), k8sh.WaitUntilPVCIsBound(defaultNamespace, blockName))
@@ -578,102 +561,4 @@ spec:
        readOnly: ` + strconv.FormatBool(readOnly) + `
   restartPolicy: Never
 `
-}
-
-func getBlockStatefulSetAndServiceDefinition(namespace, statefulsetName, podName, StorageClassName string) (*v1.Service, *appsv1.StatefulSet) {
-	service := &v1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      statefulsetName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app": statefulsetName,
-			},
-		},
-		Spec: v1.ServiceSpec{
-			Ports: []v1.ServicePort{
-				{
-					Name: statefulsetName,
-					Port: 80,
-				},
-			},
-			ClusterIP: "None",
-			Selector: map[string]string{
-				"app": statefulsetName,
-			},
-		},
-	}
-
-	var replica int32 = 1
-
-	labels := map[string]string{
-		"app": statefulsetName,
-	}
-
-	statefulSet := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "StatefulSet",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName,
-			Namespace: namespace,
-		},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: statefulsetName,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Replicas: &replica,
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: v1.PodSpec{
-					Containers: []v1.Container{
-						{
-							Name:    statefulsetName,
-							Image:   "busybox",
-							Command: []string{"sleep", "3600"},
-							Ports: []v1.ContainerPort{
-								{
-									ContainerPort: 80,
-									Name:          podName,
-								},
-							},
-							VolumeMounts: []v1.VolumeMount{
-								{
-									Name:      "rookpvc",
-									MountPath: "/tmp/rook",
-								},
-							},
-						},
-					},
-				},
-			},
-			VolumeClaimTemplates: []v1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "rookpvc",
-						Annotations: map[string]string{
-							"volume.beta.kubernetes.io/storage-class": StorageClassName,
-						},
-					},
-					Spec: v1.PersistentVolumeClaimSpec{
-						AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-						Resources: v1.ResourceRequirements{
-							Requests: v1.ResourceList{
-								v1.ResourceStorage: *resource.NewQuantity(1.0, resource.BinarySI),
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	return service, statefulSet
 }

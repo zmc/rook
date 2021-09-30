@@ -24,12 +24,14 @@ import (
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/daemon/util"
 
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	batch "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 )
@@ -40,10 +42,10 @@ const (
 	CmdReporterContainerName = "cmd-reporter"
 
 	// CopyBinariesInitContainerName defines the name of the CmdReporter init container which copies
-	// the 'rook' and 'tini' binaries.
+	// the 'rook' binary.
 	CopyBinariesInitContainerName = "init-copy-binaries"
 
-	// CopyBinariesMountDir defines the dir into which the 'rook' and 'tini' binaries will be copied
+	// CopyBinariesMountDir defines the dir into which the 'rook' binary will be copied
 	// in the CmdReporter job pod's containers.
 	CopyBinariesMountDir = "/rook/copied-binaries"
 )
@@ -64,7 +66,7 @@ type CmdReporter struct {
 
 type cmdReporterCfg struct {
 	clientset    kubernetes.Interface
-	ownerRef     *metav1.OwnerReference
+	ownerInfo    *k8sutil.OwnerInfo
 	appName      string
 	jobName      string
 	jobNamespace string
@@ -83,19 +85,19 @@ type cmdReporterCfg struct {
 // job will be identified with the job name specified. Everything will be created in the job
 // namespace and will be owned by the owner reference given.
 //
-// The Rook image defines the Rook image from which the 'rook' and 'tini' binaries will be taken in
+// The Rook image defines the Rook image from which the 'rook' binary will be taken in
 // order to run the cmd and args in the run image. If the run image is the same as the Rook image,
 // then the command will run without the binaries being copied from the same Rook image.
 func New(
 	clientset kubernetes.Interface,
-	ownerRef *metav1.OwnerReference,
+	ownerInfo *k8sutil.OwnerInfo,
 	appName, jobName, jobNamespace string,
 	cmd, args []string,
 	rookImage, runImage string,
 ) (*CmdReporter, error) {
 	cfg := &cmdReporterCfg{
 		clientset:    clientset,
-		ownerRef:     ownerRef,
+		ownerInfo:    ownerInfo,
 		appName:      appName,
 		jobName:      jobName,
 		jobNamespace: jobNamespace,
@@ -107,8 +109,8 @@ func New(
 
 	// Validate contents of config struct, not inputs to function to catch any developer errors
 	// mis-assigning config items to the struct.
-	if cfg.clientset == nil || cfg.ownerRef == nil {
-		return nil, fmt.Errorf("clientset [%+v] and owner reference [%+v] must be specified", cfg.clientset, cfg.ownerRef)
+	if cfg.clientset == nil || cfg.ownerInfo == nil {
+		return nil, fmt.Errorf("clientset [%+v] and owner info [%+v] must be specified", cfg.clientset, cfg.ownerInfo)
 	}
 	if cfg.appName == "" || cfg.jobName == "" || cfg.jobNamespace == "" {
 		return nil, fmt.Errorf("app name [%s], job name [%s], and job namespace [%s] must be specified", cfg.appName, cfg.jobName, cfg.jobNamespace)
@@ -213,7 +215,7 @@ func (cr *CmdReporter) newWatcher() (watch.Interface, error) {
 		TypeMeta: metav1.TypeMeta{
 			Kind: "ConfigMap",
 		},
-		FieldSelector: fmt.Sprintf("metadata.name=%s", jobName),
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", jobName).String(),
 	}
 
 	list, err := cr.clientset.CoreV1().ConfigMaps(namespace).List(ctx, listOpts)
@@ -315,7 +317,10 @@ func (cr *cmdReporterCfg) initJobSpec() (*batch.Job, error) {
 		},
 	}
 	k8sutil.AddRookVersionLabelToJob(job)
-	k8sutil.SetOwnerRef(&job.ObjectMeta, cr.ownerRef)
+	err = cr.ownerInfo.SetControllerReference(job)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to cmdreporter job %q", job.Name)
+	}
 
 	return job, nil
 }
@@ -346,11 +351,9 @@ func (cr *cmdReporterCfg) container() (*v1.Container, error) {
 		return nil, fmt.Errorf("failed to convert user cmd %+v and args %+v into an argument for '--command'. %+v", cr.cmd, cr.args, err)
 	}
 
-	cmd := []string{
-		path.Join(CopyBinariesMountDir, "tini"), "--", path.Join(CopyBinariesMountDir, "rook"),
-	}
+	cmd := []string{path.Join(CopyBinariesMountDir, "rook")}
 	if !cr.needToCopyBinaries() {
-		// tini -- rook is already the cmd entrypoint if we don't need to copy binaries
+		// rook is already the cmd entrypoint if we don't need to copy binaries
 		cmd = nil
 	}
 

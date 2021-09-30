@@ -22,7 +22,7 @@ import (
 	"os"
 	"testing"
 
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	discoverDaemon "github.com/rook/rook/pkg/daemon/discover"
 	"github.com/rook/rook/pkg/operator/k8sutil"
@@ -68,7 +68,7 @@ func TestStartDiscoveryDaemonset(t *testing.T) {
 	_, err := clientset.CoreV1().Pods("rook-system").Create(ctx, &pod, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	// start a basic cluster
-	err = a.Start(namespace, "rook/rook:myversion", "mysa", false)
+	err = a.Start(ctx, namespace, "rook/rook:myversion", "mysa", false)
 	assert.Nil(t, err)
 
 	// check daemonset parameters
@@ -120,7 +120,7 @@ func TestGetAvailableDevices(t *testing.T) {
 	context := &clusterd.Context{
 		Clientset: clientset,
 	}
-	d := []rookv1.Device{
+	d := []cephv1.Device{
 		{
 			Name: "sdc",
 		},

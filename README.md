@@ -1,7 +1,6 @@
 <img alt="Rook" src="Documentation/media/logo.svg" width="50%" height="50%">
 
 [![CNCF Status](https://img.shields.io/badge/cncf%20status-graduated-blue.svg)](https://www.cncf.io/projects)
-[![Build Status](https://jenkins.rook.io/buildStatus/icon?job=rook/rook/master)](https://jenkins.rook.io/blue/organizations/jenkins/rook%2Frook/activity)
 [![GitHub release](https://img.shields.io/github/release/rook/rook/all.svg)](https://github.com/rook/rook/releases)
 [![Docker Pulls](https://img.shields.io/docker/pulls/rook/ceph)](https://hub.docker.com/u/rook)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rook/rook)](https://goreportcard.com/report/github.com/rook/rook)
@@ -25,7 +24,7 @@ Rook is hosted by the [Cloud Native Computing Foundation](https://cncf.io) (CNCF
 
 ## Getting Started and Documentation
 
-For installation, deployment, and administration, see our [Documentation](https://rook.github.io/docs/rook/master).
+For installation, deployment, and administration, see our [Documentation](https://rook.github.io/docs/rook/latest).
 
 ## Contributing
 
@@ -51,7 +50,8 @@ Please use the following to reach members of the community:
 - Slack: Join our [slack channel](https://slack.rook.io)
 - Forums: [rook-dev](https://groups.google.com/forum/#!forum/rook-dev)
 - Twitter: [@rook_io](https://twitter.com/rook_io)
-- Email: [cncf-rook-info@lists.cncf.io](mailto:cncf-rook-info@lists.cncf.io)
+- Email (general topics): [cncf-rook-info@lists.cncf.io](mailto:cncf-rook-info@lists.cncf.io)
+- Email (security topics): [cncf-rook-security@lists.cncf.io](mailto:cncf-rook-security@lists.cncf.io)
 
 ### Community Meeting
 
@@ -76,16 +76,11 @@ More details about API versioning and status in Kubernetes can be found on the K
 - **Beta:** Support for the overall features will not be dropped, though details may change. Support for upgrading or migrating between versions will be provided, either through automation or manual steps.
 - **Stable:** Features will appear in released software for many subsequent versions and support for upgrading between versions will be provided with software automation in the vast majority of scenarios.
 
-| Name        | Details                                                                                                                                                                                                                                                                                                                | API Group                    | Status                                                                         |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------ |
-| Ceph        | [Ceph](https://ceph.com/) is a distributed storage system that provides file, block and object storage and is deployed in large scale production clusters.                                                                                                                                                             | ceph.rook.io/v1              | Stable                                                                         |
-| Cassandra   | [Cassandra](http://cassandra.apache.org/) is a highly available NoSQL database featuring lightning fast performance, tunable consistency and massive scalability. [Scylla](https://www.scylladb.com) is a close-to-the-hardware rewrite of Cassandra in C++, which enables much lower latencies and higher throughput. | cassandra.rook.io/v1alpha1   | Alpha                                                                          |
-| NFS         | [Network File System (NFS)](https://github.com/nfs-ganesha/nfs-ganesha/wiki) allows remote hosts to mount file systems over a network and interact with those file systems as though they are mounted locally.                                                                                                         | nfs.rook.io/v1alpha1         | Alpha                                                                          |
-| YugabyteDB  | [YugabyteDB](https://docs.yugabyte.com/latest/introduction/) is a high-performance, cloud-native distributed SQL database which can tolerate disk, node, zone and region failures automatically.                                                                                                                       | yugabytedb.rook.io/v1alpha1  | Alpha                                                                          |
-| CockroachDB | [CockroachDB](https://www.cockroachlabs.com/product/cockroachdb/) is a cloud-native SQL database for building global, scalable cloud services that survive disasters.                                                                                                                                                  | cockroachdb.rook.io/v1alpha1 | [Deprecated](https://github.com/rook/rook/issues/6990)*                        |
-| EdgeFS      | [EdgeFS](http://edgefs.io) is high-performance and fault-tolerant decentralized data fabric with access to object, file, NoSQL and block.                                                                                                                                                                              | edgefs.rook.io/v1            | [Deprecated](https://github.com/rook/rook/issues/5823#issuecomment-703834989)* |
+| Name | Details                                                                                                                                                    | API Group       | Status |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------ |
+| Ceph | [Ceph](https://ceph.com/) is a distributed storage system that provides file, block and object storage and is deployed in large scale production clusters. | ceph.rook.io/v1 | Stable |
 
-\* EdgeFS and CockroachDB were removed from Rook in v1.6. See [Rook v1.5](https://rook.github.io/docs/rook/v1.5/) docs if still interested.
+This repo is for the Ceph storage provider. The [Cassandra](https://github.com/rook/cassandra) and [NFS](https://github.com/rook/nfs) storage providers moved to a separate repo to allow for each [storage provider](https://rook.github.io/docs/rook/latest/storage-providers.html) to have an independent development and release schedule.
 
 ### Official Releases
 

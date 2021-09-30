@@ -28,6 +28,7 @@ import (
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -36,18 +37,20 @@ const (
 	// MDS cache memory limit should be set to 50-60% of RAM reserved for the MDS container
 	// MDS uses approximately 125% of the value of mds_cache_memory_limit in RAM.
 	// Eventually we will tune this automatically: http://tracker.ceph.com/issues/36663
-	mdsCacheMemoryLimitFactor = 0.5
+	mdsCacheMemoryLimitFactor    = 0.5
+	mdsCacheMemoryResourceFactor = 0.8
 )
 
-func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) (*apps.Deployment, error) {
+func (c *Cluster) makeDeployment(mdsConfig *mdsConfig, namespace string) (*apps.Deployment, error) {
 
 	mdsContainer := c.makeMdsDaemonContainer(mdsConfig)
 	mdsContainer = config.ConfigureLivenessProbe(cephv1.KeyMds, mdsContainer, c.clusterSpec.HealthCheck)
 
 	podSpec := v1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   mdsConfig.ResourceName,
-			Labels: c.podLabels(mdsConfig, true),
+			Name:      mdsConfig.ResourceName,
+			Namespace: namespace,
+			Labels:    c.podLabels(mdsConfig, true),
 		},
 		Spec: v1.PodSpec{
 			InitContainers: []v1.Container{
@@ -98,8 +101,8 @@ func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) (*apps.Deployment, error)
 
 	if c.clusterSpec.Network.IsHost() {
 		d.Spec.Template.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	} else if c.clusterSpec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(c.clusterSpec.Network.NetworkSpec, &podSpec.ObjectMeta); err != nil {
+	} else if c.clusterSpec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(c.clusterSpec.Network, &podSpec.ObjectMeta); err != nil {
 			return nil, err
 		}
 	}
@@ -175,6 +178,27 @@ func deleteMdsDeployment(clusterdContext *clusterd.Context, namespace string, de
 	options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
 	if err := clusterdContext.Clientset.AppsV1().Deployments(namespace).Delete(ctx, deployment.GetName(), *options); err != nil {
 		return errors.Wrapf(err, "failed to delete mds deployment %s", deployment.GetName())
+	}
+	return nil
+}
+
+func scaleMdsDeployment(clusterdContext *clusterd.Context, namespace string, deployment *apps.Deployment, replicas int32) error {
+	ctx := context.TODO()
+	// scale mds deployment
+	logger.Infof("scaling mds deployment %q to %d replicas", deployment.Name, replicas)
+	d, err := clusterdContext.Clientset.AppsV1().Deployments(namespace).Get(ctx, deployment.GetName(), metav1.GetOptions{})
+	if err != nil {
+		if replicas != 0 && kerrors.IsNotFound(err) {
+			return errors.Wrapf(err, "failed to scale mds deployment %q to %d", deployment.GetName(), replicas)
+		}
+	}
+	// replicas already met requirement
+	if *d.Spec.Replicas == replicas {
+		return nil
+	}
+	*d.Spec.Replicas = replicas
+	if _, err := clusterdContext.Clientset.AppsV1().Deployments(namespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+		return errors.Wrapf(err, "failed to scale mds deployment %s to %d replicas", deployment.GetName(), replicas)
 	}
 	return nil
 }

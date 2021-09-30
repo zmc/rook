@@ -17,8 +17,7 @@ limitations under the License.
 package client
 
 import (
-	"fmt"
-	"strings"
+	"encoding/json"
 	"time"
 
 	"github.com/pkg/errors"
@@ -28,6 +27,42 @@ import (
 var (
 	moduleEnableWaitTime = 5 * time.Second
 )
+
+func CephMgrMap(context *clusterd.Context, clusterInfo *ClusterInfo) (*MgrMap, error) {
+	args := []string{"mgr", "dump"}
+	buf, err := NewCephCommand(context, clusterInfo, args).Run()
+	if err != nil {
+		if len(buf) > 0 {
+			return nil, errors.Wrapf(err, "failed to get mgr dump. %s", string(buf))
+		}
+		return nil, errors.Wrap(err, "failed to get mgr dump")
+	}
+
+	var mgrMap MgrMap
+	if err := json.Unmarshal([]byte(buf), &mgrMap); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal mgr dump")
+	}
+
+	return &mgrMap, nil
+}
+
+func CephMgrStat(context *clusterd.Context, clusterInfo *ClusterInfo) (*MgrStat, error) {
+	args := []string{"mgr", "stat"}
+	buf, err := NewCephCommand(context, clusterInfo, args).Run()
+	if err != nil {
+		if len(buf) > 0 {
+			return nil, errors.Wrapf(err, "failed to get mgr stat. %s", string(buf))
+		}
+		return nil, errors.Wrap(err, "failed to get mgr stat")
+	}
+
+	var mgrStat MgrStat
+	if err := json.Unmarshal([]byte(buf), &mgrStat); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal mgr stat")
+	}
+
+	return &mgrStat, nil
+}
 
 // MgrEnableModule enables a mgr module
 func MgrEnableModule(context *clusterd.Context, clusterInfo *ClusterInfo, name string, force bool) error {
@@ -65,35 +100,6 @@ func MgrDisableModule(context *clusterd.Context, clusterInfo *ClusterInfo, name 
 		return enableDisableBalancerModule(context, clusterInfo, "off")
 	}
 	return enableModule(context, clusterInfo, name, false, "disable")
-}
-
-// MgrSetConfig applies a setting for a single mgr daemon
-func MgrSetConfig(context *clusterd.Context, clusterInfo *ClusterInfo, mgrName string, key, val string, force bool) (bool, error) {
-	var getArgs, setArgs []string
-	mgrID := fmt.Sprintf("mgr.%s", mgrName)
-	getArgs = append(getArgs, "config", "get", mgrID, key)
-	if val == "" {
-		setArgs = append(setArgs, "config", "rm", mgrID, key)
-	} else {
-		setArgs = append(setArgs, "config", "set", mgrID, key, val)
-	}
-	if force {
-		setArgs = append(setArgs, "--force")
-	}
-
-	// Retrieve previous value to monitor changes
-	var prevVal string
-	buf, err := NewCephCommand(context, clusterInfo, getArgs).Run()
-	if err == nil {
-		prevVal = strings.TrimSpace(string(buf))
-	}
-
-	if _, err := NewCephCommand(context, clusterInfo, setArgs).Run(); err != nil {
-		return false, errors.Wrapf(err, "failed to set mgr config key %s to \"%s\"", key, val)
-	}
-
-	hasChanged := prevVal != val
-	return hasChanged, nil
 }
 
 func enableModule(context *clusterd.Context, clusterInfo *ClusterInfo, name string, force bool, action string) error {

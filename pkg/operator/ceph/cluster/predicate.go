@@ -105,7 +105,7 @@ func isHotPlugCM(obj runtime.Object) bool {
 	return false
 }
 
-func watchControllerPredicate(rookContext *clusterd.Context) predicate.Funcs {
+func watchControllerPredicate() predicate.Funcs {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			logger.Debug("create event from a CR")
@@ -116,7 +116,6 @@ func watchControllerPredicate(rookContext *clusterd.Context) predicate.Funcs {
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			logger.Debug("update event from a CR")
 			// resource.Quantity has non-exportable fields, so we use its comparator method
 			resourceQtyComparer := cmp.Comparer(func(x, y resource.Quantity) bool { return x.Cmp(y) == 0 })
 
@@ -134,21 +133,24 @@ func watchControllerPredicate(rookContext *clusterd.Context) predicate.Funcs {
 				if diff != "" {
 					logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
 
-					// If spec Images are different we cancel any on-going orchestration
-					if objOld.Spec.CephVersion.Image != objNew.Spec.CephVersion.Image {
-						// Set the cancellation flag to stop any ongoing orchestration
-						rookContext.RequestCancelOrchestration.Set()
-
-						logger.Info("upgrade requested, cancelling any ongoing orchestration")
+					if objNew.Spec.CleanupPolicy.HasDataDirCleanPolicy() {
+						logger.Infof("skipping orchestration for cluster object %q in namespace %q because its cleanup policy is set. not reloading the manager", objNew.GetName(), objNew.GetNamespace())
+						return false
 					}
 
-					return true
-				} else if objOld.GetDeletionTimestamp() != objNew.GetDeletionTimestamp() {
-					// Set the cancellation flag to stop any ongoing orchestration
-					rookContext.RequestCancelOrchestration.Set()
+					// Stop any ongoing orchestration
+					controller.ReloadManager()
 
+					return false
+
+				} else if !objOld.GetDeletionTimestamp().Equal(objNew.GetDeletionTimestamp()) {
 					logger.Infof("CR %q is going be deleted, cancelling any ongoing orchestration", objNew.Name)
-					return true
+
+					// Stop any ongoing orchestration
+					controller.ReloadManager()
+
+					return false
+
 				} else if objOld.GetGeneration() != objNew.GetGeneration() {
 					logger.Debugf("skipping resource %q update with unchanged spec", objNew.Name)
 				}

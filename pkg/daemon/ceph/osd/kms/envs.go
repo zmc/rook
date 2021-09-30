@@ -19,9 +19,11 @@ package kms
 import (
 	"os"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/vault/api"
+	"github.com/libopenstorage/secrets/vault"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	v1 "k8s.io/api/core/v1"
@@ -51,7 +53,7 @@ func vaultTokenEnvVarFromSecret(tokenSecretName string) v1.EnvVar {
 func vaultTLSEnvVarFromSecret(kmsConfig map[string]string) []v1.EnvVar {
 	vaultTLSEnvVar := []v1.EnvVar{}
 
-	for _, tlsOption := range vaultTLSConnectionDetails {
+	for _, tlsOption := range cephv1.VaultTLSConnectionDetails {
 		tlsSecretName := GetParam(kmsConfig, tlsOption)
 		if tlsSecretName != "" {
 			vaultTLSEnvVar = append(vaultTLSEnvVar, v1.EnvVar{Name: tlsOption, Value: path.Join(EtcVaultDir, tlsSecretPath(tlsOption))})
@@ -64,9 +66,14 @@ func vaultTLSEnvVarFromSecret(kmsConfig map[string]string) []v1.EnvVar {
 // VaultConfigToEnvVar populates the kms config as env variables
 func VaultConfigToEnvVar(spec cephv1.ClusterSpec) []v1.EnvVar {
 	envs := []v1.EnvVar{}
+	backendPath := GetParam(spec.Security.KeyManagementService.ConnectionDetails, vault.VaultBackendPathKey)
+	// Set BACKEND_PATH to the API's default if not passed
+	if backendPath == "" {
+		spec.Security.KeyManagementService.ConnectionDetails[vault.VaultBackendPathKey] = vault.DefaultBackendPath
+	}
 	for k, v := range spec.Security.KeyManagementService.ConnectionDetails {
 		// Skip TLS and token env var to avoid env being set multiple times
-		toSkip := append(vaultTLSConnectionDetails, api.EnvVaultToken)
+		toSkip := append(cephv1.VaultTLSConnectionDetails, api.EnvVaultToken)
 		if client.StringInSlice(k, toSkip) {
 			continue
 		}
@@ -81,7 +88,8 @@ func VaultConfigToEnvVar(spec cephv1.ClusterSpec) []v1.EnvVar {
 
 	logger.Debugf("kms envs are %v", envs)
 
-	return envs
+	// Sort env vars since the input is a map which by nature is unsorted...
+	return sortV1EnvVar(envs)
 }
 
 // ConfigEnvsToMapString returns all the env variables in map from a known KMS
@@ -95,6 +103,15 @@ func ConfigEnvsToMapString() map[string]string {
 			}
 		}
 	}
+
+	return envs
+}
+
+// sortV1EnvVar sorts a list of v1.EnvVar
+func sortV1EnvVar(envs []v1.EnvVar) []v1.EnvVar {
+	sort.SliceStable(envs, func(i, j int) bool {
+		return envs[i].Name < envs[j].Name
+	})
 
 	return envs
 }

@@ -20,13 +20,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookcephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
+	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
@@ -34,18 +32,22 @@ import (
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
-	podIPEnvVar               = "ROOK_POD_IP"
-	serviceMetricName         = "http-metrics"
-	ExternalMgrAppName        = "rook-ceph-mgr-external"
-	ServiceExternalMetricName = "http-external-metrics"
+	podIPEnvVar       = "ROOK_POD_IP"
+	serviceMetricName = "http-metrics"
 )
 
 func (c *Cluster) makeDeployment(mgrConfig *mgrConfig) (*apps.Deployment, error) {
 	logger.Debugf("mgrConfig: %+v", mgrConfig)
+
+	volumes := controller.DaemonVolumes(mgrConfig.DataPathMap, mgrConfig.ResourceName)
+	if c.spec.Network.IsMultus() {
+		adminKeyringVol, _ := keyring.Volume().Admin(), keyring.VolumeMount().Admin()
+		volumes = append(volumes, adminKeyringVol)
+	}
+
 	podSpec := v1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   mgrConfig.ResourceName,
@@ -60,10 +62,24 @@ func (c *Cluster) makeDeployment(mgrConfig *mgrConfig) (*apps.Deployment, error)
 			},
 			ServiceAccountName: serviceAccountName,
 			RestartPolicy:      v1.RestartPolicyAlways,
-			Volumes:            controller.DaemonVolumes(mgrConfig.DataPathMap, mgrConfig.ResourceName),
+			Volumes:            volumes,
 			HostNetwork:        c.spec.Network.IsHost(),
 			PriorityClassName:  cephv1.GetMgrPriorityClassName(c.spec.PriorityClassNames),
 		},
+	}
+	cephv1.GetMgrPlacement(c.spec.Placement).ApplyToPodSpec(&podSpec.Spec)
+
+	// Run the sidecar and require anti affinity only if there are multiple mgrs
+	if c.spec.Mgr.Count > 1 {
+		podSpec.Spec.Containers = append(podSpec.Spec.Containers, c.makeMgrSidecarContainer(mgrConfig))
+		matchLabels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+
+		// Stretch the mgrs across hosts by default, or across a bigger failure domain for stretch clusters
+		topologyKey := v1.LabelHostname
+		if c.spec.IsStretchCluster() {
+			topologyKey = mon.StretchFailureDomainLabel(c.spec)
+		}
+		k8sutil.SetNodeAntiAffinityForPod(&podSpec.Spec, !c.spec.Mgr.AllowMultiplePerNode, topologyKey, matchLabels, nil)
 	}
 
 	// If the log collector is enabled we add the side-car container
@@ -76,32 +92,18 @@ func (c *Cluster) makeDeployment(mgrConfig *mgrConfig) (*apps.Deployment, error)
 	// Replace default unreachable node toleration
 	k8sutil.AddUnreachableNodeToleration(&podSpec.Spec)
 
-	// Only add the dashboard init container if dashboard is enabled
-	if c.spec.Dashboard.Enabled {
-		podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, []v1.Container{
-			c.makeSetServerAddrInitContainer(mgrConfig, "dashboard"),
-		}...)
-	}
-
-	podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, []v1.Container{
-		c.makeSetServerAddrInitContainer(mgrConfig, "prometheus"),
-	}...)
-
-	// ceph config set commands want admin keyring
-	podSpec.Spec.Volumes = append(podSpec.Spec.Volumes,
-		keyring.Volume().Admin())
 	if c.spec.Network.IsHost() {
 		podSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	} else if c.spec.Network.NetworkSpec.IsMultus() {
-		if err := k8sutil.ApplyMultus(c.spec.Network.NetworkSpec, &podSpec.ObjectMeta); err != nil {
+	} else if c.spec.Network.IsMultus() {
+		if err := k8sutil.ApplyMultus(c.spec.Network, &podSpec.ObjectMeta); err != nil {
 			return nil, err
 		}
+		podSpec.Spec.Containers = append(podSpec.Spec.Containers, c.makeCmdProxySidecarContainer(mgrConfig))
 	}
 
 	cephv1.GetMgrAnnotations(c.spec.Annotations).ApplyToObjectMeta(&podSpec.ObjectMeta)
 	c.applyPrometheusAnnotations(&podSpec.ObjectMeta)
 	cephv1.GetMgrLabels(c.spec.Labels).ApplyToObjectMeta(&podSpec.ObjectMeta)
-	cephv1.GetMgrPlacement(c.spec.Placement).ApplyToPodSpec(&podSpec.Spec)
 
 	replicas := int32(1)
 
@@ -125,44 +127,11 @@ func (c *Cluster) makeDeployment(mgrConfig *mgrConfig) (*apps.Deployment, error)
 	k8sutil.AddRookVersionLabelToDeployment(d)
 	cephv1.GetMgrLabels(c.spec.Labels).ApplyToObjectMeta(&d.ObjectMeta)
 	controller.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, d)
-	k8sutil.SetOwnerRef(&d.ObjectMeta, &c.clusterInfo.OwnerRef)
+	err := c.clusterInfo.OwnerInfo.SetControllerReference(d)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to mgr deployment %q", d.Name)
+	}
 	return d, nil
-}
-
-// if we do not need the http bind fix, then we need to be careful. if we are
-// upgrading from a cluster that had the fix applied, then the fix is no longer
-// needed, and furthermore, needs to be removed so that there is not a lingering
-// ceph configuration option that contains an old ip.  by clearing the option,
-// we let ceph bind to its default ANYADDR address.  However, since we don't
-// know which version of Ceph we are may be upgrading _from_ we need to (a)
-// always do this and (b) make sure that all forms of the configuration option
-// are removed (see the init container factory method). Once the minimum
-// supported version of Rook contains the fix, all of this can be removed.
-func (c *Cluster) clearHTTPBindFix() error {
-	// We only need to apply these changes once. No harm in once each time the operator restarts.
-	if c.appliedHttpBind {
-		return nil
-	}
-	for _, daemonID := range c.getDaemonIDs() {
-		for _, module := range []string{"dashboard", "prometheus"} {
-			// there are two forms of the configuration key that might exist which
-			// depends not on the current version, but on the version that may be
-			// the version being upgraded from.
-			if _, err := client.MgrSetConfig(c.context, c.clusterInfo, daemonID,
-				fmt.Sprintf("mgr/%s/server_addr", module), "", false); err != nil {
-				return errors.Wrap(err, "failed to set config for an mgr daemon using v2 format")
-			}
-
-			// this is for the format used in v1.0
-			// https://github.com/rook/rook/commit/11d318fb2f77a6ac9a8f2b9be42c826d3b4a93c3
-			if _, err := client.MgrSetConfig(c.context, c.clusterInfo, daemonID,
-				fmt.Sprintf("mgr/%s/%s/server_addr", module, daemonID), "", false); err != nil {
-				return errors.Wrap(err, "failed to set config for an mgr daemon using v1 format")
-			}
-		}
-	}
-	c.appliedHttpBind = true
-	return nil
 }
 
 func (c *Cluster) makeChownInitContainer(mgrConfig *mgrConfig) v1.Container {
@@ -173,41 +142,6 @@ func (c *Cluster) makeChownInitContainer(mgrConfig *mgrConfig) v1.Container {
 		cephv1.GetMgrResources(c.spec.Resources),
 		controller.PodSecurityContext(),
 	)
-}
-
-func (c *Cluster) makeSetServerAddrInitContainer(mgrConfig *mgrConfig, mgrModule string) v1.Container {
-	// Commands produced for various Ceph major versions (differences highlighted)
-	//  L: config-key set       mgr/<mod>/server_addr $(ROOK_CEPH_<MOD>_SERVER_ADDR)
-	//  M: config     set mgr.a mgr/<mod>/server_addr $(ROOK_CEPH_<MOD>_SERVER_ADDR)
-	//  N: config     set mgr.a mgr/<mod>/server_addr $(ROOK_CEPH_<MOD>_SERVER_ADDR) --force
-	cfgSetArgs := []string{"config", "set"}
-	cfgSetArgs = append(cfgSetArgs, fmt.Sprintf("mgr.%s", mgrConfig.DaemonID))
-	cfgPath := fmt.Sprintf("mgr/%s/%s/server_addr", mgrModule, mgrConfig.DaemonID)
-	cfgSetArgs = append(cfgSetArgs, cfgPath, controller.ContainerEnvVarReference(podIPEnvVar))
-	cfgSetArgs = append(cfgSetArgs, "--force")
-	cfgSetArgs = append(cfgSetArgs, "--verbose")
-
-	container := v1.Container{
-		Name: "init-set-" + strings.ToLower(mgrModule) + "-server-addr",
-		Command: []string{
-			"ceph",
-		},
-		Args: append(
-			controller.AdminFlags(c.clusterInfo),
-			cfgSetArgs...,
-		),
-		Image: c.spec.CephVersion.Image,
-		VolumeMounts: append(
-			controller.DaemonVolumeMounts(mgrConfig.DataPathMap, mgrConfig.ResourceName),
-			keyring.VolumeMount().Admin(),
-		),
-		Env: append(
-			controller.DaemonEnvVars(c.spec.CephVersion.Image),
-			c.cephMgrOrchestratorModuleEnvs()...,
-		),
-		Resources: cephv1.GetMgrResources(c.spec.Resources),
-	}
-	return container
 }
 
 func (c *Cluster) makeMgrDaemonContainer(mgrConfig *mgrConfig) v1.Container {
@@ -250,12 +184,12 @@ func (c *Cluster) makeMgrDaemonContainer(mgrConfig *mgrConfig) v1.Container {
 		),
 		Resources:       cephv1.GetMgrResources(c.spec.Resources),
 		SecurityContext: controller.PodSecurityContext(),
-		LivenessProbe:   getDefaultMgrLivenessProbe(),
+		LivenessProbe:   controller.GenerateLivenessProbeExecDaemon(config.MgrType, mgrConfig.DaemonID),
 		WorkingDir:      config.VarLogCephDir,
 	}
 
 	// If the liveness probe is enabled
-	container = config.ConfigureLivenessProbe(rookcephv1.KeyMgr, container, c.spec.HealthCheck)
+	container = config.ConfigureLivenessProbe(cephv1.KeyMgr, container, c.spec.HealthCheck)
 
 	// If host networking is enabled, we don't need a bind addr that is different from the public addr
 	if !c.spec.Network.IsHost() {
@@ -268,21 +202,60 @@ func (c *Cluster) makeMgrDaemonContainer(mgrConfig *mgrConfig) v1.Container {
 	return container
 }
 
-func getDefaultMgrLivenessProbe() *v1.Probe {
-	return &v1.Probe{
-		Handler: v1.Handler{
-			HTTPGet: &v1.HTTPGetAction{
-				Path: "/",
-				Port: intstr.FromInt(int(DefaultMetricsPort)),
+func (c *Cluster) makeMgrSidecarContainer(mgrConfig *mgrConfig) v1.Container {
+	envVars := []v1.EnvVar{
+		{Name: "ROOK_CLUSTER_ID", Value: string(c.clusterInfo.OwnerInfo.GetUID())},
+		{Name: "ROOK_CLUSTER_NAME", Value: string(c.clusterInfo.NamespacedName().Name)},
+		k8sutil.PodIPEnvVar(k8sutil.PrivateIPEnvVar),
+		k8sutil.PodIPEnvVar(k8sutil.PublicIPEnvVar),
+		mon.PodNamespaceEnvVar(c.clusterInfo.Namespace),
+		mon.EndpointEnvVar(),
+		mon.SecretEnvVar(),
+		mon.CephUsernameEnvVar(),
+		mon.CephSecretEnvVar(),
+		k8sutil.ConfigOverrideEnvVar(),
+		{Name: "ROOK_FSID", ValueFrom: &v1.EnvVarSource{
+			SecretKeyRef: &v1.SecretKeySelector{
+				LocalObjectReference: v1.LocalObjectReference{Name: "rook-ceph-mon"},
+				Key:                  "fsid",
 			},
-		},
-		InitialDelaySeconds: 60,
+		}},
+		{Name: "ROOK_DASHBOARD_ENABLED", Value: strconv.FormatBool(c.spec.Dashboard.Enabled)},
+		{Name: "ROOK_MONITORING_ENABLED", Value: strconv.FormatBool(c.spec.Monitoring.Enabled)},
+		{Name: "ROOK_UPDATE_INTERVAL", Value: "15s"},
+		{Name: "ROOK_DAEMON_NAME", Value: mgrConfig.DaemonID},
+		{Name: "ROOK_CEPH_VERSION", Value: "ceph version " + c.clusterInfo.CephVersion.String()},
+	}
+
+	return v1.Container{
+		Args:      []string{"ceph", "mgr", "watch-active"},
+		Name:      "watch-active",
+		Image:     c.rookVersion,
+		Env:       envVars,
+		Resources: cephv1.GetMgrSidecarResources(c.spec.Resources),
 	}
 }
 
+func (c *Cluster) makeCmdProxySidecarContainer(mgrConfig *mgrConfig) v1.Container {
+	_, adminKeyringVolMount := keyring.Volume().Admin(), keyring.VolumeMount().Admin()
+	container := v1.Container{
+		Name:            client.CommandProxyInitContainerName,
+		Command:         []string{"sleep"},
+		Args:            []string{"infinity"},
+		Image:           c.spec.CephVersion.Image,
+		VolumeMounts:    append(controller.DaemonVolumeMounts(mgrConfig.DataPathMap, mgrConfig.ResourceName), adminKeyringVolMount),
+		Env:             append(controller.DaemonEnvVars(c.spec.CephVersion.Image), v1.EnvVar{Name: "CEPH_ARGS", Value: fmt.Sprintf("-m $(ROOK_CEPH_MON_HOST) -k %s", keyring.VolumeMount().AdminKeyringFilePath())}),
+		Resources:       cephv1.GetMgrResources(c.spec.Resources),
+		SecurityContext: controller.PodSecurityContext(),
+	}
+
+	return container
+}
+
 // MakeMetricsService generates the Kubernetes service object for the monitoring service
-func (c *Cluster) MakeMetricsService(name, servicePortMetricName string) *v1.Service {
-	labels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+func (c *Cluster) MakeMetricsService(name, activeDaemon, servicePortMetricName string) (*v1.Service, error) {
+	labels := c.selectorLabels(activeDaemon)
+
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -302,16 +275,20 @@ func (c *Cluster) MakeMetricsService(name, servicePortMetricName string) *v1.Ser
 	}
 
 	// If the cluster is external we don't need to add the selector
-	if name != ExternalMgrAppName {
+	if name != controller.ExternalMgrAppName {
 		svc.Spec.Selector = labels
 	}
 
-	k8sutil.SetOwnerRef(&svc.ObjectMeta, &c.clusterInfo.OwnerRef)
-	return svc
+	err := c.clusterInfo.OwnerInfo.SetControllerReference(svc)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to monitoring service %q", svc.Name)
+	}
+	return svc, nil
 }
 
-func (c *Cluster) makeDashboardService(name string) *v1.Service {
-	labels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+func (c *Cluster) makeDashboardService(name, activeDaemon string) (*v1.Service, error) {
+	labels := c.selectorLabels(activeDaemon)
+
 	portName := "https-dashboard"
 	if !c.spec.Dashboard.SSL {
 		portName = "http-dashboard"
@@ -334,8 +311,11 @@ func (c *Cluster) makeDashboardService(name string) *v1.Service {
 			},
 		},
 	}
-	k8sutil.SetOwnerRef(&svc.ObjectMeta, &c.clusterInfo.OwnerRef)
-	return svc
+	err := c.clusterInfo.OwnerInfo.SetControllerReference(svc)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to set owner reference to dashboard service %q", svc.Name)
+	}
+	return svc, nil
 }
 
 func (c *Cluster) getPodLabels(daemonName string, includeNewLabels bool) map[string]string {
@@ -347,7 +327,7 @@ func (c *Cluster) getPodLabels(daemonName string, includeNewLabels bool) map[str
 
 func (c *Cluster) applyPrometheusAnnotations(objectMeta *metav1.ObjectMeta) {
 	if len(cephv1.GetMgrAnnotations(c.spec.Annotations)) == 0 {
-		t := rookv1.Annotations{
+		t := cephv1.Annotations{
 			"prometheus.io/scrape": "true",
 			"prometheus.io/port":   strconv.Itoa(int(DefaultMetricsPort)),
 		}
@@ -360,37 +340,17 @@ func (c *Cluster) cephMgrOrchestratorModuleEnvs() []v1.EnvVar {
 	operatorNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
 	envVars := []v1.EnvVar{
 		{Name: "ROOK_OPERATOR_NAMESPACE", Value: operatorNamespace},
-		{Name: "ROOK_CEPH_CLUSTER_CRD_VERSION", Value: rookcephv1.Version},
+		{Name: "ROOK_CEPH_CLUSTER_CRD_VERSION", Value: cephv1.Version},
 		{Name: "ROOK_CEPH_CLUSTER_CRD_NAME", Value: c.clusterInfo.NamespacedName().Name},
 		k8sutil.PodIPEnvVar(podIPEnvVar),
 	}
 	return envVars
 }
 
-// CreateExternalMetricsEndpoints creates external metric endpoint
-func CreateExternalMetricsEndpoints(namespace string, monitoringSpec cephv1.MonitoringSpec, ownerRef metav1.OwnerReference) *v1.Endpoints {
-	labels := controller.AppLabels(AppName, namespace)
-
-	endpoints := &v1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ExternalMgrAppName,
-			Namespace: namespace,
-			Labels:    labels,
-		},
-		Subsets: []v1.EndpointSubset{
-			{
-				Addresses: monitoringSpec.ExternalMgrEndpoints,
-				Ports: []v1.EndpointPort{
-					{
-						Name:     ServiceExternalMetricName,
-						Port:     int32(monitoringSpec.ExternalMgrPrometheusPort),
-						Protocol: v1.ProtocolTCP,
-					},
-				},
-			},
-		},
+func (c *Cluster) selectorLabels(activeDaemon string) map[string]string {
+	labels := controller.AppLabels(AppName, c.clusterInfo.Namespace)
+	if activeDaemon != "" {
+		labels[controller.DaemonIDLabel] = activeDaemon
 	}
-
-	k8sutil.SetOwnerRef(&endpoints.ObjectMeta, &ownerRef)
-	return endpoints
+	return labels
 }

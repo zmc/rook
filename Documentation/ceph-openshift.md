@@ -3,13 +3,7 @@ title: OpenShift
 weight: 2060
 indent: true
 ---
-{% assign url = page.url | split: '/' %}
-{% assign currentVersion = url[3] %}
-{% if currentVersion != 'master' %}
-{% assign branchName = currentVersion | replace: 'v', '' | prepend: 'release-' %}
-{% else %}
-{% assign branchName = currentVersion %}
-{% endif %}
+{% include_relative branch.liquid %}
 
 # OpenShift
 
@@ -44,52 +38,6 @@ To orchestrate the storage platform, Rook requires the following access in the c
 Before starting the Rook operator or cluster, create the security context constraints needed by the Rook pods. The following yaml is found in `operator-openshift.yaml` under `/cluster/examples/kubernetes/ceph`.
 
 > **NOTE**: Older versions of OpenShift may require `apiVersion: v1`.
-
-```yaml
-kind: SecurityContextConstraints
-apiVersion: security.openshift.io/v1
-metadata:
-  name: rook-ceph
-allowPrivilegedContainer: true
-allowHostNetwork: true
-allowHostDirVolumePlugin: true
-priority:
-allowedCapabilities: []
-allowHostPorts: false
-allowHostPID: true
-allowHostIPC: false
-readOnlyRootFilesystem: false
-requiredDropCapabilities: []
-defaultAddCapabilities: []
-runAsUser:
-  type: RunAsAny
-seLinuxContext:
-  type: MustRunAs
-fsGroup:
-  type: MustRunAs
-supplementalGroups:
-  type: RunAsAny
-allowedFlexVolumes:
-  - driver: "ceph.rook.io/rook"
-  - driver: "ceph.rook.io/rook-ceph"
-volumes:
-  - configMap
-  - downwardAPI
-  - emptyDir
-  - flexVolume
-  - hostPath
-  - persistentVolumeClaim
-  - projected
-  - secret
-users:
-  # A user needs to be added for each rook service account.
-  # This assumes running in the default sample "rook-ceph" namespace.
-  # If other namespaces or service accounts are configured, they need to be updated here.
-  - system:serviceaccount:rook-ceph:rook-ceph-system
-  - system:serviceaccount:rook-ceph:default
-  - system:serviceaccount:rook-ceph:rook-ceph-mgr
-  - system:serviceaccount:rook-ceph:rook-ceph-osd
-```
 
 Important to note is that if you plan on running Rook in namespaces other than the default `rook-ceph`, the example scc will need to be modified to accommodate for your namespaces where the Rook pods are running.
 

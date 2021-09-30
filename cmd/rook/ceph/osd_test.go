@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	osddaemon "github.com/rook/rook/pkg/daemon/ceph/osd"
 	osdcfg "github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
 	"github.com/stretchr/testify/assert"
 )
@@ -167,46 +168,8 @@ func TestParseDesiredDevices(t *testing.T) {
 	assert.False(t, result[2].IsDevicePathFilter)
 	assert.False(t, result[3].IsDevicePathFilter)
 
-}
-
-func TestDetectCrushLocation(t *testing.T) {
-	location := []string{"host=foo"}
-	nodeLabels := map[string]string{}
-
-	// no change to the location if there are no labels
-	updateLocationWithNodeLabels(&location, nodeLabels)
-	assert.Equal(t, 1, len(location))
-	assert.Equal(t, "host=foo", location[0])
-
-	// no change to the location if an invalid label or invalid topology
-	nodeLabels = map[string]string{
-		"topology.rook.io/foo":          "bar",
-		"invalid.topology.rook.io/rack": "r1",
-		"topology.rook.io/zone":         "z1",
-	}
-	updateLocationWithNodeLabels(&location, nodeLabels)
-	assert.Equal(t, 1, len(location))
-	assert.Equal(t, "host=foo", location[0])
-
-	// update the location with valid topology labels
-	nodeLabels = map[string]string{
-		"failure-domain.beta.kubernetes.io/region": "region1",
-		"failure-domain.beta.kubernetes.io/zone":   "zone1",
-		"topology.rook.io/rack":                    "rack1",
-		"topology.rook.io/row":                     "row1",
-	}
-
-	expected := []string{
-		"host=foo",
-		"rack=rack1",
-		"region=region1",
-		"row=row1",
-		"zone=zone1",
-	}
-	updateLocationWithNodeLabels(&location, nodeLabels)
-
-	assert.Equal(t, 5, len(location))
-	for i, locString := range location {
-		assert.Equal(t, locString, expected[i])
-	}
+	// check empty devices list
+	result, err = parseDevices("")
+	assert.NoError(t, err)
+	assert.Equal(t, []osddaemon.DesiredDevice{}, result)
 }

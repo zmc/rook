@@ -19,17 +19,16 @@ package mds
 import (
 	"testing"
 
-	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/operator/ceph/test"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 
-	cephtest "github.com/rook/rook/pkg/operator/ceph/test"
 	testop "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	apps "k8s.io/api/apps/v1"
@@ -69,21 +68,19 @@ func testDeploymentObject(t *testing.T, network cephv1.NetworkSpec) (*apps.Deplo
 		clusterInfo,
 		&clusterd.Context{Clientset: clientset},
 		&cephv1.ClusterSpec{
-			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:testversion"},
+			CephVersion: cephv1.CephVersionSpec{Image: "quay.io/ceph/ceph:testversion"},
 			Network:     network,
 		},
 		fs,
-		&client.CephFilesystemDetails{ID: 15},
-		metav1.OwnerReference{},
+		&k8sutil.OwnerInfo{},
 		"/var/lib/rook/",
-		scheme.Scheme,
 	)
 	mdsTestConfig := &mdsConfig{
 		DaemonID:     "myfs-a",
 		ResourceName: "rook-ceph-mds-myfs-a",
 		DataPathMap:  config.NewStatelessDaemonDataPathMap(config.MdsType, "myfs-a", "rook-ceph", "/var/lib/rook/"),
 	}
-	return c.makeDeployment(mdsTestConfig)
+	return c.makeDeployment(mdsTestConfig, "ns")
 }
 
 func TestPodSpecs(t *testing.T) {
@@ -94,11 +91,11 @@ func TestPodSpecs(t *testing.T) {
 	assert.Equal(t, v1.RestartPolicyAlways, d.Spec.Template.Spec.RestartPolicy)
 
 	// Deployment should have Ceph labels
-	cephtest.AssertLabelsContainCephRequirements(t, d.ObjectMeta.Labels,
+	test.AssertLabelsContainCephRequirements(t, d.ObjectMeta.Labels,
 		config.MdsType, "myfs-a", "rook-ceph-mds", "ns")
 
-	podTemplate := cephtest.NewPodTemplateSpecTester(t, &d.Spec.Template)
-	podTemplate.RunFullSuite(config.MdsType, "myfs-a", "rook-ceph-mds", "ns", "ceph/ceph:testversion",
+	podTemplate := test.NewPodTemplateSpecTester(t, &d.Spec.Template)
+	podTemplate.RunFullSuite(config.MdsType, "myfs-a", "rook-ceph-mds", "ns", "quay.io/ceph/ceph:testversion",
 		"500", "250", "4337", "2169", /* resources */
 		"my-priority-class")
 

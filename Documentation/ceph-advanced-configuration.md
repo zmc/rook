@@ -11,7 +11,7 @@ storage cluster.
 
 * [Prerequisites](#prerequisites)
 * [Using alternate namespaces](#using-alternate-namespaces)
-* [Use custom Ceph user and secret for mounting](#use-custom-ceph-user-and-secret-for-mounting)
+* [Deploying a second cluster](#deploying-a-second-cluster)
 * [Log Collection](#log-collection)
 * [OSD Information](#osd-information)
 * [Separate Storage Groups](#separate-storage-groups)
@@ -21,6 +21,7 @@ storage cluster.
 * [OSD Dedicated Network](#osd-dedicated-network)
 * [Phantom OSD Removal](#phantom-osd-removal)
 * [Change Failure Domain](#change-failure-domain)
+* [Auto Expansion of OSDs](#auto-expansion-of-osds)
 
 ## Prerequisites
 
@@ -62,115 +63,18 @@ sed -i.bak \
 kubectl apply -f common.yaml -f operator.yaml -f cluster.yaml # add other files as desired for yourconfig
 ```
 
-## Use custom Ceph user and secret for mounting
+## Deploying a second cluster
 
-> **NOTE**: For extensive info about creating Ceph users, consult the Ceph documentation: http://docs.ceph.com/docs/mimic/rados/operations/user-management/#add-a-user.
+If you wish to create a new CephCluster in a different namespace than `rook-ceph` while using a single operator to manage both clusters execute the following:
 
-Using a custom Ceph user and secret can be done for filesystem and block storage.
+```sh
+cd cluster/examples/kubernetes/ceph
 
-Create a custom user in Ceph with read-write access in the `/bar` directory on CephFS (For Ceph Mimic or newer, use `data=POOL_NAME` instead of `pool=POOL_NAME`):
-
-```console
-ceph auth get-or-create-key client.user1 mon 'allow r' osd 'allow rw tag cephfs pool=YOUR_FS_DATA_POOL' mds 'allow r, allow rw path=/bar'
+NAMESPACE=rook-ceph-secondary envsubst < common-second-cluster.yaml | kubectl create -f -
 ```
 
-The command will return a Ceph secret key, this key should be added as a secret in Kubernetes like this:
-
-```console
-kubectl create secret generic ceph-user1-secret --from-literal=key=YOUR_CEPH_KEY
-```
-
-> **NOTE**: This secret with the same name must be created in each namespace where the StorageClass will be used.
-
-In addition to this Secret you must create a RoleBinding to allow the Rook Ceph agent to get the secret from each namespace.
-The RoleBinding is optional if you are using a ClusterRoleBinding for the Rook Ceph agent secret access.
-A ClusterRole which contains the permissions which are needed and used for the Bindings are shown as an example after the next step.
-
-On a StorageClass `parameters` and/or flexvolume Volume entry `options` set the following options:
-
-```yaml
-mountUser: user1
-mountSecret: ceph-user1-secret
-```
-
-If you want the Rook Ceph agent to require a `mountUser` and `mountSecret` to be set in StorageClasses using Rook, you must set the environment variable `AGENT_MOUNT_SECURITY_MODE` to `Restricted` on the Rook Ceph operator Deployment.
-
-For more information on using the Ceph feature to limit access to CephFS paths, see [Ceph Documentation - Path Restriction](http://docs.ceph.com/docs/mimic/cephfs/client-auth/#path-restriction).
-
-### ClusterRole
-
-> **NOTE**: When you are using the Helm chart to install the Rook Ceph operator and have set `mountSecurityMode` to e.g., `Restricted`, then the below ClusterRole has already been created for you.
-
-**This ClusterRole is needed no matter if you want to use a RoleBinding per namespace or a ClusterRoleBinding.**
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: rook-ceph-agent-mount
-  labels:
-    operator: rook
-    storage-backend: ceph
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-```
-
-### RoleBinding
-
-> **NOTE**: You either need a RoleBinding in each namespace in which a mount secret resides in or create a ClusterRoleBinding with which the Rook Ceph agent
-> has access to Kubernetes secrets in all namespaces.
-
-Create the RoleBinding shown here in each namespace the Rook Ceph agent should read secrets for mounting.
-The RoleBinding `subjects`' `namespace` must be the one the Rook Ceph agent runs in (default `rook-ceph` for version 1.0 and newer. The default namespace in
-previous versions was `rook-ceph-system`).
-
-Replace `namespace: name-of-namespace-with-mountsecret` according to the name of all namespaces a `mountSecret` can be in.
-
-```yaml
-kind: RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: rook-ceph-agent-mount
-  namespace: name-of-namespace-with-mountsecret
-  labels:
-    operator: rook
-    storage-backend: ceph
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: rook-ceph-agent-mount
-subjects:
-- kind: ServiceAccount
-  name: rook-ceph-system
-  namespace: rook-ceph
-```
-
-### ClusterRoleBinding
-
-This ClusterRoleBinding only needs to be created once, as it covers the whole cluster.
-
-```yaml
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: rook-ceph-agent-mount
-  labels:
-    operator: rook
-    storage-backend: ceph
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: rook-ceph-agent-mount
-subjects:
-- kind: ServiceAccount
-  name: rook-ceph-system
-  namespace: rook-ceph
-```
+This will create all the necessary RBACs as well as the new namespace. The script assumes that `common.yaml` was already created.
+When you create the second CephCluster CR, use the same `NAMESPACE` and the operator will configure the second cluster.
 
 ## Log Collection
 
@@ -222,36 +126,37 @@ done
 
 The output should look something like this.
 
-```console
-Pod:  osd-m2fz2
-Node: node1.zbrbdl
--osd0  sda3  557.3G  bluestore
--osd1  sdf3  110.2G  bluestore
--osd2  sdd3  277.8G  bluestore
--osd3  sdb3  557.3G  bluestore
--osd4  sde3  464.2G  bluestore
--osd5  sdc3  557.3G  bluestore
+>```
+>Pod:  osd-m2fz2
+>Node: node1.zbrbdl
+>-osd0  sda3  557.3G  bluestore
+>-osd1  sdf3  110.2G  bluestore
+>-osd2  sdd3  277.8G  bluestore
+>-osd3  sdb3  557.3G  bluestore
+>-osd4  sde3  464.2G  bluestore
+>-osd5  sdc3  557.3G  bluestore
+>
+>Pod:  osd-nxxnq
+>Node: node3.zbrbdl
+>-osd6   sda3  110.7G  bluestore
+>-osd17  sdd3  1.8T    bluestore
+>-osd18  sdb3  231.8G  bluestore
+>-osd19  sdc3  231.8G  bluestore
+>
+>Pod:  osd-tww1h
+>Node: node2.zbrbdl
+>-osd7   sdc3  464.2G  bluestore
+>-osd8   sdj3  557.3G  bluestore
+>-osd9   sdf3  66.7G   bluestore
+>-osd10  sdd3  464.2G  bluestore
+>-osd11  sdb3  147.4G  bluestore
+>-osd12  sdi3  557.3G  bluestore
+>-osd13  sdk3  557.3G  bluestore
+>-osd14  sde3  66.7G   bluestore
+>-osd15  sda3  110.2G  bluestore
+>-osd16  sdh3  135.1G  bluestore
+>```
 
-Pod:  osd-nxxnq
-Node: node3.zbrbdl
--osd6   sda3  110.7G  bluestore
--osd17  sdd3  1.8T    bluestore
--osd18  sdb3  231.8G  bluestore
--osd19  sdc3  231.8G  bluestore
-
-Pod:  osd-tww1h
-Node: node2.zbrbdl
--osd7   sdc3  464.2G  bluestore
--osd8   sdj3  557.3G  bluestore
--osd9   sdf3  66.7G   bluestore
--osd10  sdd3  464.2G  bluestore
--osd11  sdb3  147.4G  bluestore
--osd12  sdi3  557.3G  bluestore
--osd13  sdk3  557.3G  bluestore
--osd14  sde3  66.7G   bluestore
--osd15  sda3  110.2G  bluestore
--osd16  sdh3  135.1G  bluestore
-```
 
 ## Separate Storage Groups
 
@@ -354,7 +259,10 @@ The default override settings are blank. Cutting out the extraneous properties,
 we would see the following defaults after creating a cluster:
 
 ```console
-$ kubectl -n rook-ceph get ConfigMap rook-config-override -o yaml
+kubectl -n rook-ceph get ConfigMap rook-config-override -o yaml
+```
+
+```yaml
 kind: ConfigMap
 apiVersion: v1
 metadata:
@@ -448,7 +356,7 @@ Two changes are necessary to the configuration to enable this capability:
 
 ### Use hostNetwork in the rook ceph cluster configuration
 
-Enable the `hostNetwork` setting in the [Ceph Cluster CRD configuration](https://rook.io/docs/rook/master/ceph-cluster-crd.html#samples).
+Enable the `hostNetwork` setting in the [Ceph Cluster CRD configuration](ceph-cluster-crd.md#samples).
 For example,
 
 ```yaml
@@ -498,13 +406,13 @@ ceph osd tree
 
 An example output looks like this:
 
-```console
-ID  CLASS WEIGHT  TYPE NAME STATUS REWEIGHT PRI-AFF
- -1       57.38062 root default
--13        7.17258     host node1.example.com
-  2   hdd  3.61859         osd.2                up  1.00000 1.00000
- -7              0     host node2.example.com   down    0    1.00000
-```
+>```
+>ID  CLASS WEIGHT  TYPE NAME STATUS REWEIGHT PRI-AFF
+>-1       57.38062 root default
+>-13        7.17258     host node1.example.com
+>2   hdd  3.61859         osd.2                up  1.00000 1.00000
+>-7              0     host node2.example.com   down    0    1.00000
+>```
 
 The host `node2.example.com` in the output has no disks, so it is most likely a "Phantom OSD".
 
@@ -512,10 +420,10 @@ Now to remove it, use the ID in the first column of the output and replace `<ID>
 The commands are:
 
 ```console
-ceph osd out <ID>
-ceph osd crush remove osd.<ID>
-ceph auth del osd.<ID>
-ceph osd rm <ID>
+$ ceph osd out <ID>
+$ ceph osd crush remove osd.<ID>
+$ ceph auth del osd.<ID>
+$ ceph osd rm <ID>
 ```
 
 To recheck that the Phantom OSD was removed, re-run the following command and check if the OSD with the ID doesn't show up anymore:
@@ -543,10 +451,15 @@ spec:
 However, due to several reasons, we may need to change such failure domain to its other value: `host`. Unfortunately, changing it directly in the YAML manifest is not currently handled by Rook, so we need to perform the change directly using Ceph commands using the Rook tools pod, for instance:
 
 ```console
-$ ceph osd pool get replicapool crush_rule
-crush_rule: replicapool
+ceph osd pool get replicapool crush_rule
+```
 
-$ceph osd crush rule create-replicated replicapool_host_rule default host
+>```
+>crush_rule: replicapool
+>```
+
+```console
+ceph osd crush rule create-replicated replicapool_host_rule default host
 ```
 
 Notice that the suffix `host_rule` in the name of the rule is just for clearness about the type of rule we are creating here, and can be anything else as long as it is different from the existing one. Once the new rule has been created, we simply apply it to our block pool:
@@ -558,10 +471,48 @@ ceph osd pool set replicapool crush_rule replicapool_host_rule
 And validate that it has been actually applied properly:
 
 ```console
-$ ceph osd pool get replicapool crush_rule
-crush_rule: replicapool_host_rule
+ceph osd pool get replicapool crush_rule
 ```
+>```
+> crush_rule: replicapool_host_rule
+>```
 
 If the cluster's health was `HEALTH_OK` when we performed this change, immediately, the new rule is applied to the cluster transparently without service disruption.
 
 Exactly the same approach can be used to change from `host` back to `osd`.
+
+## Auto Expansion of OSDs
+
+### Prerequisites
+
+1) A [PVC-based cluster](ceph-cluster-crd.md#pvc-based-cluster) deployed in dynamic provisioning environment with a `storageClassDeviceSet`.
+
+2) Create the Rook [Toolbox](ceph-toolbox.md).
+
+>Note: [Prometheus Operator](ceph-monitoring.md#prometheus-operator) and [Prometheus Instances](ceph-monitoring.md#prometheus-instances) are Prerequisites that are created by the auto-grow-storage script.
+
+### To scale OSDs Vertically
+
+Run the following script to auto-grow the size of OSDs on a PVC-based Rook-Ceph cluster whenever the OSDs have reached the storage near-full threshold.
+```console
+tests/scripts/auto-grow-storage.sh size  --max maxSize --growth-rate percent
+```
+>growth-rate percentage represents the percent increase you want in the OSD capacity and maxSize represent the maximum disk size.
+
+For example, if you need to increase the size of OSD by 30% and max disk size is 1Ti
+```console
+./auto-grow-storage.sh size  --max 1Ti --growth-rate 30
+```
+
+### To scale OSDs Horizontally
+
+Run the following script to auto-grow the number of OSDs on a PVC-based Rook-Ceph cluster whenever the OSDs have reached the storage near-full threshold.
+```console
+tests/scripts/auto-grow-storage.sh count --max maxCount --count rate
+```
+>Count of OSD represents the number of OSDs you need to add and maxCount represents the number of disks a storage cluster will support.
+
+For example, if you need to increase the number of OSDs by 3 and maxCount is 10
+```console
+./auto-grow-storage.sh count --max 10 --count 3
+```

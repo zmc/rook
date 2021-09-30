@@ -3,29 +3,21 @@ title: Shared Filesystem
 weight: 2300
 indent: true
 ---
-{% assign url = page.url | split: '/' %}
-{% assign currentVersion = url[3] %}
-{% if currentVersion != 'master' %}
-{% assign branchName = currentVersion | replace: 'v', '' | prepend: 'release-' %}
-{% else %}
-{% assign branchName = currentVersion %}
-{% endif %}
+{% include_relative branch.liquid %}
 
 # Shared Filesystem
 
 A shared filesystem can be mounted with read/write permission from multiple pods. This may be useful for applications which can be clustered using a shared filesystem.
 
-This example runs a shared filesystem for the [kube-registry](https://github.com/kubernetes/kubernetes/tree/master/cluster/addons/registry).
+This example runs a shared filesystem for the [kube-registry](https://github.com/kubernetes/kubernetes/tree/release-1.9/cluster/addons/registry).
 
 ## Prerequisites
 
-This guide assumes you have created a Rook cluster as explained in the main [Kubernetes guide](ceph-quickstart.md)
+This guide assumes you have created a Rook cluster as explained in the main [Kubernetes guide](quickstart.md)
 
-### Multiple Filesystems Not Supported
+### Multiple Filesystems Support
 
-By default only one shared filesystem can be created with Rook. Multiple filesystem support in Ceph is still considered experimental and can be enabled with the environment variable `ROOK_ALLOW_MULTIPLE_FILESYSTEMS` defined in `operator.yaml`.
-
-Please refer to [cephfs experimental features](http://docs.ceph.com/docs/master/cephfs/experimental-features/#multiple-filesystems-within-a-ceph-cluster) page for more information.
+Multiple filesystems are supported as of the Ceph Pacific release.
 
 ## Create the Filesystem
 
@@ -55,31 +47,37 @@ spec:
 The Rook operator will create all the pools and other resources necessary to start the service. This may take a minute to complete.
 
 ```console
-## Create the filesystem
-$ kubectl create -f filesystem.yaml
+# Create the filesystem
+kubectl create -f filesystem.yaml
 [...]
-## To confirm the filesystem is configured, wait for the mds pods to start
-$ kubectl -n rook-ceph get pod -l app=rook-ceph-mds
-NAME                                      READY     STATUS    RESTARTS   AGE
-rook-ceph-mds-myfs-7d59fdfcf4-h8kw9       1/1       Running   0          12s
-rook-ceph-mds-myfs-7d59fdfcf4-kgkjp       1/1       Running   0          12s
 ```
+
+```console
+# To confirm the filesystem is configured, wait for the mds pods to start
+kubectl -n rook-ceph get pod -l app=rook-ceph-mds
+```
+
+>```
+>NAME                                      READY     STATUS    RESTARTS   AGE
+>rook-ceph-mds-myfs-7d59fdfcf4-h8kw9       1/1       Running   0          12s
+>rook-ceph-mds-myfs-7d59fdfcf4-kgkjp       1/1       Running   0          12s
+>```
 
 To see detailed status of the filesystem, start and connect to the [Rook toolbox](ceph-toolbox.md). A new line will be shown with `ceph status` for the `mds` service. In this example, there is one active instance of MDS which is up, with one MDS instance in `standby-replay` mode in case of failover.
 
 ```console
-$ ceph status
-  ...
-  services:
-    mds: myfs-1/1/1 up {[myfs:0]=mzw58b=up:active}, 1 up:standby-replay
+ceph status
 ```
+>```
+>  ...
+>  services:
+>    mds: myfs-1/1/1 up {[myfs:0]=mzw58b=up:active}, 1 up:standby-replay
+>```
 
 ## Provision Storage
 
 Before Rook can start provisioning storage, a StorageClass needs to be created based on the filesystem. This is needed for Kubernetes to interoperate
 with the CSI driver to create persistent volumes.
-
-> **NOTE**: This example uses the CSI driver, which is the preferred driver going forward for K8s 1.13 and newer. Examples are found in the [CSI CephFS](https://github.com/rook/rook/tree/{{ branchName }}/cluster/examples/kubernetes/ceph/csi/cephfs) directory. For an example of a volume using the flex driver (required for K8s 1.12 and earlier), see the [Flex Driver](#flex-driver) section below.
 
 Save this storage class definition as `storageclass.yaml`:
 
@@ -100,10 +98,6 @@ parameters:
   # Ceph pool into which the volume shall be created
   # Required for provisionVolume: "true"
   pool: myfs-data0
-
-  # Root path of an existing CephFS volume
-  # Required for provisionVolume: "false"
-  # rootPath: /absolute/path
 
   # The secrets contain Ceph admin credentials. These are generated automatically by the operator
   # in the same namespace as the cluster.
@@ -126,25 +120,6 @@ Create the storage class.
 
 ```console
 kubectl create -f cluster/examples/kubernetes/ceph/csi/cephfs/storageclass.yaml
-```
-
-## Mirroring
-
-Since Ceph Pacific, CephFS supports asynchronous replication of snapshots to a remote CephFS file system via cephfs-mirror tool. Snapshots are synchronized by mirroring snapshot data followed by creating a snapshot with the same name (for a given directory on the remote file system) as the snapshot being synchronized.
-It is generally useful when planning for Disaster Recovery.
-For clusters that are geographically distributed and stretching is not possible due to high latencies.
-
-```yaml
-apiVersion: ceph.rook.io/v1
-kind: CephFilesystem
-metadata:
-  name: myfs
-  namespace: rook-ceph
-spec:
-...
-...
-  mirroring:
-    enabled: true
 ```
 
 ## Quotas
@@ -267,10 +242,6 @@ kubectl -n rook-ceph delete cephfilesystem myfs
 ```
 
 Note: If the "preserveFilesystemOnDelete" filesystem attribute is set to true, the above command won't delete the filesystem. Recreating the same CRD will reuse the existing filesystem.
-
-## Flex Driver
-
-To create a volume based on the flex driver instead of the CSI driver, see the [kube-registry.yaml](https://github.com/rook/rook/blob/{{ branchName }}/cluster/examples/kubernetes/ceph/flex/kube-registry.yaml) example manifest or refer to the complete flow in the Rook v1.0 [Shared Filesystem](https://rook.io/docs/rook/v1.0/ceph-filesystem.html) documentation.
 
 ### Advanced Example: Erasure Coded Filesystem
 

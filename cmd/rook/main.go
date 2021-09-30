@@ -18,13 +18,10 @@ package main
 import (
 	"fmt"
 
-	"github.com/rook/rook/cmd/rook/cassandra"
 	"github.com/rook/rook/cmd/rook/ceph"
-	"github.com/rook/rook/cmd/rook/nfs"
 	rook "github.com/rook/rook/cmd/rook/rook"
 	"github.com/rook/rook/cmd/rook/util"
 	"github.com/rook/rook/cmd/rook/version"
-	"github.com/rook/rook/cmd/rook/yugabytedb"
 )
 
 func main() {
@@ -40,9 +37,6 @@ func addCommands() {
 		discoverCmd,
 		// backend commands
 		ceph.Cmd,
-		nfs.Cmd,
-		cassandra.Cmd,
-		yugabytedb.Cmd,
 
 		// util commands
 		util.CmdReporterCmd,

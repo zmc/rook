@@ -34,9 +34,9 @@ quorum and perform operations in the cluster. If the majority of mons are not ru
 Most commonly a cluster will have three mons. This would mean that one mon could go down and allow the cluster to remain healthy.
 You would still have 2/3 mons running to give you consensus in the cluster for any operation.
 
-You will always want an odd number of mons. Fifty percent of mons will not be sufficient to maintain quorum. If you had two mons and one
+For highest availability, an odd number of mons is required. Fifty percent of mons will not be sufficient to maintain quorum. If you had two mons and one
 of them went down, you would have 1/2 of quorum. Since that is not a super-majority, the cluster would have to wait until the second mon is up again.
-Therefore, Rook prohibits an even number of mons.
+Rook allows an even number of mons for higher durability. See the [disaster recovery guide](ceph-disaster-recovery.md#restoring-mon-quorum) if quorum is lost and to recover mon quorum from a single mon.
 
 The number of mons to create in a cluster depends on your tolerance for losing a node. If you have 1 mon zero nodes can be lost
 to maintain quorum. With 3 mons one node can be lost, and with 5 mons two nodes can be lost. Because the Rook operator will automatically
@@ -78,37 +78,49 @@ If you want to force a mon to failover for testing or other purposes, you can sc
 for the timeout. Note that the operator may scale up the mon again automatically if the operator is restarted or if a full
 reconcile is triggered, such as when the CephCluster CR is updated.
 
+If the mon pod is in pending state and couldn't be assigned to a node (say, due to node drain), then the operator will wait for the timeout again before the mon failover. So the timeout waiting for the mon failover will be doubled in this case.
+
+To disable monitor automatic failover, the `timeout` can be set to `0`, if the monitor goes out of quorum Rook will never fail it over onto another node.
+This is especially useful for planned maintenance.
+
 ### Example Failover
 
 Rook will create mons with pod names such as mon-a, mon-b, and mon-c. Let's say mon-b had an issue and the pod failed.
+```console
+kubectl -n rook-ceph get pod -l app=rook-ceph-mon
 ```
-$ kubectl -n rook-ceph get pod -l app=rook-ceph-mon
-NAME                               READY   STATUS    RESTARTS   AGE
-rook-ceph-mon-a-74dc96545-ch5ns    1/1     Running   0          9m
-rook-ceph-mon-b-6b9d895c4c-bcl2h   1/1     Error     2          9m
-rook-ceph-mon-c-7d6df6d65c-5cjwl   1/1     Running   0          8m
-```
+
+>```
+>NAME                               READY   STATUS    RESTARTS   AGE
+>rook-ceph-mon-a-74dc96545-ch5ns    1/1     Running   0          9m
+>rook-ceph-mon-b-6b9d895c4c-bcl2h   1/1     Error     2          9m
+>rook-ceph-mon-c-7d6df6d65c-5cjwl   1/1     Running   0          8m
+>```
 
 After a failover, you will see the unhealthy mon removed and a new mon added such as mon-d. A fully healthy mon quorum is now running again.
+```console
+kubectl -n rook-ceph get pod -l app=rook-ceph-mon
 ```
-$ kubectl -n rook-ceph get pod -l app=rook-ceph-mon
-NAME                             READY     STATUS    RESTARTS   AGE
-rook-ceph-mon-a-74dc96545-ch5ns    1/1     Running   0          19m
-rook-ceph-mon-c-7d6df6d65c-5cjwl   1/1     Running   0          18m
-rook-ceph-mon-d-9e7ea7e76d-4bhxm   1/1     Running   0          20s
-```
+>```
+>NAME                             READY     STATUS    RESTARTS   AGE
+>rook-ceph-mon-a-74dc96545-ch5ns    1/1     Running   0          19m
+>rook-ceph-mon-c-7d6df6d65c-5cjwl   1/1     Running   0          18m
+>rook-ceph-mon-d-9e7ea7e76d-4bhxm   1/1     Running   0          20s
+>```
 
 From the toolbox we can verify the status of the health mon quorum:
+```console
+ceph -s
 ```
-[root@rook-ceph-tools-78cdfd976c-8p6dn /]# ceph -s
-  cluster:
-    id:     35179270-8a39-4e08-a352-a10c52bb04ff
-    health: HEALTH_OK
 
-  services:
-    mon: 3 daemons, quorum a,b,d (age 2m)
-    mgr: a(active, since 12m)
-    osd: 3 osds: 3 up (since 10m), 3 in (since 10m)
-
-  ...
-```
+>```
+>  cluster:
+>    id:     35179270-8a39-4e08-a352-a10c52bb04ff
+>    health: HEALTH_OK
+>
+>  services:
+>    mon: 3 daemons, quorum a,b,d (age 2m)
+>    mgr: a(active, since 12m)
+>    osd: 3 osds: 3 up (since 10m), 3 in (since 10m)
+>  ...
+>```

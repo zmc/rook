@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/ceph/client/fake"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 )
@@ -69,7 +71,6 @@ func TestEnableReleaseOSDFunctionality(t *testing.T) {
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		assert.Equal(t, "osd", args[0])
 		assert.Equal(t, "require-osd-release", args[1])
-		assert.Equal(t, 3, len(args))
 		return "", nil
 	}
 	context := &clusterd.Context{Executor: executor}
@@ -140,12 +141,12 @@ func TestDaemonMapEntry(t *testing.T) {
 	dummyVersionsRaw := []byte(`
 	{
 		"mon": {
-			"ceph version 13.2.5 (cbff874f9007f1869bfd3821b7e33b2a6ffd4988) mimic (stable)": 1,
-			"ceph version 14.2.0 (3a54b2b6d167d4a2a19e003a705696d4fe619afc) nautilus (stable)": 2
+			"ceph version 16.2.5 (cbff874f9007f1869bfd3821b7e33b2a6ffd4988) pacific (stable)": 1,
+			"ceph version 17.2.0 (3a54b2b6d167d4a2a19e003a705696d4fe619afc) quincy (stable)": 2
 		}
 	}`)
 
-	var dummyVersions CephDaemonsVersions
+	var dummyVersions cephv1.CephDaemonsVersions
 	err := json.Unmarshal([]byte(dummyVersionsRaw), &dummyVersions)
 	assert.NoError(t, err)
 
@@ -296,4 +297,71 @@ func TestGetRetryConfig(t *testing.T) {
 		assert.Equal(t, tc.expectedRetries, actualRetries, "[%s] failed to get correct retry count", tc.label)
 		assert.Equalf(t, tc.expectedDelay, actualDelay, "[%s] failed to get correct delays between retries", tc.label)
 	}
+}
+
+func TestOSDUpdateShouldCheckOkToStop(t *testing.T) {
+	clusterInfo := AdminClusterInfo("mycluster")
+	lsOutput := ""
+	treeOutput := ""
+	context := &clusterd.Context{
+		Executor: &exectest.MockExecutor{
+			MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+				t.Logf("command: %s %v", command, args)
+				if command != "ceph" || args[0] != "osd" {
+					panic("not a 'ceph osd' call")
+				}
+				if args[1] == "tree" {
+					if treeOutput == "" {
+						return "", errors.Errorf("induced error")
+					}
+					return treeOutput, nil
+				}
+				if args[1] == "ls" {
+					if lsOutput == "" {
+						return "", errors.Errorf("induced error")
+					}
+					return lsOutput, nil
+				}
+				panic("do not understand command")
+			},
+		},
+	}
+
+	t.Run("3 nodes with 1 OSD each", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(3)
+		treeOutput = fake.OsdTreeOutput(3, 1)
+		assert.True(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
+
+	t.Run("1 node with 3 OSDs", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(3)
+		treeOutput = fake.OsdTreeOutput(1, 3)
+		assert.False(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
+
+	t.Run("2 nodes with 1 OSD each", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(2)
+		treeOutput = fake.OsdTreeOutput(2, 1)
+		assert.False(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
+
+	t.Run("3 nodes with 3 OSDs each", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(9)
+		treeOutput = fake.OsdTreeOutput(3, 3)
+		assert.True(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
+
+	// degraded case but good to test just in case
+	t.Run("0 nodes", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(0)
+		treeOutput = fake.OsdTreeOutput(0, 0)
+		assert.False(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
+
+	// degraded case, OSDs are failing to start so they haven't registered in the CRUSH map yet
+	t.Run("0 nodes with down OSDs", func(t *testing.T) {
+		lsOutput = fake.OsdLsOutput(3)
+		treeOutput = fake.OsdTreeOutput(0, 1)
+		assert.False(t, OSDUpdateShouldCheckOkToStop(context, clusterInfo))
+	})
 }

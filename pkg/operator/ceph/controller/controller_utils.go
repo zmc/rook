@@ -18,20 +18,30 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/exec"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+// OperatorConfig represents the configuration of the operator
+type OperatorConfig struct {
+	OperatorNamespace string
+	Image             string
+	ServiceAccount    string
+	NamespaceToWatch  string
+	Parameters        map[string]string
+}
 
 const (
 	// OperatorSettingConfigMapName refers to ConfigMap that configures rook ceph operator
@@ -40,14 +50,24 @@ const (
 	// UninitializedCephConfigError refers to the error message printed by the Ceph CLI when there is no ceph configuration file
 	// This typically is raised when the operator has not finished initializing
 	UninitializedCephConfigError = "error calling conf_read_file"
+
+	// OperatorNotInitializedMessage is the message we print when the Operator is not ready to reconcile, typically the ceph.conf has not been generated yet
+	OperatorNotInitializedMessage = "skipping reconcile since operator is still initializing"
 )
 
 var (
 	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
 	ImmediateRetryResult = reconcile.Result{Requeue: true}
 
+	// ImmediateRetryResultNoBackoff Return this for a immediate retry of the reconciliation loop with the same request object.
+	// Override the exponential backoff behavior by setting the RequeueAfter time explicitly.
+	ImmediateRetryResultNoBackoff = reconcile.Result{Requeue: true, RequeueAfter: time.Second}
+
 	// WaitForRequeueIfCephClusterNotReady waits for the CephCluster to be ready
 	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
+
+	// WaitForRequeueIfCephClusterIsUpgrading waits until the upgrade is complete
+	WaitForRequeueIfCephClusterIsUpgrading = reconcile.Result{Requeue: true, RequeueAfter: time.Minute}
 
 	// WaitForRequeueIfFinalizerBlocked waits for resources to be cleaned up before the finalizer can be removed
 	WaitForRequeueIfFinalizerBlocked = reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}
@@ -59,16 +79,19 @@ var (
 	OperatorCephBaseImageVersion string
 )
 
-// CheckForCancelledOrchestration checks whether a cancellation has been requested
-func CheckForCancelledOrchestration(context *clusterd.Context) error {
-	defer context.RequestCancelOrchestration.UnSet()
+func DiscoveryDaemonEnabled(data map[string]string) bool {
+	return k8sutil.GetValue(data, "ROOK_ENABLE_DISCOVERY_DAEMON", "false") == "true"
+}
 
-	// Check whether we need to cancel the orchestration
-	if context.RequestCancelOrchestration.IsSet() {
-		return errors.New("CANCELLING CURRENT ORCHESTRATION")
+// SetCephCommandsTimeout sets the timeout value of Ceph commands which are executed from Rook
+func SetCephCommandsTimeout(data map[string]string) {
+	strTimeoutSeconds := k8sutil.GetValue(data, "ROOK_CEPH_COMMANDS_TIMEOUT_SECONDS", "15")
+	timeoutSeconds, err := strconv.Atoi(strTimeoutSeconds)
+	if err != nil || timeoutSeconds < 1 {
+		logger.Warningf("ROOK_CEPH_COMMANDS_TIMEOUT is %q but it should be >= 1, set the default value 15", strTimeoutSeconds)
+		timeoutSeconds = 15
 	}
-
-	return nil
+	exec.CephCommandsTimeout = time.Duration(timeoutSeconds) * time.Second
 }
 
 // canIgnoreHealthErrStatusInReconcile determines whether a status of HEALTH_ERR in the CephCluster can be ignored safely.
@@ -85,7 +108,7 @@ func canIgnoreHealthErrStatusInReconcile(cephCluster cephv1.CephCluster, control
 	var allowedErrStatus = []string{"MDS_ALL_DOWN"}
 	var ignoreHealthErr = len(healthErrKeys) == 1 && contains(allowedErrStatus, healthErrKeys[0])
 	if ignoreHealthErr {
-		logger.Debugf("%q: ignoring ceph status %q because only cause is %q (full status is %q)", controllerName, cephCluster.Status.CephStatus.Health, healthErrKeys[0], cephCluster.Status.CephStatus)
+		logger.Debugf("%q: ignoring ceph status %q because only cause is %q (full status is %+v)", controllerName, cephCluster.Status.CephStatus.Health, healthErrKeys[0], cephCluster.Status.CephStatus)
 	}
 	return ignoreHealthErr
 }
@@ -126,22 +149,25 @@ func IsReadyToReconcile(c client.Client, clustercontext *clusterd.Context, names
 		if ok && len(details) == 1 && strings.Contains(message.Message, "Error initializing cluster client") {
 			logger.Infof("%s: skipping reconcile since operator is still initializing", controllerName)
 		} else {
-			logger.Infof("%s: CephCluster %q found but skipping reconcile since ceph health is %q", controllerName, cephCluster.Name, cephCluster.Status.CephStatus)
+			logger.Infof("%s: CephCluster %q found but skipping reconcile since ceph health is %+v", controllerName, cephCluster.Name, cephCluster.Status.CephStatus)
 		}
 	}
 
+	logger.Debugf("%q: CephCluster %q initial reconcile is not complete yet...", controllerName, namespacedName.Namespace)
 	return cephCluster, false, cephClusterExists, WaitForRequeueIfCephClusterNotReady
 }
 
 // ClusterOwnerRef represents the owner reference of the CephCluster CR
 func ClusterOwnerRef(clusterName, clusterID string) metav1.OwnerReference {
 	blockOwner := true
+	controller := true
 	return metav1.OwnerReference{
 		APIVersion:         fmt.Sprintf("%s/%s", ClusterResource.Group, ClusterResource.Version),
 		Kind:               ClusterResource.Kind,
 		Name:               clusterName,
 		UID:                types.UID(clusterID),
 		BlockOwnerDeletion: &blockOwner,
+		Controller:         &controller,
 	}
 }
 

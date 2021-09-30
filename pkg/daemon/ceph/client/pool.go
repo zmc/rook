@@ -27,6 +27,7 @@ import (
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -123,6 +124,11 @@ func GetPoolDetails(context *clusterd.Context, clusterInfo *ClusterInfo, name st
 		return CephStoragePoolDetails{}, errors.Wrapf(err, "failed to get pool %s details. %s", name, string(output))
 	}
 
+	return ParsePoolDetails(output)
+}
+
+func ParsePoolDetails(in []byte) (CephStoragePoolDetails, error) {
+
 	// The response for osd pool get when passing var=all is actually malformed JSON similar to:
 	// {"pool":"rbd","size":1}{"pool":"rbd","min_size":2}...
 	// Note the multiple top level entities, one for each property returned.  To workaround this,
@@ -131,7 +137,7 @@ func GetPoolDetails(context *clusterd.Context, clusterInfo *ClusterInfo, name st
 	// Since previously set fields remain intact if they are not overwritten, the result is the JSON
 	// unmarshalling of all properties in the response.
 	var poolDetails CephStoragePoolDetails
-	poolDetailsUnits := strings.Split(string(output), "}{")
+	poolDetailsUnits := strings.Split(string(in), "}{")
 	for i := range poolDetailsUnits {
 		pdu := poolDetailsUnits[i]
 		if !strings.HasPrefix(pdu, "{") {
@@ -142,7 +148,7 @@ func GetPoolDetails(context *clusterd.Context, clusterInfo *ClusterInfo, name st
 		}
 		err := json.Unmarshal([]byte(pdu), &poolDetails)
 		if err != nil {
-			return CephStoragePoolDetails{}, errors.Wrapf(err, "unmarshal failed raw buffer response %s", string(output))
+			return CephStoragePoolDetails{}, errors.Wrapf(err, "unmarshal failed raw buffer response %s", string(in))
 		}
 	}
 
@@ -179,9 +185,8 @@ func CreatePoolWithProfile(context *clusterd.Context, clusterInfo *ClusterInfo, 
 
 func checkForImagesInPool(context *clusterd.Context, clusterInfo *ClusterInfo, name string) error {
 	var err error
-	var stats = new(PoolStatistics)
 	logger.Debugf("checking any images/snapshosts present in pool %q", name)
-	stats, err = GetPoolStatistics(context, clusterInfo, name)
+	stats, err := GetPoolStatistics(context, clusterInfo, name)
 	if err != nil {
 		if strings.Contains(err.Error(), "No such file or directory") {
 			return nil
@@ -281,6 +286,61 @@ func setCommonPoolProperties(context *clusterd.Context, clusterInfo *ClusterInfo
 				return errors.Wrapf(err, "failed to enable snapshot scheduling for pool %q", poolName)
 			}
 		}
+	} else {
+		if pool.Mirroring.Mode == "pool" {
+			// Remove storage cluster peers
+			mirrorInfo, err := GetPoolMirroringInfo(context, clusterInfo, poolName)
+			if err != nil {
+				return errors.Wrapf(err, "failed to get mirroring info for the pool %q", poolName)
+			}
+			for _, peer := range mirrorInfo.Peers {
+				if peer.UUID != "" {
+					err := removeClusterPeer(context, clusterInfo, poolName, peer.UUID)
+					if err != nil {
+						return errors.Wrapf(err, "failed to remove cluster peer with UUID %q for the pool %q", peer.UUID, poolName)
+					}
+				}
+			}
+
+			// Disable mirroring
+			err = disablePoolMirroring(context, clusterInfo, poolName)
+			if err != nil {
+				return errors.Wrapf(err, "failed to disable mirroring for pool %q", poolName)
+			}
+		} else if pool.Mirroring.Mode == "image" {
+			logger.Warningf("manually disable mirroring on images in the pool %q", poolName)
+		}
+	}
+
+	// set maxSize quota
+	if pool.Quotas.MaxSize != nil {
+		// check for format errors
+		maxBytesQuota, err := resource.ParseQuantity(*pool.Quotas.MaxSize)
+		if err != nil {
+			if err == resource.ErrFormatWrong {
+				return errors.Wrapf(err, "maxSize quota incorrectly formatted for pool %q, valid units include k, M, G, T, P, E, Ki, Mi, Gi, Ti, Pi, Ei", poolName)
+			}
+			return errors.Wrapf(err, "failed setting quota for pool %q, maxSize quota parse error", poolName)
+		}
+		// set max_bytes quota, 0 value disables quota
+		err = setPoolQuota(context, clusterInfo, poolName, "max_bytes", strconv.FormatInt(maxBytesQuota.Value(), 10))
+		if err != nil {
+			return errors.Wrapf(err, "failed to set max_bytes quota for pool %q", poolName)
+		}
+	} else if pool.Quotas.MaxBytes != nil {
+		// set max_bytes quota, 0 value disables quota
+		err := setPoolQuota(context, clusterInfo, poolName, "max_bytes", strconv.FormatUint(*pool.Quotas.MaxBytes, 10))
+		if err != nil {
+			return errors.Wrapf(err, "failed to set max_bytes quota for pool %q", poolName)
+		}
+	}
+	// set max_objects quota
+	if pool.Quotas.MaxObjects != nil {
+		// set max_objects quota, 0 value disables quota
+		err := setPoolQuota(context, clusterInfo, poolName, "max_objects", strconv.FormatUint(*pool.Quotas.MaxObjects, 10))
+		if err != nil {
+			return errors.Wrapf(err, "failed to set max_objects quota for pool %q", poolName)
+		}
 	}
 
 	return nil
@@ -319,10 +379,16 @@ func CreateReplicatedPoolForApp(context *clusterd.Context, clusterInfo *ClusterI
 		// The stretch cluster rule is created initially by the operator when the stretch cluster is configured
 		// so there is no need to create a new crush rule for the pools here.
 		crushRuleName = defaultStretchCrushRuleName
+	} else if pool.IsHybridStoragePool() {
+		// Create hybrid crush rule
+		err := createHybridCrushRule(context, clusterInfo, clusterSpec, crushRuleName, pool)
+		if err != nil {
+			return errors.Wrapf(err, "failed to create hybrid crush rule %q", crushRuleName)
+		}
 	} else {
-		if pool.Replicated.ReplicasPerFailureDomain != 0 {
+		if pool.Replicated.ReplicasPerFailureDomain > 1 {
 			// Create a two-step CRUSH rule for pools other than stretch clusters
-			err := createTwoStepCrushRule(context, clusterInfo, clusterSpec, crushRuleName, pool)
+			err := createStretchCrushRule(context, clusterInfo, clusterSpec, crushRuleName, pool)
 			if err != nil {
 				return errors.Wrapf(err, "failed to create two-step crush rule %q", crushRuleName)
 			}
@@ -355,34 +421,69 @@ func CreateReplicatedPoolForApp(context *clusterd.Context, clusterInfo *ClusterI
 	return nil
 }
 
-func createTwoStepCrushRule(context *clusterd.Context, clusterInfo *ClusterInfo, clusterSpec *cephv1.ClusterSpec, ruleName string, pool cephv1.PoolSpec) error {
-	// set the crush failure domain to the "host" if not already specified
-	if pool.FailureDomain == "" {
-		pool.FailureDomain = cephv1.DefaultFailureDomain
-	}
-	// set the crush failure sub domain to the "host" if not already specified
-	if pool.Replicated.SubFailureDomain == "" {
-		pool.Replicated.SubFailureDomain = cephv1.DefaultFailureDomain
-	}
+func createStretchCrushRule(context *clusterd.Context, clusterInfo *ClusterInfo, clusterSpec *cephv1.ClusterSpec, ruleName string, pool cephv1.PoolSpec) error {
 	// set the crush root to the default if not already specified
 	if pool.CrushRoot == "" {
 		pool.CrushRoot = GetCrushRootFromSpec(clusterSpec)
 	}
 
-	// Get the current CRUSH map
-	var crushMap CrushMap
-	crushMap, err := GetCrushMap(context, clusterInfo)
-	if err != nil {
-		return errors.Wrap(err, "failed to get crush map")
+	// set the crush failure domain to the "host" if not already specified
+	if pool.FailureDomain == "" {
+		pool.FailureDomain = cephv1.DefaultFailureDomain
 	}
 
-	// Check if the crush rule already exists
-	for _, rule := range crushMap.Rules {
-		if rule.Name == ruleName {
-			logger.Debugf("CRUSH rule %q already exists", ruleName)
-			return nil
-		}
+	// set the crush failure sub domain to the "host" if not already specified
+	if pool.Replicated.SubFailureDomain == "" {
+		pool.Replicated.SubFailureDomain = cephv1.DefaultFailureDomain
 	}
+
+	if pool.FailureDomain == pool.Replicated.SubFailureDomain {
+		return errors.Errorf("failure and subfailure domains cannot be identical, current is %q", pool.FailureDomain)
+	}
+
+	crushMap, err := getCurrentCrushMap(context, clusterInfo)
+	if err != nil {
+		return errors.Wrap(err, "failed to get current crush map")
+	}
+
+	if crushRuleExists(crushMap, ruleName) {
+		logger.Debugf("CRUSH rule %q already exists", ruleName)
+		return nil
+	}
+
+	// Build plain text rule
+	ruleset := buildTwoStepPlainCrushRule(crushMap, ruleName, pool)
+
+	return updateCrushMap(context, clusterInfo, ruleset)
+}
+
+func createHybridCrushRule(context *clusterd.Context, clusterInfo *ClusterInfo, clusterSpec *cephv1.ClusterSpec, ruleName string, pool cephv1.PoolSpec) error {
+	// set the crush root to the default if not already specified
+	if pool.CrushRoot == "" {
+		pool.CrushRoot = GetCrushRootFromSpec(clusterSpec)
+	}
+
+	// set the crush failure domain to the "host" if not already specified
+	if pool.FailureDomain == "" {
+		pool.FailureDomain = cephv1.DefaultFailureDomain
+	}
+
+	crushMap, err := getCurrentCrushMap(context, clusterInfo)
+	if err != nil {
+		return errors.Wrap(err, "failed to get current crush map")
+	}
+
+	if crushRuleExists(crushMap, ruleName) {
+		logger.Debugf("CRUSH rule %q already exists", ruleName)
+		return nil
+	}
+
+	ruleset := buildTwoStepHybridCrushRule(crushMap, ruleName, pool)
+
+	return updateCrushMap(context, clusterInfo, ruleset)
+}
+
+func updateCrushMap(context *clusterd.Context, clusterInfo *ClusterInfo, ruleset string) error {
 
 	// Fetch the compiled crush map
 	compiledCRUSHMapFilePath, err := GetCompiledCrushMap(context, clusterInfo)
@@ -409,9 +510,6 @@ func createTwoStepCrushRule(context *clusterd.Context, clusterInfo *ClusterInfo,
 		}
 	}()
 
-	// Build plain text rule
-	plainRule := buildTwoStepPlainCrushRule(crushMap, ruleName, pool)
-
 	// Append plain rule to the decompiled crush map
 	f, err := os.OpenFile(filepath.Clean(decompiledCRUSHMapFilePath), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0400)
 	if err != nil {
@@ -425,7 +523,7 @@ func createTwoStepCrushRule(context *clusterd.Context, clusterInfo *ClusterInfo,
 	}()
 
 	// Append the new crush rule into the crush map
-	if _, err := f.WriteString(plainRule); err != nil {
+	if _, err := f.WriteString(ruleset); err != nil {
 		return errors.Wrapf(err, "failed to append replicated plain crush rule to decompiled crush map %q", decompiledCRUSHMapFilePath)
 	}
 
@@ -488,6 +586,17 @@ func SetPoolProperty(context *clusterd.Context, clusterInfo *ClusterInfo, name, 
 	return nil
 }
 
+// setPoolQuota sets quotas on a given pool
+func setPoolQuota(context *clusterd.Context, clusterInfo *ClusterInfo, poolName, quotaType, quotaVal string) error {
+	args := []string{"osd", "pool", "set-quota", poolName, quotaType, quotaVal}
+	logger.Infof("setting quota %q=%q on pool %q", quotaType, quotaVal, poolName)
+	_, err := NewCephCommand(context, clusterInfo, args).Run()
+	if err != nil {
+		return errors.Wrapf(err, "failed to set %q quota on pool %q", quotaType, poolName)
+	}
+	return nil
+}
+
 // SetPoolReplicatedSizeProperty sets the replica size of a pool
 func SetPoolReplicatedSizeProperty(context *clusterd.Context, clusterInfo *ClusterInfo, poolName, size string) error {
 	propName := "size"
@@ -534,4 +643,24 @@ func GetPoolStatistics(context *clusterd.Context, clusterInfo *ClusterInfo, name
 	}
 
 	return &poolStats, nil
+}
+
+func crushRuleExists(crushMap CrushMap, ruleName string) bool {
+	// Check if the crush rule already exists
+	for _, rule := range crushMap.Rules {
+		if rule.Name == ruleName {
+			return true
+		}
+	}
+
+	return false
+}
+
+func getCurrentCrushMap(context *clusterd.Context, clusterInfo *ClusterInfo) (CrushMap, error) {
+	crushMap, err := GetCrushMap(context, clusterInfo)
+	if err != nil {
+		return CrushMap{}, errors.Wrap(err, "failed to get crush map")
+	}
+
+	return crushMap, nil
 }

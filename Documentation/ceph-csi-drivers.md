@@ -19,6 +19,14 @@ For documentation on consuming the storage:
 * RBD: See the [Block Storage](ceph-block.md) topic
 * CephFS: See the [Shared Filesystem](ceph-filesystem.md) topic
 
+## Supported Versions
+The supported Ceph CSI version is 3.3.0 or greater with Rook. Refer to ceph csi [releases](https://github.com/ceph/ceph-csi/releases)
+for more information.
+
+## Static Provisioning
+
+Both drivers also support the creation of static PV and static PVC from existing RBD image/CephFS volume. Refer to [static PVC](https://github.com/ceph/ceph-csi/blob/devel/docs/static-pvc.md) for more information.
+
 ## Configure CSI Drivers in non-default namespace
 
 If you've deployed the Rook operator in a namespace other than "rook-ceph",
@@ -35,11 +43,14 @@ for example `curl -X get http://[pod ip]:[liveness-port][liveness-path]  2>/dev/
 the expected output should be
 
 ```console
-$ curl -X GET http://10.109.65.142:9080/metrics 2>/dev/null | grep csi
-# HELP csi_liveness Liveness Probe
-# TYPE csi_liveness gauge
-csi_liveness 1
+curl -X GET http://10.109.65.142:9080/metrics 2>/dev/null | grep csi
 ```
+
+>```
+># HELP csi_liveness Liveness Probe
+># TYPE csi_liveness gauge
+>csi_liveness 1
+>```
 
 Check the [monitoring doc](ceph-monitoring.md) to see how to integrate CSI
 liveness and grpc metrics into ceph monitoring.
@@ -62,3 +73,12 @@ storageclass. Now expand the PVC by editing the PVC
 Once PVC is expanded on backend and same is reflected size is reflected on
 application mountpoint, the status capacity `pvc.status.capacity.storage` of
 PVC will be updated to new size.
+
+## RBD Mirroring
+
+To support RBD Mirroring, the [Volume Replication Operator](https://github.com/csi-addons/volume-replication-operator/blob/main/README.md) will be started in the RBD provisioner pod.
+Volume Replication Operator is a kubernetes operator that provides common and reusable APIs for storage disaster recovery. It is based on [csi-addons/spec](https://github.com/csi-addons/spec) specification and can be used by any storage provider.
+It follows controller pattern and provides extended APIs for storage disaster recovery. The extended APIs are provided via Custom Resource Definition (CRD).
+To enable volume replication:
+- For Helm deployments see the [helm settings](helm-operator.md#configuration).
+- For non-Helm deployments set `CSI_ENABLE_VOLUME_REPLICATION: "true"` in the operator.yaml

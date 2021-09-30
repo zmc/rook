@@ -33,14 +33,14 @@ func TestOSDBootstrap(t *testing.T) {
 	defer os.RemoveAll(configDir)
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			return "{\"key\":\"mysecurekey\"}", nil
 		},
 	}
 
 	context := &clusterd.Context{Executor: executor, ConfigDir: configDir}
 	defer os.RemoveAll(context.ConfigDir)
-	err := createOSDBootstrapKeyring(context, &client.ClusterInfo{Namespace: "name"}, configDir)
+	err := createOSDBootstrapKeyring(context, client.AdminClusterInfo("mycluster"), configDir)
 	assert.Nil(t, err)
 
 	targetPath := path.Join(configDir, bootstrapOsdKeyring)

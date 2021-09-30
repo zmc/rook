@@ -22,7 +22,7 @@ spec:
     stretchCluster:
       # The ceph failure domain will be extracted from the label, which by default is the zone. The nodes running OSDs must have
       # this label in order for the OSDs to be configured in the correct topology. For topology labels, see
-      # https://rook.github.io/docs/rook/master/ceph-cluster-crd.html#osd-topology.
+      # https://rook.github.io/docs/rook/latest/ceph-cluster-crd.html#osd-topology.
       failureDomainLabel: topology.kubernetes.io/zone
       # The sub failure domain is the secondary level at which the data will be placed to maintain data durability and availability.
       # The default is "host", which means that each OSD must be on a different node and you would need at least two nodes per zone.
@@ -31,13 +31,15 @@ spec:
       # the osds are started.
       subFailureDomain: host
       zones:
-      - name: a
-        arbiter: true
-      - name: b
-      - name: c
+        - name: a
+          arbiter: true
+        - name: b
+        - name: c
+  mgr:
+    count: 2
   cephVersion:
-    # Stretch cluster support upstream is only planned starting in Ceph Pacific
-    image: ceph/daemon-base:latest-master
+    # Stretch cluster support upstream is only available starting in Ceph Pacific
+    image: quay.io/ceph/ceph:v16.2.6
     allowUnsupported: true
   skipUpgradeChecks: false
   continueUpgradeAfterChecksEvenIfNotHealthy: false
@@ -55,18 +57,18 @@ spec:
     # settings as other mons. In this example, the arbiter has a toleration to run on a master node.
     arbiter:
       tolerations:
-      - key: node-role.kubernetes.io/master
-        operator: Exists
-        effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
     osd:
       nodeAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
           nodeSelectorTerms:
-          - matchExpressions:
-            - key: topology.kubernetes.io/zone
-              operator: In
-              values:
-              - b
-              - c
+            - matchExpressions:
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values:
+                    - b
+                    - c
   disruptionManagement:
     managePodBudgets: true

@@ -26,15 +26,13 @@ import (
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
-	"github.com/rook/rook/pkg/clusterd"
+	"github.com/pkg/errors"
 	rookversion "github.com/rook/rook/pkg/version"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-k8sutil")
@@ -73,7 +71,7 @@ func GetK8SVersion(clientset kubernetes.Interface) (*version.Version, error) {
 	index := strings.Index(serverVersion.GitVersion, "+")
 	if index != -1 {
 		newVersion := serverVersion.GitVersion[:index]
-		logger.Infof("returning version %s instead of %s", newVersion, serverVersion.GitVersion)
+		logger.Debugf("returning version %s instead of %s", newVersion, serverVersion.GitVersion)
 		serverVersion.GitVersion = newVersion
 	}
 	return version.MustParseSemantic(serverVersion.GitVersion), nil
@@ -117,7 +115,7 @@ func deleteResourceAndWait(namespace, name, resourceType string,
 	logger.Infof("removing %s %s if it exists", resourceType, name)
 	err := deleteAction(options)
 	if err != nil {
-		if !errors.IsNotFound(err) {
+		if !kerrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete %s. %+v", name, err)
 		}
 		return nil
@@ -130,7 +128,7 @@ func deleteResourceAndWait(namespace, name, resourceType string,
 		// check for the existence of the resource
 		err = getAction()
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if kerrors.IsNotFound(err) {
 				logger.Infof("confirmed %s does not exist", name)
 				return nil
 			}
@@ -159,6 +157,18 @@ func addRookVersionLabel(labels map[string]string) {
 	labels[RookVersionLabelKey] = value
 }
 
+// RookVersionLabelMatchesCurrent returns true if the Rook version on the resource label matches the
+// current Rook version running. It returns false if the label does not match. It returns an error
+// if the label does not exist.
+func RookVersionLabelMatchesCurrent(labels map[string]string) (bool, error) {
+	v, ok := labels[RookVersionLabelKey]
+	if !ok {
+		return false, fmt.Errorf("failed to find Rook version label %q", RookVersionLabelKey)
+	}
+	expectedVersion := validateLabelValue(rookversion.Version)
+	return (v == expectedVersion), nil
+}
+
 // validateLabelValue replaces any invalid characters
 // in the input string with a replacement character,
 // and enforces other limitations for k8s label values.
@@ -179,18 +189,13 @@ func validateLabelValue(value string) string {
 	return sanitized
 }
 
-// StartOperatorSettingsWatch starts the watch for Operator Settings ConfigMap
-func StartOperatorSettingsWatch(context *clusterd.Context, operatorNamespace, operatorSettingConfigMapName string,
-	addFunc func(obj interface{}), updateFunc func(oldObj, newObj interface{}), deleteFunc func(obj interface{}), stopCh chan struct{}) {
-	_, cacheController := cache.NewInformer(cache.NewFilteredListWatchFromClient(context.Clientset.CoreV1().RESTClient(),
-		"configmaps", operatorNamespace, func(options *metav1.ListOptions) {
-			options.FieldSelector = fmt.Sprintf("%s=%s", "metadata.name", operatorSettingConfigMapName)
-		}), &v1.ConfigMap{},
-		0,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc:    addFunc,
-			UpdateFunc: updateFunc,
-			DeleteFunc: deleteFunc,
-		})
-	go cacheController.Run(stopCh)
+func UsePDBV1Beta1Version(Clientset kubernetes.Interface) (bool, error) {
+	k8sVersion, err := GetK8SVersion(Clientset)
+	if err != nil {
+		return false, errors.Wrap(err, "failed to fetch k8s version")
+	}
+	logger.Debugf("kubernetes version fetched %v", k8sVersion)
+	// minimum k8s version required for v1 PodDisruptionBudget is 'v1.21.0'. Apply v1 if k8s version is at least 'v1.21.0', else apply v1beta1 PodDisruptionBudget.
+	minVersionForPDBV1 := "1.21.0"
+	return k8sVersion.LessThan(version.MustParseSemantic(minVersionForPDBV1)), nil
 }

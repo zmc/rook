@@ -20,7 +20,10 @@ package object
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"net/http"
 	"reflect"
+	"syscall"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	"github.com/pkg/errors"
@@ -29,14 +32,13 @@ import (
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/pool"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/exec"
+	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 type clusterConfig struct {
@@ -45,10 +47,9 @@ type clusterConfig struct {
 	store       *cephv1.CephObjectStore
 	rookVersion string
 	clusterSpec *cephv1.ClusterSpec
-	ownerRef    *metav1.OwnerReference
+	ownerInfo   *k8sutil.OwnerInfo
 	DataPathMap *config.DataPathMap
 	client      client.Client
-	scheme      *runtime.Scheme
 }
 
 type rgwConfig struct {
@@ -79,7 +80,6 @@ func (c *clusterConfig) createOrUpdateStore(realmName, zoneGroupName, zoneName s
 }
 
 func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) error {
-	ctx := context.TODO()
 	// backward compatibility, triggered during updates
 	if c.store.Spec.Gateway.Instances < 1 {
 		// Set the minimum of at least one instance
@@ -87,16 +87,12 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 		c.store.Spec.Gateway.Instances = 1
 	}
 
-	// Create the controller owner ref
-	// It will be associated to all resources of the CephObjectStore
-	ref, err := opcontroller.GetControllerObjectOwnerReference(c.store, c.scheme)
-	if err != nil || ref == nil {
-		return errors.Wrapf(err, "failed to get controller %q owner reference", c.store.Name)
-	}
-	c.ownerRef = ref
-
 	// start a new deployment and scale up
 	desiredRgwInstances := int(c.store.Spec.Gateway.Instances)
+	// If running on Pacific we force a single deployment and later set the deployment replica to the "instances" value
+	if c.clusterInfo.CephVersion.IsAtLeastPacific() {
+		desiredRgwInstances = 1
+	}
 	for i := 0; i < desiredRgwInstances; i++ {
 		var err error
 
@@ -121,17 +117,19 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 			return errors.Wrap(err, "failed to create rgw keyring")
 		}
 
-		// Check for existing deployment and set the daemon config flags
-		_, err = c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Get(ctx, rgwConfig.ResourceName, metav1.GetOptions{})
-		// We don't need to handle any error here
+		// Set the rgw config flags
+		// Previously we were checking if the deployment was present, if not we would set the config flags
+		// Which means that we would only set the flag on newly created CephObjectStore CR
+		// Unfortunately, on upgrade we would not set the flags which is not ideal for old clusters where we were no setting those flags
+		// The KV supports setting those flags even if the RGW is running
+		logger.Info("setting rgw config flags")
+		err = c.setDefaultFlagsMonConfigStore(rgwConfig.ResourceName)
 		if err != nil {
-			// Apply the flag only when the deployment is not found
-			if kerrors.IsNotFound(err) {
-				logger.Info("setting rgw config flags")
-				err = c.setDefaultFlagsMonConfigStore(rgwConfig.ResourceName)
-				if err != nil {
-					return errors.Wrap(err, "failed to set default rgw config options")
-				}
+			// Getting EPERM typically happens when the flag may not be modified at runtime
+			// This is fine to ignore
+			code, ok := exec.ExitStatus(err)
+			if ok && code != int(syscall.EPERM) {
+				return errors.Wrap(err, "failed to set default rgw config options")
 			}
 		}
 
@@ -140,12 +138,12 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 		if err != nil {
 			return nil
 		}
-		logger.Infof("object store %q deployment %q started", c.store.Name, deployment.Name)
+		logger.Infof("object store %q deployment %q created", c.store.Name, deployment.Name)
 
 		// Set owner ref to cephObjectStore object
-		err = controllerutil.SetControllerReference(c.store, deployment, c.scheme)
+		err = c.ownerInfo.SetControllerReference(deployment)
 		if err != nil {
-			return errors.Wrapf(err, "failed to set owner reference for ceph object %q secret", deployment.Name)
+			return errors.Wrapf(err, "failed to set owner reference for rgw deployment %q", deployment.Name)
 		}
 
 		// Set the deployment hash as an annotation
@@ -154,7 +152,7 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 			return errors.Wrapf(err, "failed to set annotation for deployment %q", deployment.Name)
 		}
 
-		_, createErr := c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
+		_, createErr := c.context.Clientset.AppsV1().Deployments(c.store.Namespace).Create(c.clusterInfo.Context, deployment, metav1.CreateOptions{})
 		if createErr != nil {
 			if !kerrors.IsAlreadyExists(createErr) {
 				return errors.Wrap(createErr, "failed to create rgw deployment")
@@ -192,7 +190,7 @@ func (c *clusterConfig) startRGWPods(realmName, zoneGroupName, zoneName string) 
 
 			// Delete the Secret key
 			secretToRemove := c.generateSecretName(k8sutil.IndexToName(depIDToRemove))
-			err = c.context.Clientset.CoreV1().Secrets(c.store.Namespace).Delete(ctx, secretToRemove, metav1.DeleteOptions{})
+			err = c.context.Clientset.CoreV1().Secrets(c.store.Namespace).Delete(c.clusterInfo.Context, secretToRemove, metav1.DeleteOptions{})
 			if err != nil && !kerrors.IsNotFound(err) {
 				logger.Warningf("failed to delete rgw secret %q. %v", secretToRemove, err)
 			}
@@ -280,15 +278,8 @@ func (c *clusterConfig) storeLabelSelector() string {
 
 // Validate the object store arguments
 func (r *ReconcileCephObjectStore) validateStore(s *cephv1.CephObjectStore) error {
-	if s.Name == "" {
-		return errors.New("missing name")
-	}
-	if s.Namespace == "" {
-		return errors.New("missing namespace")
-	}
-	securePort := s.Spec.Gateway.SecurePort
-	if securePort < 0 || securePort > 65535 {
-		return errors.Errorf("securePort value of %d must be between 0 and 65535", securePort)
+	if err := cephv1.ValidateObjectSpec(s); err != nil {
+		return err
 	}
 
 	// Validate the pool settings, but allow for empty pools specs in case they have already been created
@@ -320,11 +311,58 @@ func BuildDomainName(name, namespace string) string {
 	return fmt.Sprintf("%s-%s.%s.%s", AppName, name, namespace, svcDNSSuffix)
 }
 
-// buildDNSEndpoint build the dns name to reach out the service endpoint
-func buildDNSEndpoint(domainName string, port int32, secure bool) string {
+// BuildDNSEndpoint build the dns name to reach out the service endpoint
+func BuildDNSEndpoint(domainName string, port int32, secure bool) string {
 	httpPrefix := "http"
 	if secure {
 		httpPrefix = "https"
 	}
 	return fmt.Sprintf("%s://%s:%d", httpPrefix, domainName, port)
+}
+
+// GetTLSCACert fetch cacert for internal RGW requests
+func GetTlsCaCert(objContext *Context, objectStoreSpec *cephv1.ObjectStoreSpec) ([]byte, error) {
+	ctx := context.TODO()
+	var (
+		tlsCert []byte
+		err     error
+	)
+
+	if objectStoreSpec.Gateway.SSLCertificateRef != "" {
+		tlsSecretCert, err := objContext.Context.Clientset.CoreV1().Secrets(objContext.clusterInfo.Namespace).Get(ctx, objectStoreSpec.Gateway.SSLCertificateRef, metav1.GetOptions{})
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get secret %s containing TLS certificate defined in %s", objectStoreSpec.Gateway.SSLCertificateRef, objContext.Name)
+		}
+		if tlsSecretCert.Type == v1.SecretTypeOpaque {
+			tlsCert = tlsSecretCert.Data[certKeyName]
+		} else if tlsSecretCert.Type == v1.SecretTypeTLS {
+			tlsCert = tlsSecretCert.Data[v1.TLSCertKey]
+		}
+	} else if objectStoreSpec.GetServiceServingCert() != "" {
+		tlsCert, err = ioutil.ReadFile(ServiceServingCertCAFile)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to fetch TLS certificate from %q", ServiceServingCertCAFile)
+		}
+	}
+
+	return tlsCert, nil
+}
+
+// Allow overriding this function for unit tests to mock the admin ops api
+var genObjectStoreHTTPClientFunc = genObjectStoreHTTPClient
+
+func genObjectStoreHTTPClient(objContext *Context, spec *cephv1.ObjectStoreSpec) (*http.Client, []byte, error) {
+	nsName := fmt.Sprintf("%s/%s", objContext.clusterInfo.Namespace, objContext.Name)
+	c := &http.Client{}
+	tlsCert := []byte{}
+	if spec.IsTLSEnabled() {
+		var err error
+		tlsCert, err = GetTlsCaCert(objContext, spec)
+		if err != nil {
+			return nil, tlsCert, errors.Wrapf(err, "failed to fetch CA cert to establish TLS connection with object store %q", nsName)
+		}
+		insecure := false
+		c.Transport = BuildTransportTLS(tlsCert, insecure)
+	}
+	return c, tlsCert, nil
 }

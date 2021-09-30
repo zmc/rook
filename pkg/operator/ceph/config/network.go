@@ -34,8 +34,10 @@ const (
 	PublicNetworkSelectorKeyName = "public"
 	// ClusterNetworkSelectorKeyName is the network selector key for the ceph cluster network
 	ClusterNetworkSelectorKeyName = "cluster"
-	// Whereabouts Ipam type
-	WhereaboutsIpamType = "whereabouts"
+	// WhereaboutsIPAMType is Whereabouts IPAM type
+	WhereaboutsIPAMType = "whereabouts"
+	hostLocalIPAMType   = "host-local"
+	staticIPAMType      = "static"
 )
 
 var (
@@ -48,10 +50,8 @@ func generateNetworkSettings(clusterdContext *clusterd.Context, namespace string
 	cephNetworks := []Option{}
 
 	for _, selectorKey := range NetworkSelectors {
-		// This means only "public" was specified and thus we use the same subnet for cluster too
+		// skip if selector is not specified
 		if _, ok := networkSelectors[selectorKey]; !ok {
-			cephNetworks = append(cephNetworks, cephNetworks[0])
-			cephNetworks[1].Option = fmt.Sprintf("%s_network", selectorKey)
 			continue
 		}
 
@@ -94,10 +94,31 @@ func GetMultusNamespace(nad string) (string, string) {
 }
 
 func getNetworkRange(netConfig k8sutil.NetworkAttachmentConfig) string {
-	if netConfig.Ipam.Subnet != "" {
-		return netConfig.Ipam.Subnet
-	} else if netConfig.Ipam.Range != "" && netConfig.Ipam.Type == WhereaboutsIpamType {
+	var subnets []string
+
+	switch netConfig.Ipam.Type {
+	case hostLocalIPAMType:
+		if netConfig.Ipam.Subnet != "" {
+			return netConfig.Ipam.Subnet
+		}
+		for _, netRanges := range netConfig.Ipam.Ranges {
+			for _, netRange := range netRanges {
+				subnets = append(subnets, netRange.Subnet)
+			}
+		}
+		return strings.Join(subnets, ",")
+
+	case staticIPAMType:
+		for _, subnet := range netConfig.Ipam.Addresses {
+			subnets = append(subnets, subnet.Address)
+		}
+
+		return strings.Join(subnets, ",")
+
+	case WhereaboutsIPAMType:
 		return netConfig.Ipam.Range
+
+	default:
+		return ""
 	}
-	return ""
 }

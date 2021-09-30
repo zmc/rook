@@ -19,13 +19,11 @@ areas:
     - satoru-takeuchi
     reviewers:
     - Madhu-1
+    - sp98
+    - subhamkrai
   cassandra:
     approvers:
     - yanniszark
   nfs:
     reviewers:
     - rohan47
-  yugabytedb:
-    reviewers:
-    - Arnav15
-    - samkulkarni20

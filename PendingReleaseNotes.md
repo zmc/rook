@@ -1,6 +1,6 @@
 # Major Themes
 
-v1.6...
+v1.8...
 
 ## K8s Version Support
 
@@ -8,15 +8,12 @@ v1.6...
 
 ## Breaking Changes
 
-### Ceph
+- Flex driver is fully deprecated. If you are still using flex volumes, before upgrading to v1.8
+  you will need to convert them to csi volumes. See the flex conversion tool.
+- Min supported version of K8s is now 1.16. If running on an older version of K8s it is recommended
+  to update to a newer version before updating to Rook v1.8.
 
 ## Features
 
-### Core
-
-### Ceph
-
-* CephClient CRD has been converted to use the controller-runtime library
-* Extending the support of vault KMS configuration for Ceph RGW
-* Enable disruption budgets (PDBs) by default for Mon, RGW, MDS, and OSD daemons
-* Add CephFilesystemMirror CRD to deploy cephfs-mirror daemon
+- The Rook Operator does not use "tini" as an init process. Instead, it uses the "rook" and handles
+  signals on its own.

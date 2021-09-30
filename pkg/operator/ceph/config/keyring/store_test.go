@@ -23,7 +23,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/client"
+	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -37,7 +37,7 @@ func TestGenerateKey(t *testing.T) {
 	var generateKey = ""
 	var failGenerateKey = false
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			if failGenerateKey {
 				return "", errors.New("test error")
 			}
@@ -49,8 +49,8 @@ func TestGenerateKey(t *testing.T) {
 		Executor:  executor,
 	}
 	ns := "rook-ceph"
-	owner := metav1.OwnerReference{}
-	s := GetSecretStore(ctx, &client.ClusterInfo{Namespace: ns}, &owner)
+	ownerInfo := k8sutil.OwnerInfo{}
+	s := GetSecretStore(ctx, cephclient.AdminClusterInfo(ns), &ownerInfo)
 
 	generateKey = "generatedsecretkey"
 	failGenerateKey = false
@@ -77,9 +77,9 @@ func TestKeyringStore(t *testing.T) {
 	ctx := &clusterd.Context{
 		Clientset: clientset,
 	}
-	owner := metav1.OwnerReference{}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
 	ns := "rook-ceph"
-	k := GetSecretStore(ctx, &client.ClusterInfo{Namespace: ns}, &owner)
+	k := GetSecretStore(ctx, &cephclient.ClusterInfo{Namespace: ns}, ownerInfo)
 
 	assertKeyringData := func(keyringName, expectedKeyring string) {
 		s, e := clientset.CoreV1().Secrets(ns).Get(ctxt, keyringName, metav1.GetOptions{})
@@ -123,8 +123,8 @@ func TestResourceVolumeAndMount(t *testing.T) {
 	ctx := &clusterd.Context{
 		Clientset: clientset,
 	}
-	owner := metav1.OwnerReference{}
-	k := GetSecretStore(ctx, &client.ClusterInfo{Namespace: "ns"}, &owner)
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	k := GetSecretStore(ctx, &cephclient.ClusterInfo{Namespace: "ns"}, ownerInfo)
 	err := k.CreateOrUpdate("test-resource", "qwertyuiop")
 	assert.NoError(t, err)
 	err = k.CreateOrUpdate("second-resource", "asdfgyhujkl")

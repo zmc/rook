@@ -87,9 +87,9 @@ func monEndpoints(mons map[string]*cephclient.MonInfo) []string {
 	return endpoints
 }
 
-// UpdateCsiClusterConfig returns a json-formatted string containing
+// updateCsiClusterConfig returns a json-formatted string containing
 // the cluster-to-mon mapping required to configure ceph csi.
-func UpdateCsiClusterConfig(
+func updateCsiClusterConfig(
 	curr, clusterKey string, mons map[string]*cephclient.MonInfo) (string, error) {
 
 	var (
@@ -121,7 +121,7 @@ func UpdateCsiClusterConfig(
 // CreateCsiConfigMap creates an empty config map that will be later used
 // to provide cluster configuration to ceph-csi. If a config map already
 // exists, it will return it.
-func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface, ownerRef *metav1.OwnerReference) error {
+func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface, ownerInfo *k8sutil.OwnerInfo) error {
 	ctx := context.TODO()
 	configMap := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -133,8 +133,11 @@ func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface, ownerR
 		ConfigKey: "[]",
 	}
 
-	k8sutil.SetOwnerRef(&configMap.ObjectMeta, ownerRef)
-	_, err := clientset.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{})
+	err := ownerInfo.SetControllerReference(configMap)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set owner reference to csi configmap %q", configMap.Name)
+	}
+	_, err = clientset.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{})
 	if err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
 			return errors.Wrapf(err, "failed to create initial csi config map %q (in %q)", configMap.Name, namespace)
@@ -155,8 +158,6 @@ func CreateCsiConfigMap(namespace string, clientset kubernetes.Interface, ownerR
 func SaveClusterConfig(
 	clientset kubernetes.Interface, clusterNamespace string,
 	clusterInfo *cephclient.ClusterInfo, l sync.Locker) error {
-	ctx := context.TODO()
-
 	if !CSIEnabled() {
 		return nil
 	}
@@ -170,7 +171,7 @@ func SaveClusterConfig(
 	logger.Debugf("Using %+v for CSI ConfigMap Namespace", csiNamespace)
 
 	// fetch current ConfigMap contents
-	configMap, err := clientset.CoreV1().ConfigMaps(csiNamespace).Get(ctx,
+	configMap, err := clientset.CoreV1().ConfigMaps(csiNamespace).Get(clusterInfo.Context,
 		ConfigName, metav1.GetOptions{})
 	if err != nil {
 		return errors.Wrap(err, "failed to fetch current csi config map")
@@ -181,7 +182,7 @@ func SaveClusterConfig(
 	if currData == "" {
 		currData = "[]"
 	}
-	newData, err := UpdateCsiClusterConfig(
+	newData, err := updateCsiClusterConfig(
 		currData, clusterNamespace, clusterInfo.Monitors)
 	if err != nil {
 		return errors.Wrap(err, "failed to update csi config map data")
@@ -189,7 +190,7 @@ func SaveClusterConfig(
 	configMap.Data[ConfigKey] = newData
 
 	// update ConfigMap with new contents
-	if _, err := clientset.CoreV1().ConfigMaps(csiNamespace).Update(ctx, configMap, metav1.UpdateOptions{}); err != nil {
+	if _, err := clientset.CoreV1().ConfigMaps(csiNamespace).Update(clusterInfo.Context, configMap, metav1.UpdateOptions{}); err != nil {
 		return errors.Wrapf(err, "failed to update csi config map")
 	}
 

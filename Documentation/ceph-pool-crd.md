@@ -31,6 +31,26 @@ spec:
   deviceClass: hdd
 ```
 
+#### Hybrid Storage Pools
+Hybrid storage is a combination of two different storage tiers. For example, SSD and HDD.
+This helps to improve the read performance of cluster by placing, say, 1st copy of data on the higher performance tier (SSD or NVME) and remaining replicated copies on lower cost tier (HDDs).
+
+```yaml
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: replicapool
+  namespace: rook-ceph
+spec:
+  failureDomain: host
+  replicated:
+    size: 3
+    hybridStorage:
+      primaryDeviceClass: ssd
+      secondaryDeviceClass: hdd
+```
+> **IMPORTANT**: The device classes `primaryDeviceClass` and `secondaryDeviceClass` must have at least one OSD associated with them or else the pool creation will fail.
+
 ### Erasure Coded
 
 This sample will lower the overall storage capacity requirement, while also adding redundancy by using [erasure coding](#erasure-coding).
@@ -64,7 +84,7 @@ When creating an erasure-coded pool, it is highly recommended to create the pool
 RADOS Block Device (RBD) mirroring is a process of asynchronous replication of Ceph block device images between two or more Ceph clusters.
 Mirroring ensures point-in-time consistent replicas of all changes to an image, including reads and writes, block device resizing, snapshots, clones and flattening.
 It is generally useful when planning for Disaster Recovery.
-For clusters that are geographically distributed and stretching is not possible due to high latencies.
+Mirroring is for clusters that are geographically distributed and stretching a single cluster is not possible due to high latencies.
 
 The following will enable mirroring of the pool at the image level:
 
@@ -99,13 +119,15 @@ This secret can then be fetched like so:
 
 ```console
 kubectl get secret -n rook-ceph pool-peer-token-replicapool -o jsonpath='{.data.token}'|base64 -d
-eyJmc2lkIjoiOTFlYWUwZGQtMDZiMS00ZDJjLTkxZjMtMTMxMWM5ZGYzODJiIiwiY2xpZW50X2lkIjoicmJkLW1pcnJvci1wZWVyIiwia2V5IjoiQVFEN1psOWZ3V1VGRHhBQWdmY0gyZi8xeUhYeGZDUTU5L1N0NEE9PSIsIm1vbl9ob3N0IjoiW3YyOjEwLjEwMS4xOC4yMjM6MzMwMCx2MToxMC4xMDEuMTguMjIzOjY3ODldIn0=
 ```
+>```
+>eyJmc2lkIjoiOTFlYWUwZGQtMDZiMS00ZDJjLTkxZjMtMTMxMWM5ZGYzODJiIiwiY2xpZW50X2lkIjoicmJkLW1pcnJvci1wZWVyIiwia2V5IjoiQVFEN1psOWZ3V1VGRHhBQWdmY0gyZi8xeUhYeGZDUTU5L1N0NEE9PSIsIm1vbl9ob3N0IjoiW3YyOjEwLjEwMS4xOC4yMjM6MzMwMCx2MToxMC4xMDEuMTguMjIzOjY3ODldIn0=
+>```
 
 The secret must be decoded. The result will be another base64 encoded blob that you will import in the destination cluster:
 
 ```console
-external-cluster-console# rbd mirror pool peer bootstrap import <token file path>
+external-cluster-console # rbd mirror pool peer bootstrap import <token file path>
 ```
 
 See the official rbd mirror documentation on [how to add a bootstrap peer](https://docs.ceph.com/docs/master/rbd/rbd-mirroring/#bootstrap-peers).
@@ -183,14 +205,21 @@ stretched) then you will have 2 replicas per datacenter where each replica ends 
 * `mirroring`: Sets up mirroring of the pool
   * `enabled`: whether mirroring is enabled on that pool (default: false)
   * `mode`: mirroring mode to run, possible values are "pool" or "image" (required). Refer to the [mirroring modes Ceph documentation](https://docs.ceph.com/docs/master/rbd/rbd-mirroring/#enable-mirroring) for more details.
-  * `snapshotSchedules`: schedule(s) snapshot at the **pool** level. **Only** supported as of Ceph Octopus release. One or more schedules are supported.
+  * `snapshotSchedules`: schedule(s) snapshot at the **pool** level. **Only** supported as of Ceph Octopus (v15) release. One or more schedules are supported.
     * `interval`: frequency of the snapshots. The interval can be specified in days, hours, or minutes using d, h, m suffix respectively.
     * `startTime`: optional, determines at what time the snapshot process starts, specified using the ISO 8601 time format.
+  * `peers`: to configure mirroring peers. See the prerequisite [RBD Mirror documentation](ceph-rbd-mirror-crd.md) first.
+    * `secretNames`:  a list of peers to connect to. Currently **only a single** peer is supported where a peer represents a Ceph cluster.
 
 * `statusCheck`: Sets up pool mirroring status
   * `mirror`: displays the mirroring status
     * `disabled`: whether to enable or disable pool mirroring status
     * `interval`: time interval to refresh the mirroring status (default 60s)
+
+* `quotas`: Set byte and object quotas. See the [ceph documentation](https://docs.ceph.com/en/latest/rados/operations/pools/#set-pool-quotas) for more info.
+  * `maxSize`: quota in bytes as a string with quantity suffixes (e.g. "10Gi")
+  * `maxObjects`: quota in objects as an integer
+    > **NOTE**: A value of 0 disables the quota.
 
 ### Add specific pool properties
 

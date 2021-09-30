@@ -28,14 +28,13 @@ import (
 )
 
 const (
-	// VersionMaster tag for the latest manifests
-	VersionMaster = "master"
+	// LocalBuildTag tag for the latest manifests
+	LocalBuildTag = "local-build"
 
 	// test suite names
-	CassandraTestSuite  = "cassandra"
-	CephTestSuite       = "ceph"
-	NFSTestSuite        = "nfs"
-	YugabyteDBTestSuite = "yugabytedb"
+	CassandraTestSuite = "cassandra"
+	CephTestSuite      = "ceph"
+	NFSTestSuite       = "nfs"
 )
 
 var (
@@ -46,15 +45,9 @@ var (
 	deleteFromStdinArgs = append(deleteArgs, "-")
 )
 
-type TestSuite interface {
-	Setup()
-	Teardown()
-}
-
 func SkipTestSuite(name string) bool {
 	testsToRun := testStorageProvider()
-	// jenkins passes "null" if the env var is not set.
-	if testsToRun == "" || testsToRun == "null" {
+	if testsToRun == "" {
 		// run all test suites
 		return false
 	}

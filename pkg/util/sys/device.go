@@ -221,6 +221,7 @@ func GetDevicePropertiesFromPath(devicePath string, executor exec.Executor) (map
 			return map[string]string{}, nil
 		}
 
+		logger.Errorf("failed to execute lsblk. output: %s", output)
 		return nil, err
 	}
 
@@ -282,6 +283,16 @@ func GetDiskUUID(device string, executor exec.Executor) (string, error) {
 	}
 
 	return parseUUID(device, output)
+}
+
+func GetDiskDeviceClass(disk *LocalDisk) string {
+	if disk.Rotational {
+		return "hdd"
+	}
+	if strings.Contains(disk.RealPath, "nvme") {
+		return "nvme"
+	}
+	return "ssd"
 }
 
 // CheckIfDeviceAvailable checks if a device is available for consumption. The caller

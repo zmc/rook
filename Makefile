@@ -20,6 +20,17 @@ all: build
 # ====================================================================================
 # Build Options
 
+# Controller-gen version
+# f284e2e8... is master ahead of v0.5.0 which has ability to generate embedded objectmeta in CRDs
+CONTROLLER_GEN_VERSION=f284e2e8098cb0193c2b0c7c1c651ae75496539b
+
+# Set GOBIN
+ifeq (,$(shell go env GOBIN))
+GOBIN=$(shell go env GOPATH)/bin
+else
+GOBIN=$(shell go env GOBIN)
+endif
+
 # set the shell to bash in case some environments use sh
 SHELL := /bin/bash
 
@@ -51,7 +62,7 @@ SERVER_PLATFORMS := $(filter linux_%,$(PLATFORMS))
 CLIENT_PLATFORMS := $(filter-out linux_%,$(PLATFORMS))
 
 # server projects that we build on server platforms
-SERVER_PACKAGES = $(GO_PROJECT)/cmd/rook $(GO_PROJECT)/cmd/rookflex
+SERVER_PACKAGES = $(GO_PROJECT)/cmd/rook
 
 # tests packages that will be compiled into binaries
 TEST_PACKAGES = $(GO_PROJECT)/tests/integration
@@ -104,12 +115,8 @@ do.build.platform.%:
 
 do.build.parallel: $(foreach p,$(PLATFORMS), do.build.platform.$(p))
 
-build: build.common ## Build source code for host platform.
-	@$(MAKE) go.build
-# if building on non-linux platforms, also build the linux container
-ifneq ($(GOOS),linux)
+build: csv-clean build.common ## Only build for linux platform
 	@$(MAKE) go.build PLATFORM=linux_$(GOHOSTARCH)
-endif
 	@$(MAKE) -C images PLATFORM=linux_$(GOHOSTARCH)
 
 build.all: build.common ## Build source code for all platforms. Best done in the cross build container due to cross compiler dependencies.
@@ -140,7 +147,7 @@ fmt: ## Check formatting of go sources.
 	@$(MAKE) go.init
 	@$(MAKE) go.fmt
 
-codegen: ## Run code generators.
+codegen: ${CODE_GENERATOR} ## Run code generators.
 	@build/codegen/codegen.sh
 
 mod.check: go.mod.check ## Check if any go modules changed.
@@ -157,11 +164,18 @@ distclean: clean ## Remove all files that are created by building or configuring
 prune: ## Prune cached artifacts.
 	@$(MAKE) -C images prune
 
-csv-ceph: ## Generate a CSV file for OLM.
-	@cluster/olm/ceph/generate-rook-csv.sh $(CSV_VERSION) $(CSV_PLATFORM) $(ROOK_OP_VERSION)
+# Change how CRDs are generated for CSVs
+csv-ceph: export MAX_DESC_LEN=0 # sets the description length to 0 since CSV cannot be bigger than 1MB
+csv-ceph: export NO_OB_OBC_VOL_GEN=true
+csv-ceph: csv-clean crds ## Generate a CSV file for OLM.
+	$(MAKE) -C images/ceph csv
 
 csv-clean: ## Remove existing OLM files.
-	@rm -fr cluster/olm/ceph/deploy/* cluster/olm/ceph/templates/*
+	@$(MAKE) -C images/ceph csv-clean
+
+crds: $(CONTROLLER_GEN) $(YQ)
+	@echo Updating CRD manifests
+	@build/crds/build-crds.sh $(CONTROLLER_GEN) $(YQ)
 
 .PHONY: all build.common cross.build.parallel
 .PHONY: build build.all install test check vet fmt codegen mod.check clean distclean prune

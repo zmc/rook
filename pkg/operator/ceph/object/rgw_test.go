@@ -29,6 +29,7 @@ import (
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	clienttest "github.com/rook/rook/pkg/daemon/ceph/client/test"
 	"github.com/rook/rook/pkg/operator/ceph/config"
+	"github.com/rook/rook/pkg/operator/k8sutil"
 	testop "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -42,10 +43,10 @@ func TestStartRGW(t *testing.T) {
 	ctx := context.TODO()
 	clientset := testop.New(t, 3)
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
-			return `{"key":"mysecurekey"}`, nil
-		},
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			if args[0] == "auth" && args[1] == "get-or-create-key" {
+				return `{"key":"mysecurekey"}`, nil
+			}
 			return `{"id":"test-id"}`, nil
 		},
 	}
@@ -65,7 +66,8 @@ func TestStartRGW(t *testing.T) {
 	r := &ReconcileCephObjectStore{client: cl, scheme: s}
 
 	// start a basic cluster
-	c := &clusterConfig{context, info, store, version, &cephv1.ClusterSpec{}, &metav1.OwnerReference{}, data, r.client, s}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	c := &clusterConfig{context, info, store, version, &cephv1.ClusterSpec{}, ownerInfo, data, r.client}
 	err := c.startRGWPods(store.Name, store.Name, store.Name)
 	assert.Nil(t, err)
 
@@ -81,23 +83,22 @@ func validateStart(ctx context.Context, t *testing.T, c *clusterConfig, clientse
 
 func TestCreateObjectStore(t *testing.T) {
 	commandWithOutputFunc := func(command string, args ...string) (string, error) {
-		return `{"realms": []}`, nil
+		logger.Infof("Command: %s %v", command, args)
+		if command == "ceph" {
+			if args[1] == "erasure-code-profile" {
+				return `{"k":"2","m":"1","plugin":"jerasure","technique":"reed_sol_van"}`, nil
+			}
+			if args[0] == "auth" && args[1] == "get-or-create-key" {
+				return `{"key":"mykey"}`, nil
+			}
+		} else {
+			return `{"realms": []}`, nil
+		}
+		return "", nil
 	}
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithCombinedOutput: commandWithOutputFunc,
 		MockExecuteCommandWithOutput:         commandWithOutputFunc,
-		MockExecuteCommandWithOutputFile: func(command, outfile string, args ...string) (string, error) {
-			logger.Infof("Command: %s %v", command, args)
-			if command == "ceph" {
-				if args[1] == "erasure-code-profile" {
-					return `{"k":"2","m":"1","plugin":"jerasure","technique":"reed_sol_van"}`, nil
-				}
-				if args[0] == "auth" && args[1] == "get-or-create-key" {
-					return `{"key":"mykey"}`, nil
-				}
-			}
-			return "", nil
-		},
 	}
 
 	store := simpleStore()
@@ -111,7 +112,8 @@ func TestCreateObjectStore(t *testing.T) {
 	object := []runtime.Object{&cephv1.CephObjectStore{}}
 	cl := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
 	r := &ReconcileCephObjectStore{client: cl, scheme: s}
-	c := &clusterConfig{context, info, store, "1.2.3.4", &cephv1.ClusterSpec{}, &metav1.OwnerReference{}, data, r.client, s}
+	ownerInfo := cephclient.NewMinimumOwnerInfoWithOwnerRef()
+	c := &clusterConfig{context, info, store, "1.2.3.4", &cephv1.ClusterSpec{}, ownerInfo, data, r.client}
 	err := c.createOrUpdateStore(store.Name, store.Name, store.Name)
 	assert.Nil(t, err)
 }
@@ -136,10 +138,9 @@ func TestGenerateSecretName(t *testing.T) {
 		&cephv1.CephObjectStore{ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "mycluster"}},
 		"v1.1.0",
 		&cephv1.ClusterSpec{},
-		&metav1.OwnerReference{},
+		&k8sutil.OwnerInfo{},
 		&config.DataPathMap{},
-		cl,
-		scheme.Scheme}
+		cl}
 	secret := c.generateSecretName("a")
 	assert.Equal(t, "rook-ceph-rgw-default-a-keyring", secret)
 }
@@ -165,11 +166,11 @@ func TestBuildDomainNameAndEndpoint(t *testing.T) {
 
 	// non-secure endpoint
 	var port int32 = 80
-	ep := buildDNSEndpoint(dns, port, false)
+	ep := BuildDNSEndpoint(dns, port, false)
 	assert.Equal(t, "http://rook-ceph-rgw-my-store.rook-ceph.svc:80", ep)
 
 	// Secure endpoint
 	var securePort int32 = 443
-	ep = buildDNSEndpoint(dns, securePort, true)
+	ep = BuildDNSEndpoint(dns, securePort, true)
 	assert.Equal(t, "https://rook-ceph-rgw-my-store.rook-ceph.svc:443", ep)
 }

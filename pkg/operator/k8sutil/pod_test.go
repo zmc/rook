@@ -16,31 +16,28 @@ limitations under the License.
 package k8sutil
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"testing"
 
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
-
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func TestMakeRookImage(t *testing.T) {
-	assert.Equal(t, "rook/rook:v1", MakeRookImage("rook/rook:v1"))
-	assert.Equal(t, defaultVersion, MakeRookImage(""))
-}
 
 func TestGetContainerInPod(t *testing.T) {
 	expectedName := "mycontainer"
 	imageName := "myimage"
 
 	// no container fails
-	container, err := GetMatchingContainer([]v1.Container{}, expectedName)
+	_, err := GetMatchingContainer([]v1.Container{}, expectedName)
 	assert.NotNil(t, err)
 
 	// one container will allow any name
-	container, err = GetMatchingContainer([]v1.Container{{Name: "foo", Image: imageName}}, expectedName)
+	container, err := GetMatchingContainer([]v1.Container{{Name: "foo", Image: imageName}}, expectedName)
 	assert.Nil(t, err)
 	assert.Equal(t, imageName, container.Image)
 
@@ -177,14 +174,15 @@ func TestAddUnreachableNodeToleration(t *testing.T) {
 
 }
 
-func testPodSpecPlacement(t *testing.T, requiredDuringScheduling bool, req, pref int, placement *rookv1.Placement) {
+func testPodSpecPlacement(t *testing.T, requiredDuringScheduling bool, req, pref int, placement *cephv1.Placement) {
 	spec := v1.PodSpec{
 		InitContainers: []v1.Container{},
 		Containers:     []v1.Container{},
 		RestartPolicy:  v1.RestartPolicyAlways,
 	}
 
-	SetNodeAntiAffinityForPod(&spec, *placement, requiredDuringScheduling, map[string]string{"app": "mon"}, nil)
+	placement.ApplyToPodSpec(&spec)
+	SetNodeAntiAffinityForPod(&spec, requiredDuringScheduling, v1.LabelHostname, map[string]string{"app": "mon"}, nil)
 
 	// should have a required anti-affinity and no preferred anti-affinity
 	assert.Equal(t,
@@ -192,8 +190,8 @@ func testPodSpecPlacement(t *testing.T, requiredDuringScheduling bool, req, pref
 		len(spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
 }
 
-func makePlacement() rookv1.Placement {
-	return rookv1.Placement{
+func makePlacement() cephv1.Placement {
+	return cephv1.Placement{
 		PodAntiAffinity: &v1.PodAntiAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
 				{
@@ -213,7 +211,7 @@ func makePlacement() rookv1.Placement {
 
 func TestPodSpecPlacement(t *testing.T) {
 	// no placement settings in the crd
-	p := rookv1.Placement{}
+	p := cephv1.Placement{}
 	testPodSpecPlacement(t, true, 1, 0, &p)
 	testPodSpecPlacement(t, false, 0, 1, &p)
 	testPodSpecPlacement(t, false, 0, 0, &p)
@@ -223,4 +221,47 @@ func TestPodSpecPlacement(t *testing.T) {
 	testPodSpecPlacement(t, true, 2, 1, &p)
 	p = makePlacement()
 	testPodSpecPlacement(t, false, 1, 2, &p)
+}
+
+func TestIsMonScheduled(t *testing.T) {
+	ctx := context.TODO()
+	clientset := test.New(t, 1)
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mon-pod",
+			Namespace: "ns",
+			Labels: map[string]string{
+				"app":            "rook-ceph-mon",
+				"ceph_daemon_id": "a",
+			},
+		},
+	}
+
+	// no pods running
+	isScheduled, err := IsPodScheduled(clientset, "ns", "a")
+	assert.Error(t, err)
+	assert.False(t, isScheduled)
+
+	selector := fmt.Sprintf("%s=%s,%s=%s", AppAttr, "rook-ceph-mon", "ceph_daemon_id", "a")
+
+	// unscheduled pod
+	_, err = clientset.CoreV1().Pods("ns").Create(ctx, &pod, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	isScheduled, err = IsPodScheduled(clientset, "ns", selector)
+	assert.NoError(t, err)
+	assert.False(t, isScheduled)
+
+	// scheduled pod
+	pod.Spec.NodeName = "node0"
+	_, err = clientset.CoreV1().Pods("ns").Update(ctx, &pod, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+	isScheduled, err = IsPodScheduled(clientset, "ns", selector)
+	assert.NoError(t, err)
+	assert.True(t, isScheduled)
+
+	// no pods found
+	assert.NoError(t, err)
+	isScheduled, err = IsPodScheduled(clientset, "ns", "b")
+	assert.Error(t, err)
+	assert.False(t, isScheduled)
 }

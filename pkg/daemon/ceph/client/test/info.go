@@ -17,6 +17,7 @@ limitations under the License.
 package test
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -42,6 +43,7 @@ func CreateConfigDir(configDir string) error {
 // CreateTestClusterInfo creates a test cluster info
 // This would be best in a test package, but is included here to avoid cyclic dependencies
 func CreateTestClusterInfo(monCount int) *client.ClusterInfo {
+	ownerInfo := client.NewMinimumOwnerInfoWithOwnerRef()
 	c := &client.ClusterInfo{
 		FSID:          "12345",
 		Namespace:     "default",
@@ -50,7 +52,9 @@ func CreateTestClusterInfo(monCount int) *client.ClusterInfo {
 			Username: client.AdminUsername,
 			Secret:   "adminkey",
 		},
-		Monitors: map[string]*client.MonInfo{},
+		Monitors:  map[string]*client.MonInfo{},
+		OwnerInfo: ownerInfo,
+		Context:   context.TODO(),
 	}
 	mons := []string{"a", "b", "c", "d", "e"}
 	for i := 0; i < monCount; i++ {
@@ -60,5 +64,6 @@ func CreateTestClusterInfo(monCount int) *client.ClusterInfo {
 			Endpoint: fmt.Sprintf("1.2.3.%d:6789", (i + 1)),
 		}
 	}
+	c.SetName(c.Namespace)
 	return c
 }

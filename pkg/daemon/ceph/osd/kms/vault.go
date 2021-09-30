@@ -25,6 +25,7 @@ import (
 	"github.com/libopenstorage/secrets"
 	"github.com/libopenstorage/secrets/vault"
 	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -32,11 +33,16 @@ import (
 const (
 	// EtcVaultDir is vault config dir
 	EtcVaultDir = "/etc/vault"
+	// VaultSecretEngineKey is the type of secret engine used (kv, transit)
+	VaultSecretEngineKey = "VAULT_SECRET_ENGINE"
+	// VaultKVSecretEngineKey is a kv secret engine type
+	VaultKVSecretEngineKey = "kv"
+	// VaultTransitSecretEngineKey is a transit secret engine type
+	VaultTransitSecretEngineKey = "transit"
 )
 
 var (
 	vaultMandatoryConnectionDetails = []string{api.EnvVaultAddress}
-	vaultTLSConnectionDetails       = []string{api.EnvVaultCACert, api.EnvVaultClientCert, api.EnvVaultClientKey}
 )
 
 /* VAULT API INTERNAL VALUES
@@ -92,7 +98,7 @@ func InitVault(context *clusterd.Context, namespace string, config map[string]st
 
 func configTLS(clusterdContext *clusterd.Context, namespace string, config map[string]string) (map[string]string, error) {
 	ctx := context.TODO()
-	for _, tlsOption := range vaultTLSConnectionDetails {
+	for _, tlsOption := range cephv1.VaultTLSConnectionDetails {
 		tlsSecretName := GetParam(config, tlsOption)
 		if tlsSecretName == "" {
 			continue
@@ -129,12 +135,22 @@ func configTLS(clusterdContext *clusterd.Context, namespace string, config map[s
 }
 
 func put(v secrets.Secrets, secretName, secretValue string, keyContext map[string]string) error {
+	// First we must see if the key entry already exists, if it does we do nothing
+	key, err := get(v, secretName, keyContext)
+	if err != nil && err != secrets.ErrInvalidSecretId {
+		return errors.Wrapf(err, "failed to get secret %q in vault", secretName)
+	}
+	if key != "" {
+		logger.Debugf("key %q already exists in vault!", secretName)
+		return nil
+	}
+
 	// Build Secret
 	data := make(map[string]interface{})
 	data[secretName] = secretValue
 
 	// #nosec G104 Write the encryption key in Vault
-	err := v.PutSecret(secretName, data, keyContext)
+	err = v.PutSecret(secretName, data, keyContext)
 	if err != nil {
 		return errors.Wrapf(err, "failed to put secret %q in vault", secretName)
 	}
@@ -146,7 +162,7 @@ func get(v secrets.Secrets, secretName string, keyContext map[string]string) (st
 	// #nosec G104 Write the encryption key in Vault
 	s, err := v.GetSecret(secretName, keyContext)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to get secret %q in vault", secretName)
+		return "", err
 	}
 
 	return s[secretName].(string), nil
@@ -167,7 +183,7 @@ func buildKeyContext(config map[string]string) map[string]string {
 	keyContext := map[string]string{secrets.KeyVaultNamespace: config[api.EnvVaultNamespace]}
 	vaultNamespace, ok := config[api.EnvVaultNamespace]
 	if !ok || vaultNamespace == "" {
-		keyContext = nil
+		keyContext = map[string]string{}
 	}
 
 	return keyContext
@@ -193,7 +209,7 @@ func validateVaultConnectionDetails(clusterdContext *clusterd.Context, ns string
 	}
 
 	// Validate potential TLS configuration
-	for _, tlsOption := range vaultTLSConnectionDetails {
+	for _, tlsOption := range cephv1.VaultTLSConnectionDetails {
 		tlsSecretName := GetParam(kmsConfig, tlsOption)
 		if tlsSecretName != "" {
 			// Fetch the secret

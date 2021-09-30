@@ -19,7 +19,6 @@ package v1
 import (
 	"testing"
 
-	v1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -36,11 +35,11 @@ func Test_validateUpdatedCephCluster(t *testing.T) {
 	}{
 		{"everything is ok", args{&CephCluster{}, &CephCluster{}}, false},
 		{"good mon count", args{&CephCluster{Spec: ClusterSpec{Mon: MonSpec{Count: 1}}}, &CephCluster{}}, false},
-		{"even mon count", args{&CephCluster{Spec: ClusterSpec{Mon: MonSpec{Count: 2}}}, &CephCluster{}}, true},
+		{"even mon count", args{&CephCluster{Spec: ClusterSpec{Mon: MonSpec{Count: 2}}}, &CephCluster{}}, false},
 		{"good mon count", args{&CephCluster{Spec: ClusterSpec{Mon: MonSpec{Count: 3}}}, &CephCluster{}}, false},
 		{"changed DataDirHostPath", args{&CephCluster{Spec: ClusterSpec{DataDirHostPath: "foo"}}, &CephCluster{Spec: ClusterSpec{DataDirHostPath: "bar"}}}, true},
 		{"changed HostNetwork", args{&CephCluster{Spec: ClusterSpec{Network: NetworkSpec{HostNetwork: false}}}, &CephCluster{Spec: ClusterSpec{Network: NetworkSpec{HostNetwork: true}}}}, true},
-		{"changed storageClassDeviceSet encryption", args{&CephCluster{Spec: ClusterSpec{Storage: v1.StorageScopeSpec{StorageClassDeviceSets: []v1.StorageClassDeviceSet{{Name: "foo", Encrypted: false}}}}}, &CephCluster{Spec: ClusterSpec{Storage: v1.StorageScopeSpec{StorageClassDeviceSets: []v1.StorageClassDeviceSet{{Name: "foo", Encrypted: true}}}}}}, true},
+		{"changed storageClassDeviceSet encryption", args{&CephCluster{Spec: ClusterSpec{Storage: StorageScopeSpec{StorageClassDeviceSets: []StorageClassDeviceSet{{Name: "foo", Encrypted: false}}}}}, &CephCluster{Spec: ClusterSpec{Storage: StorageScopeSpec{StorageClassDeviceSets: []StorageClassDeviceSet{{Name: "foo", Encrypted: true}}}}}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

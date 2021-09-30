@@ -79,6 +79,13 @@ func DefaultCentralizedConfigs(cephVersion version.CephVersion) []Option {
 		}...)
 	}
 
+	// Every release before Quincy will enable PG auto repair on Bluestore OSDs
+	if !cephVersion.IsAtLeastQuincy() {
+		overrides = append(overrides, []Option{
+			configOverride("global", "osd scrub auto repair", "true"),
+		}...)
+	}
+
 	return overrides
 }
 
@@ -86,8 +93,15 @@ func DefaultCentralizedConfigs(cephVersion version.CephVersion) []Option {
 // made to override these options for the Ceph clusters it creates.
 func DefaultLegacyConfigs() []Option {
 	overrides := []Option{
-		// TODO: drop this when FlexVolume is no longer supported
+		// TODO: move this under LegacyConfigs() when FlexVolume is no longer supported
 		configOverride("global", "rbd_default_features", "3"),
 	}
 	return overrides
+}
+
+// LegacyConfigs represents old configuration that were applied to a cluster and not needed anymore
+func LegacyConfigs() []Option {
+	return []Option{
+		{Who: "global", Option: "log file"},
+	}
 }

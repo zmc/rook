@@ -40,7 +40,7 @@ const (
 
 // CreateCrashCollectorSecret creates the Kubernetes Crash Collector Secret
 func CreateCrashCollectorSecret(context *clusterd.Context, clusterInfo *client.ClusterInfo) error {
-	k := keyring.GetSecretStore(context, clusterInfo, &clusterInfo.OwnerRef)
+	k := keyring.GetSecretStore(context, clusterInfo, clusterInfo.OwnerInfo)
 
 	// Create CrashCollector Ceph key
 	crashCollectorSecretKey, err := createCrashCollectorKeyring(k)
@@ -88,12 +88,15 @@ func createOrUpdateCrashCollectorSecret(clusterInfo *client.ClusterInfo, crashCo
 		Data: crashCollectorSecret,
 		Type: k8sutil.RookType,
 	}
-	k8sutil.SetOwnerRef(&s.ObjectMeta, &clusterInfo.OwnerRef)
+	err := clusterInfo.OwnerInfo.SetControllerReference(s)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set owner reference to crash controller secret %q", s.Name)
+	}
 
 	// Create Kubernetes Secret
-	err := k.CreateSecret(s)
+	err = k.CreateSecret(s)
 	if err != nil {
-		return errors.Wrapf(err, "failed to create kubernetes secret %q for cluster %q", crashCollectorSecret, clusterInfo.Namespace)
+		return errors.Wrapf(err, "failed to create kubernetes secret %q for cluster %q", s.Name, clusterInfo.Namespace)
 	}
 
 	logger.Infof("created kubernetes crash collector secret for cluster %q", clusterInfo.Namespace)

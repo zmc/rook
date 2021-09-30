@@ -22,10 +22,9 @@ import (
 	"reflect"
 	"testing"
 
-	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	optest "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
-	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -53,8 +52,8 @@ func TestValidNode(t *testing.T) {
 	nodeA := "nodeA"
 	nodeB := "nodeB"
 
-	storage := rookv1.StorageScopeSpec{
-		Nodes: []rookv1.Node{
+	storage := cephv1.StorageScopeSpec{
+		Nodes: []cephv1.Node{
 			{
 				Name: nodeA,
 			},
@@ -63,7 +62,7 @@ func TestValidNode(t *testing.T) {
 			},
 		},
 	}
-	var placement rookv1.Placement
+	var placement cephv1.Placement
 	// set up a fake k8s client set and watcher to generate events that the operator will listen to
 	clientset := fake.NewSimpleClientset()
 
@@ -206,7 +205,7 @@ func TestNodeIsReady(t *testing.T) {
 func TestGetRookNodesMatchingKubernetesNodes(t *testing.T) {
 	ctx := context.TODO()
 	clientset := optest.New(t, 3) // create nodes 0, 1, and 2
-	rookNodes := []rookv1.Node{}
+	rookNodes := []cephv1.Node{}
 
 	getNode := func(name string) v1.Node {
 		n, err := clientset.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
@@ -220,7 +219,7 @@ func TestGetRookNodesMatchingKubernetesNodes(t *testing.T) {
 	assert.Empty(t, nodes)
 
 	// more rook nodes specified than nodes exist
-	rookNodes = []rookv1.Node{
+	rookNodes = []cephv1.Node{
 		{Name: "node0"},
 		{Name: "node2"},
 		{Name: "node5"}}
@@ -231,7 +230,7 @@ func TestGetRookNodesMatchingKubernetesNodes(t *testing.T) {
 	assert.Contains(t, nodes, getNode("node2"))
 
 	// rook nodes match k8s nodes
-	rookNodes = []rookv1.Node{
+	rookNodes = []cephv1.Node{
 		{Name: "node0"},
 		{Name: "node1"},
 		{Name: "node2"}}
@@ -266,33 +265,33 @@ func TestRookNodesMatchingKubernetesNodes(t *testing.T) {
 	k8sNodes := []v1.Node{n0, n1, n2}
 
 	// no rook nodes specified for input
-	rookStorage := rookv1.StorageScopeSpec{
-		Nodes: []rookv1.Node{},
+	rookStorage := cephv1.StorageScopeSpec{
+		Nodes: []cephv1.Node{},
 	}
 	retNodes := RookNodesMatchingKubernetesNodes(rookStorage, k8sNodes)
 	assert.Len(t, retNodes, 0)
 
 	// all rook nodes specified
-	rookStorage.Nodes = []rookv1.Node{
+	rookStorage.Nodes = []cephv1.Node{
 		{Name: "node0"},
 		{Name: "node1"},
 		{Name: "node2"}}
 	retNodes = RookNodesMatchingKubernetesNodes(rookStorage, k8sNodes)
 	assert.Len(t, retNodes, 3)
 	// this should return nodes named by hostname if that is available
-	assert.Contains(t, retNodes, rookv1.Node{Name: "node0-hostname"})
-	assert.Contains(t, retNodes, rookv1.Node{Name: "node1"})
-	assert.Contains(t, retNodes, rookv1.Node{Name: "node2"})
+	assert.Contains(t, retNodes, cephv1.Node{Name: "node0-hostname"})
+	assert.Contains(t, retNodes, cephv1.Node{Name: "node1"})
+	assert.Contains(t, retNodes, cephv1.Node{Name: "node2"})
 
 	// more rook nodes specified than exist
-	rookStorage.Nodes = []rookv1.Node{
+	rookStorage.Nodes = []cephv1.Node{
 		{Name: "node0-hostname"},
 		{Name: "node2"},
 		{Name: "node5"}}
 	retNodes = RookNodesMatchingKubernetesNodes(rookStorage, k8sNodes)
 	assert.Len(t, retNodes, 2)
-	assert.Contains(t, retNodes, rookv1.Node{Name: "node0-hostname"})
-	assert.Contains(t, retNodes, rookv1.Node{Name: "node2"})
+	assert.Contains(t, retNodes, cephv1.Node{Name: "node0-hostname"})
+	assert.Contains(t, retNodes, cephv1.Node{Name: "node2"})
 
 	// no k8s nodes specified
 	retNodes = RookNodesMatchingKubernetesNodes(rookStorage, []v1.Node{})
@@ -373,78 +372,6 @@ func TestGenerateNodeAffinity(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestTopologyLabels(t *testing.T) {
-	additionalTopologyLabels := []string{
-		"rack", "row", "datacenter",
-	}
-	nodeLabels := map[string]string{}
-	topology := ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 0, len(topology))
-
-	// invalid non-namespaced zone and region labels are simply ignored
-	nodeLabels = map[string]string{
-		"region": "badregion",
-		"zone":   "badzone",
-	}
-	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 0, len(topology))
-
-	// invalid zone and region labels are simply ignored
-	nodeLabels = map[string]string{
-		"topology.rook.io/region": "r1",
-		"topology.rook.io/zone":   "z1",
-	}
-	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 0, len(topology))
-
-	// load all the expected labels
-	nodeLabels = map[string]string{
-		corev1.LabelZoneRegionStable:        "r1",
-		corev1.LabelZoneFailureDomainStable: "z1",
-		"kubernetes.io/hostname":            "myhost",
-		"topology.rook.io/rack":             "rack1",
-		"topology.rook.io/row":              "row1",
-		"topology.rook.io/datacenter":       "d1",
-	}
-	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 6, len(topology))
-	assert.Equal(t, "r1", topology["region"])
-	assert.Equal(t, "z1", topology["zone"])
-	assert.Equal(t, "myhost", topology["host"])
-	assert.Equal(t, "rack1", topology["rack"])
-	assert.Equal(t, "row1", topology["row"])
-	assert.Equal(t, "d1", topology["datacenter"])
-
-	// ensure deprecated k8s labels are loaded
-	nodeLabels = map[string]string{
-		corev1.LabelZoneRegion:        "r1",
-		corev1.LabelZoneFailureDomain: "z1",
-	}
-	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 2, len(topology))
-	assert.Equal(t, "r1", topology["region"])
-	assert.Equal(t, "z1", topology["zone"])
-
-	// ensure deprecated k8s labels are overridden
-	nodeLabels = map[string]string{
-		corev1.LabelZoneRegionStable:        "r1",
-		corev1.LabelZoneFailureDomainStable: "z1",
-		corev1.LabelZoneRegion:              "oldregion",
-		corev1.LabelZoneFailureDomain:       "oldzone",
-	}
-	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 2, len(topology))
-	assert.Equal(t, "r1", topology["region"])
-	assert.Equal(t, "z1", topology["zone"])
-
-	// invalid labels under topology.rook.io return an error
-	nodeLabels = map[string]string{
-		"topology.rook.io/row/bad": "r1",
-	}
-	topology = ExtractTopologyFromLabels(nodeLabels, additionalTopologyLabels)
-	assert.Equal(t, 0, len(topology))
 }
 
 func TestGetNotReadyKubernetesNodes(t *testing.T) {

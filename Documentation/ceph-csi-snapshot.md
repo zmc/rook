@@ -6,15 +6,11 @@ indent: true
 
 ## Prerequisites
 
-* Requires Kubernetes v1.17+ which supports snapshot beta.
+- Rook officially supports v1/v1beta1 snapshots for kubernetes v1.17+.
 
-* Install the new snapshot controller and snapshot beta CRD. More info can be found
-[here](https://github.com/kubernetes-csi/external-snapshotter/tree/master#usage)
+- Install the snapshot controller and snapshot v1/v1beta1 CRD as required. More info can be found [here](https://github.com/kubernetes-csi/external-snapshotter/tree/v4.0.0#usage).
 
-Note: If the Kubernetes distributor you are using does not supports the snapshot beta,
-still you can use the Alpha snapshots. refer to
-[snapshot](https://github.com/rook/rook/blob/release-1.3/Documentation/ceph-csi-drivers.md#rbd-snapshots)
-on how to use snapshots.
+Note: If only Alpha snapshots are available, enable snapshotter in `rook-ceph-operator-config` or helm chart `values.yaml`, change the external-snapshotter image to `k8s.gcr.io/sig-storage/csi-snapshotter:v1.2.2` and refer to the [alpha snapshots documentation](https://github.com/rook/rook/blob/release-1.3/Documentation/ceph-csi-drivers.md#rbd-snapshots)
 
 * We also need a `VolumeSnapshotClass` for volume snapshot to work. The purpose of a `VolumeSnapshotClass` is
 defined in [the kubernetes
@@ -25,6 +21,10 @@ In short, as the documentation describes it:
 > “classes” of storage they offer when provisioning a volume,
 > VolumeSnapshotClass provides a way to describe the “classes” of storage when
 > provisioning a volume snapshot.
+
+## Upgrade Snapshot API
+
+If your Kubernetes version is updated to a newer version of the snapshot API, follow the upgrade guide [here](https://github.com/kubernetes-csi/external-snapshotter/tree/v4.0.0#upgrade) to upgrade from v1alpha1 to v1beta1, or v1beta1 to v1.
 
 
 ## RBD Snapshots
@@ -59,13 +59,21 @@ kubectl create -f cluster/examples/kubernetes/ceph/csi/rbd/snapshot.yaml
 
 ```console
 kubectl get volumesnapshotclass
-NAME                      DRIVER                       DELETIONPOLICY   AGE
-csi-rbdplugin-snapclass   rook-ceph.rbd.csi.ceph.com   Delete           3h55m
-
-kubectl get volumesnapshot
-NAME               READYTOUSE   SOURCEPVC   SOURCESNAPSHOTCONTENT   RESTORESIZE   SNAPSHOTCLASS             SNAPSHOTCONTENT                                    CREATIONTIME   AGE
-rbd-pvc-snapshot   true         rbd-pvc                             1Gi           csi-rbdplugin-snapclass   snapcontent-79090db0-7c66-4b18-bf4a-634772c7cac7   3h50m          3h51m
 ```
+
+>```
+>NAME                      DRIVER                       DELETIONPOLICY   AGE
+>csi-rbdplugin-snapclass   rook-ceph.rbd.csi.ceph.com   Delete           3h55m
+>```
+
+```console
+kubectl get volumesnapshot
+```
+
+>```
+>NAME               READYTOUSE   SOURCEPVC   SOURCESNAPSHOTCONTENT   RESTORESIZE   SNAPSHOTCLASS             SNAPSHOTCONTENT                                    CREATIONTIME   AGE
+>rbd-pvc-snapshot   true         rbd-pvc                             1Gi           csi-rbdplugin-snapclass   snapcontent-79090db0-7c66-4b18-bf4a-634772c7cac7   3h50m          3h51m
+>```
 
 The snapshot will be ready to restore to a new PVC when the `READYTOUSE` field of the
 `volumesnapshot` is set to true.
@@ -87,10 +95,12 @@ kubectl create -f cluster/examples/kubernetes/ceph/csi/rbd/pvc-restore.yaml
 
 ```console
 kubectl get pvc
-NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS          AGE
-rbd-pvc           Bound    pvc-84294e34-577a-11e9-b34f-525400581048   1Gi        RWO            rook-ceph-block       34m
-rbd-pvc-restore   Bound    pvc-575537bf-577f-11e9-b34f-525400581048   1Gi        RWO            rook-ceph-block       8s
 ```
+>```
+>NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS          AGE
+>rbd-pvc           Bound    pvc-84294e34-577a-11e9-b34f-525400581048   1Gi        RWO            rook-ceph-block       34m
+>rbd-pvc-restore   Bound    pvc-575537bf-577f-11e9-b34f-525400581048   1Gi        RWO            rook-ceph-block       8s
+>```
 
 ## RBD snapshot resource Cleanup
 
@@ -135,13 +145,19 @@ kubectl create -f cluster/examples/kubernetes/ceph/csi/cephfs/snapshot.yaml
 
 ```console
 kubectl get volumesnapshotclass
-NAME                        DRIVER                          DELETIONPOLICY   AGE
-csi-cephfslugin-snapclass   rook-ceph.cephfs.csi.ceph.com   Delete           3h55m
-
-kubectl get volumesnapshot
-NAME                  READYTOUSE   SOURCEPVC   SOURCESNAPSHOTCONTENT  RESTORESIZE   SNAPSHOTCLASS                SNAPSHOTCONTENT                                   CREATIONTIME   AGE
-cephfs-pvc-snapshot   true         cephfs-pvc                         1Gi           csi-cephfsplugin-snapclass   snapcontent-34476204-a14a-4d59-bfbc-2bbba695652c  3h50m          3h51m
 ```
+>```
+>NAME                        DRIVER                          DELETIONPOLICY   AGE
+>csi-cephfslugin-snapclass   rook-ceph.cephfs.csi.ceph.com   Delete           3h55m
+>```
+```console
+kubectl get volumesnapshot
+```
+
+>```
+>NAME                  READYTOUSE   SOURCEPVC   SOURCESNAPSHOTCONTENT  RESTORESIZE   SNAPSHOTCLASS                SNAPSHOTCONTENT                                   CREATIONTIME   AGE
+>cephfs-pvc-snapshot   true         cephfs-pvc                         1Gi           csi-cephfsplugin-snapclass   snapcontent-34476204-a14a-4d59-bfbc-2bbba695652c  3h50m          3h51m
+>```
 
 The snapshot will be ready to restore to a new PVC when `READYTOUSE` field of the
 `volumesnapshot` is set to true.
@@ -163,10 +179,13 @@ kubectl create -f cluster/examples/kubernetes/ceph/csi/cephfs/pvc-restore.yaml
 
 ```console
 kubectl get pvc
-NAME                 STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
-cephfs-pvc           Bound    pvc-74734901-577a-11e9-b34f-525400581048   1Gi        RWX            rook-cephfs       55m
-cephfs-pvc-restore   Bound    pvc-95308c75-6c93-4928-a551-6b5137192209   1Gi        RWX            rook-cephfs       34s
 ```
+
+>```
+>NAME                 STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
+>cephfs-pvc           Bound    pvc-74734901-577a-11e9-b34f-525400581048   1Gi        RWX            rook-cephfs       55m
+>cephfs-pvc-restore   Bound    pvc-95308c75-6c93-4928-a551-6b5137192209   1Gi        RWX            rook-cephfs       34s
+>```
 
 ## CephFS snapshot resource Cleanup
 

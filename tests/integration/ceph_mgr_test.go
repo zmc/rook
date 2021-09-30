@@ -19,10 +19,12 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"sort"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/tests/framework/installer"
@@ -37,33 +39,25 @@ import (
 // Ceph orchestrator device ls
 // Ceph orchestrator status
 // Ceph orchestrator host ls
-// Ceph orchestrator create OSD
 // Ceph orchestrator ls
 // **************************************************
 func TestCephMgrSuite(t *testing.T) {
 	if installer.SkipTestSuite(installer.CephTestSuite) {
 		t.Skip()
 	}
-	// Skip this test suite in master and release builds. If there is an issue
-	// running against Ceph master we don't want to block the official builds.
-	if installer.TestIsOfficialBuild() {
-		t.Skip()
-	}
-
-	logger.Info("TEMPORARILY disable the mgr test suite until https://github.com/rook/rook/issues/5877 is resolved")
-	t.Skip()
 
 	s := new(CephMgrSuite)
 	defer func(s *CephMgrSuite) {
-		HandlePanics(recover(), s.cluster, s.T)
+		HandlePanics(recover(), s.TearDownSuite, s.T)
 	}(s)
 	suite.Run(t, s)
 }
 
 type CephMgrSuite struct {
 	suite.Suite
-	cluster   *TestCluster
+	settings  *installer.TestCephSettings
 	k8sh      *utils.K8sHelper
+	installer *installer.CephInstaller
 	namespace string
 }
 
@@ -87,97 +81,182 @@ type service struct {
 	Status      serviceStatus
 }
 
-func (suite *CephMgrSuite) SetupSuite() {
-	suite.namespace = "mgr-ns"
+func (s *CephMgrSuite) SetupSuite() {
+	s.namespace = "mgr-ns"
 
-	mgrTestCluster := TestCluster{
-		clusterName:             suite.namespace,
-		namespace:               suite.namespace,
-		storeType:               "bluestore",
-		storageClassName:        "",
-		useHelm:                 false,
-		usePVC:                  false,
-		mons:                    1,
-		rbdMirrorWorkers:        0,
-		rookCephCleanup:         true,
-		skipOSDCreation:         true,
-		minimalMatrixK8sVersion: cephMasterSuiteMinimalTestVersion,
-		rookVersion:             installer.VersionMaster,
-		cephVersion:             installer.MasterVersion,
+	s.settings = &installer.TestCephSettings{
+		ClusterName:       s.namespace,
+		OperatorNamespace: installer.SystemNamespace(s.namespace),
+		Namespace:         s.namespace,
+		StorageClassName:  "",
+		UseHelm:           false,
+		UsePVC:            false,
+		Mons:              1,
+		SkipOSDCreation:   true,
+		EnableDiscovery:   true,
+		RookVersion:       installer.LocalBuildTag,
+		CephVersion:       installer.MasterVersion,
+	}
+	s.settings.ApplyEnvVars()
+	s.installer, s.k8sh = StartTestCluster(s.T, s.settings)
+	s.waitForOrchestrationModule()
+	s.prepareLocalStorageClass("local-storage")
+}
+
+func (s *CephMgrSuite) AfterTest(suiteName, testName string) {
+	s.installer.CollectOperatorLog(suiteName, testName)
+}
+
+func (s *CephMgrSuite) TearDownSuite() {
+	_ = s.k8sh.DeleteResource("sc", "local-storage")
+	s.installer.UninstallRook()
+}
+
+func (s *CephMgrSuite) execute(command []string) (error, string) {
+	orchCommand := append([]string{"orch"}, command...)
+	return s.installer.Execute("ceph", orchCommand, s.namespace)
+}
+
+func (s *CephMgrSuite) prepareLocalStorageClass(storageClassName string) {
+	// Rook orchestrator use PVs based in this storage class to create OSDs
+	// It is also needed to list "devices"
+	localStorageClass := `
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: ` + storageClassName + `
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+`
+	err := s.k8sh.ResourceOperation("apply", localStorageClass)
+	if err == nil {
+		err, _ = s.installer.Execute("ceph", []string{"config", "set", "mgr", "mgr/rook/storage_class", storageClassName}, s.namespace)
+		if err == nil {
+			logger.Infof("Storage class %q set in manager config", storageClassName)
+		} else {
+			assert.Fail(s.T(), fmt.Sprintf("Error configuring local storage class in manager config: %q", err))
+		}
+	} else {
+		assert.Fail(s.T(), fmt.Sprintf("Error creating local storage class: %q ", err))
+	}
+}
+
+func (s *CephMgrSuite) enableOrchestratorModule() {
+	logger.Info("Enabling Rook orchestrator module: <ceph mgr module enable rook --force>")
+	err, output := s.installer.Execute("ceph", []string{"mgr", "module", "enable", "rook", "--force"}, s.namespace)
+	logger.Infof("output: %s", output)
+	if err != nil {
+		logger.Infof("Failed to enable rook orchestrator module: %q", err)
+		return
 	}
 
-	suite.cluster, suite.k8sh = StartTestCluster(suite.T, &mgrTestCluster)
-	suite.waitForOrchestrationModule()
+	logger.Info("Setting orchestrator backend to Rook .... <ceph orch set backend rook>")
+	err, output = s.execute([]string{"set", "backend", "rook"})
+	logger.Infof("output: %s", output)
+	if err != nil {
+		logger.Infof("Not possible to set rook as backend orchestrator module: %q", err)
+	}
 }
 
-func (suite *CephMgrSuite) AfterTest(suiteName, testName string) {
-	suite.cluster.installer.CollectOperatorLog(suiteName, testName, installer.SystemNamespace(suite.namespace))
-}
-
-func (suite *CephMgrSuite) TearDownSuite() {
-	suite.cluster.Teardown()
-}
-
-func (suite *CephMgrSuite) execute(command []string) (error, string) {
-	orchCommand := append([]string{"orch"}, command...)
-	return suite.cluster.installer.Execute("ceph", orchCommand, suite.namespace)
-}
-
-func (suite *CephMgrSuite) waitForOrchestrationModule() {
+func (s *CephMgrSuite) waitForOrchestrationModule() {
 	var err error
+
+	// Status struct
+	type orchStatus struct {
+		Available bool   `json:"available"`
+		Backend   string `json:"backend"`
+	}
+
 	for timeout := 0; timeout < 30; timeout++ {
-		err, output := suite.execute([]string{"status"})
+		logger.Info("Waiting for rook orchestrator module enabled and ready ...")
+		err, output := s.execute([]string{"status", "--format", "json"})
 		logger.Infof("%s", output)
 		if err == nil {
-			logger.Info("Rook Toolbox ready to execute commands")
-			return
+			logger.Info("Ceph orchestrator ready to execute commands")
+
+			// Get status information
+			bytes := []byte(output)
+			logBytesInfo(bytes)
+
+			var status orchStatus
+			err := json.Unmarshal(bytes[:len(output)], &status)
+			if err != nil {
+				logger.Error("Error getting ceph orch status")
+				continue
+			}
+
+			if status.Backend != "rook" {
+				assert.Fail(s.T(), fmt.Sprintf("Orchestrator backend is <%q>. Setting it to <Rook>", status.Backend))
+				s.enableOrchestratorModule()
+			} else {
+				logger.Info("Orchestrator backend is <Rook>")
+				return
+			}
+		} else {
+			exitError, _ := err.(*exec.ExitError)
+			if exitError.ExitCode() == 22 { // The <ceph orch> commands are still not recognized
+				logger.Info("Ceph manager modules still not ready ... ")
+			} else if exitError.ExitCode() == 2 { // The rook orchestrator is not the orchestrator backend
+				s.enableOrchestratorModule()
+			}
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
-	logger.Error("Giving up waiting for Rook Toolbox to be ready")
-	assert.Nil(suite.T(), err)
+	if err != nil {
+		logger.Error("Giving up waiting for manager module to be ready")
+	}
+	require.Nil(s.T(), err)
 }
-func (suite *CephMgrSuite) TestDeviceLs() {
+func (s *CephMgrSuite) TestDeviceLs() {
 	logger.Info("Testing .... <ceph orch device ls>")
-	err, device_list := suite.execute([]string{"device", "ls"})
-	assert.Nil(suite.T(), err)
+	err, device_list := s.execute([]string{"device", "ls"})
+	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", device_list)
 }
 
-func (suite *CephMgrSuite) TestStatus() {
+func (s *CephMgrSuite) TestStatus() {
 	logger.Info("Testing .... <ceph orch status>")
-	err, status := suite.execute([]string{"status"})
-	assert.Nil(suite.T(), err)
+	err, status := s.execute([]string{"status"})
+	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", status)
 
-	assert.Equal(suite.T(), status, "Backend: rook\nAvailable: True")
+	assert.Equal(s.T(), status, "Backend: rook\nAvailable: Yes")
 }
 
-func (suite *CephMgrSuite) TestHostLs() {
+func logBytesInfo(bytesSlice []byte) {
+	logger.Infof("---- bytes slice info ---")
+	logger.Infof("bytes: %v\n", bytesSlice)
+	logger.Infof("length: %d\n", len(bytesSlice))
+	logger.Infof("string: -->%s<--\n", string(bytesSlice))
+	logger.Infof("-------------------------")
+}
+
+func (s *CephMgrSuite) TestHostLs() {
 	logger.Info("Testing .... <ceph orch host ls>")
 
 	// Get the orchestrator hosts
-	err, output := suite.execute([]string{"host", "ls", "json"})
-	assert.Nil(suite.T(), err)
+	err, output := s.execute([]string{"host", "ls", "json"})
+	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", output)
 
 	hosts := []byte(output)
-	var hostsList []host
+	logBytesInfo(hosts)
 
-	err = json.Unmarshal(hosts, &hostsList)
+	var hostsList []host
+	err = json.Unmarshal(hosts[:len(output)], &hostsList)
 	if err != nil {
-		assert.Nil(suite.T(), err)
+		assert.Nil(s.T(), err)
 	}
 
 	var hostOutput []string
 	for _, hostItem := range hostsList {
-		hostOutput = append(hostOutput, hostItem.Addr)
+		hostOutput = append(hostOutput, hostItem.Hostname)
 	}
 	sort.Strings(hostOutput)
 
 	// get the k8s nodes
-	nodes, err := k8sutil.GetNodeHostNames(suite.k8sh.Clientset)
-	assert.Nil(suite.T(), err)
+	nodes, err := k8sutil.GetNodeHostNames(s.k8sh.Clientset)
+	assert.Nil(s.T(), err)
 
 	k8sNodes := make([]string, 0, len(nodes))
 	for k := range nodes {
@@ -186,70 +265,33 @@ func (suite *CephMgrSuite) TestHostLs() {
 	sort.Strings(k8sNodes)
 
 	// nodes and hosts must be the same
-	assert.Equal(suite.T(), hostOutput, k8sNodes)
+	assert.Equal(s.T(), hostOutput, k8sNodes)
 }
 
-func (suite *CephMgrSuite) TestCreateOSD() {
-	logger.Info("Testing .... <ceph orch create OSD>")
-
-	// Get the first available device
-	err, deviceList := suite.execute([]string{"device", "ls", "--format", "json"})
-	assert.Nil(suite.T(), err)
-	logger.Infof("output = %s", deviceList)
-
-	inventory := make([]map[string]interface{}, 0)
-
-	err = json.Unmarshal([]byte(deviceList), &inventory)
-	assert.Nil(suite.T(), err)
-
-	selectedNode := ""
-	selectedDevice := ""
-	for _, node := range inventory {
-		for _, device := range node["devices"].([]interface{}) {
-			if device.(map[string]interface{})["available"].(bool) {
-				selectedNode = node["name"].(string)
-				selectedDevice = strings.TrimPrefix(device.(map[string]interface{})["path"].(string), "/dev/")
-				break
-			}
-		}
-		if selectedDevice != "" {
-			break
-		}
-	}
-	assert.NotEqual(suite.T(), "", selectedDevice, "No devices available to create test OSD")
-	assert.NotEqual(suite.T(), "", selectedNode, "No nodes available to create test OSD")
-
-	if selectedDevice == "" || selectedNode == "" {
-		return
-	}
-	// Create the OSD
-	err, output := suite.execute([]string{"daemon", "add", "osd", fmt.Sprintf("%s:%s", selectedNode, selectedDevice)})
-
-	assert.Nil(suite.T(), err)
-	logger.Infof("output = %s", output)
-
-	err = suite.k8sh.WaitForPodCount("app=rook-ceph-osd", suite.namespace, 1)
-	assert.Nil(suite.T(), err)
-}
-
-func (suite *CephMgrSuite) TestServiceLs() {
-	logger.Info("Testing .... <ceph orch ls>")
-	err, output := suite.execute([]string{"ls", "--format", "json"})
-	assert.Nil(suite.T(), err)
+func (s *CephMgrSuite) TestServiceLs() {
+	logger.Info("Testing .... <ceph orch ls --format json>")
+	err, output := s.execute([]string{"ls", "--format", "json"})
+	assert.Nil(s.T(), err)
 	logger.Infof("output = %s", output)
 
 	services := []byte(output)
+	logBytesInfo(services)
+
 	var servicesList []service
+	err = json.Unmarshal(services[:len(output)], &servicesList)
+	assert.Nil(s.T(), err)
 
-	err = json.Unmarshal(services, &servicesList)
-	assert.Nil(suite.T(), err)
-
+	labelFilter := ""
 	for _, svc := range servicesList {
-		labelFilter := fmt.Sprintf("app=rook-ceph-%s", svc.ServiceName)
-		k8sPods, err := k8sutil.PodsRunningWithLabel(suite.k8sh.Clientset, suite.namespace, labelFilter)
+		if svc.ServiceName != "crash" {
+			labelFilter = fmt.Sprintf("app=rook-ceph-%s", svc.ServiceName)
+		} else {
+			labelFilter = "app=rook-ceph-crashcollector"
+		}
+		k8sPods, err := k8sutil.PodsRunningWithLabel(s.k8sh.Clientset, s.namespace, labelFilter)
 		logger.Infof("Service: %+v", svc)
-		logger.Infof("k8s pods for svc %q: %d", svc.ServiceName, k8sPods)
-		assert.Nil(suite.T(), err)
-		assert.Equal(suite.T(), svc.Status.Running, k8sPods, fmt.Sprintf("Wrong number of pods for kind of service <%s>", svc.ServiceName))
+		logger.Infof("k8s pods for svc %q using label <%q>: %d", svc.ServiceName, labelFilter, k8sPods)
+		assert.Nil(s.T(), err)
+		assert.Equal(s.T(), svc.Status.Running, k8sPods, fmt.Sprintf("Wrong number of pods for kind of service <%s>", svc.ServiceType))
 	}
 }

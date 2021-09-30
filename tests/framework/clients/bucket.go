@@ -37,20 +37,24 @@ func CreateBucketOperation(k8sh *utils.K8sHelper, manifests installer.CephManife
 }
 
 func (b *BucketOperation) CreateBucketStorageClass(namespace string, storeName string, storageClassName string, reclaimPolicy string, region string) error {
-	return b.k8sh.ResourceOperation("create", b.manifests.GetBucketStorageClass(namespace, storeName, storageClassName, reclaimPolicy, region))
+	return b.k8sh.ResourceOperation("create", b.manifests.GetBucketStorageClass(storeName, storageClassName, reclaimPolicy, region))
 }
 
 func (b *BucketOperation) DeleteBucketStorageClass(namespace string, storeName string, storageClassName string, reclaimPolicy string, region string) error {
-	err := b.k8sh.ResourceOperation("delete", b.manifests.GetBucketStorageClass(namespace, storeName, storageClassName, reclaimPolicy, region))
+	err := b.k8sh.ResourceOperation("delete", b.manifests.GetBucketStorageClass(storeName, storageClassName, reclaimPolicy, region))
 	return err
 }
 
 func (b *BucketOperation) CreateObc(obcName string, storageClassName string, bucketName string, maxObject string, createBucket bool) error {
-	return b.k8sh.ResourceOperation("create", b.manifests.GetObc(obcName, storageClassName, bucketName, maxObject, createBucket))
+	return b.k8sh.ResourceOperation("create", b.manifests.GetOBC(obcName, storageClassName, bucketName, maxObject, createBucket))
 }
 
 func (b *BucketOperation) DeleteObc(obcName string, storageClassName string, bucketName string, maxObject string, createBucket bool) error {
-	return b.k8sh.ResourceOperation("delete", b.manifests.GetObc(obcName, storageClassName, bucketName, maxObject, createBucket))
+	return b.k8sh.ResourceOperation("delete", b.manifests.GetOBC(obcName, storageClassName, bucketName, maxObject, createBucket))
+}
+
+func (b *BucketOperation) UpdateObc(obcName string, storageClassName string, bucketName string, maxObject string, createBucket bool) error {
+	return b.k8sh.ResourceOperation("apply", b.manifests.GetOBC(obcName, storageClassName, bucketName, maxObject, createBucket))
 }
 
 // CheckOBC, returns true if the obc, secret and configmap are all in the "check" state,
@@ -122,4 +126,11 @@ func (b *BucketOperation) GetSecretKey(obcName string) (string, error) {
 	decode, _ := b64.StdEncoding.DecodeString(SecretKey)
 	return string(decode), nil
 
+}
+
+// Checks whether MaxObject is updated for ob
+func (b *BucketOperation) CheckOBMaxObject(obcName, maxobject string) bool {
+	obName, _ := b.k8sh.GetResource("obc", obcName, "--output", "jsonpath={.spec.objectBucketName}")
+	fetchMaxObject, _ := b.k8sh.GetResource("ob", obName, "--output", "jsonpath={.spec.endpoint.additionalConfig.maxObjects}")
+	return maxobject == fetchMaxObject
 }
