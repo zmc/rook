@@ -181,7 +181,8 @@ func (c *Cluster) makeSetServerAddrInitContainer(mgrConfig *mgrConfig, mgrModule
 	//  L: config-key set       mgr/<mod>/server_addr $(ROOK_CEPH_<MOD>_SERVER_ADDR)
 	//  M: config     set mgr.a mgr/<mod>/server_addr $(ROOK_CEPH_<MOD>_SERVER_ADDR)
 	//  N: config     set mgr.a mgr/<mod>/server_addr $(ROOK_CEPH_<MOD>_SERVER_ADDR) --force
-	cfgSetArgs := []string{"config", "set"}
+	cfgSetArgs := controller.AdminFlags(c.clusterInfo)
+	cfgSetArgs = append(cfgSetArgs, []string{"config", "set"}...)
 	cfgSetArgs = append(cfgSetArgs, fmt.Sprintf("mgr.%s", mgrConfig.DaemonID))
 	cfgPath := fmt.Sprintf("mgr/%s/%s/server_addr", mgrModule, mgrConfig.DaemonID)
 	cfgSetArgs = append(cfgSetArgs, cfgPath, controller.ContainerEnvVarReference(podIPEnvVar))
@@ -189,15 +190,10 @@ func (c *Cluster) makeSetServerAddrInitContainer(mgrConfig *mgrConfig, mgrModule
 	cfgSetArgs = append(cfgSetArgs, "--verbose")
 
 	container := v1.Container{
-		Name: "init-set-" + strings.ToLower(mgrModule) + "-server-addr",
-		Command: []string{
-			"ceph",
-		},
-		Args: append(
-			controller.AdminFlags(c.clusterInfo),
-			cfgSetArgs...,
-		),
-		Image: c.spec.CephVersion.Image,
+		Name:    "init-set-" + strings.ToLower(mgrModule) + "-server-addr",
+		Command: []string{"timeout"},
+		Args:    append([]string{"30s", "ceph"}, cfgSetArgs...),
+		Image:   c.spec.CephVersion.Image,
 		VolumeMounts: append(
 			controller.DaemonVolumeMounts(mgrConfig.DataPathMap, mgrConfig.ResourceName),
 			keyring.VolumeMount().Admin(),
