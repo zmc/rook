@@ -177,10 +177,10 @@ func TestSkipMonFailover(t *testing.T) {
 		assert.NoError(t, c.allowFailover(monName))
 	})
 
-	t.Run("skip failover for arbiter if an older version of ceph", func(t *testing.T) {
+	t.Run("skip failover for arbiter if an older version of ceph (disabled)", func(t *testing.T) {
 		c.arbiterMon = monName
 		c.ClusterInfo.CephVersion = version.CephVersion{Major: 16, Minor: 2, Extra: 6}
-		assert.Error(t, c.allowFailover(monName))
+		assert.NoError(t, c.allowFailover(monName))
 	})
 
 	t.Run("don't skip failover for arbiter if a newer version of ceph", func(t *testing.T) {

@@ -365,7 +365,8 @@ func (c *Cluster) allowFailover(name string) error {
 	}
 
 	// Ceph does not support updating the arbiter mon in older versions
-	return errors.Errorf("refusing to failover arbiter mon %q on a stretched cluster until upgrading to ceph version %s", name, arbiterFailoverSupportedCephVersion.String())
+	// This check is disabled for downstream only in 4.9
+	return nil
 }
 
 func (c *Cluster) removeOrphanMonResources() {
