@@ -51,6 +51,7 @@ type Param struct {
 	PluginPriorityClassName        string
 	ProvisionerPriorityClassName   string
 	VolumeReplicationImage         string
+	EnablePluginSelinuxHostMount   bool
 	EnableCSIHostNetwork           bool
 	EnableOMAPGenerator            bool
 	EnableRBDSnapshotter           bool
@@ -316,6 +317,10 @@ func (r *ReconcileCSI) startDrivers(ver *version.Info, ownerInfo *k8sutil.OwnerI
 		tp.RBDPluginUpdateStrategy = rollingUpdate
 	}
 
+	if strings.EqualFold(k8sutil.GetValue(r.opConfig.Parameters, "CSI_PLUGIN_ENABLE_SELINUX_HOST_MOUNT", "false"), "true") {
+		tp.EnablePluginSelinuxHostMount = true
+	}
+
 	logger.Infof("Kubernetes version is %s.%s", ver.Major, ver.Minor)
 
 	tp.ResizerImage = k8sutil.GetValue(r.opConfig.Parameters, "ROOK_CSI_RESIZER_IMAGE", DefaultResizerImage)
@@ -410,7 +415,7 @@ func (r *ReconcileCSI) startDrivers(ver *version.Info, ownerInfo *k8sutil.OwnerI
 		if multusApplied {
 			rbdPlugin.Spec.Template.Spec.HostNetwork = false
 		}
-		err = k8sutil.CreateDaemonSet(csiRBDPlugin, r.opConfig.OperatorNamespace, r.context.Clientset, rbdPlugin)
+		err = k8sutil.CreateDaemonSet(r.opManagerContext, csiRBDPlugin, r.opConfig.OperatorNamespace, r.context.Clientset, rbdPlugin)
 		if err != nil {
 			return errors.Wrapf(err, "failed to start rbdplugin daemonset %q", rbdPlugin.Name)
 		}
@@ -478,7 +483,7 @@ func (r *ReconcileCSI) startDrivers(ver *version.Info, ownerInfo *k8sutil.OwnerI
 		if multusApplied {
 			cephfsPlugin.Spec.Template.Spec.HostNetwork = false
 		}
-		err = k8sutil.CreateDaemonSet(csiCephFSPlugin, r.opConfig.OperatorNamespace, r.context.Clientset, cephfsPlugin)
+		err = k8sutil.CreateDaemonSet(r.opManagerContext, csiCephFSPlugin, r.opConfig.OperatorNamespace, r.context.Clientset, cephfsPlugin)
 		if err != nil {
 			return errors.Wrapf(err, "failed to start cephfs plugin daemonset %q", cephfsPlugin.Name)
 		}
@@ -570,7 +575,7 @@ func (r *ReconcileCSI) deleteCSIDriverResources(ver *version.Info, daemonset, de
 	if ver.Major > KubeMinMajor || ver.Major == KubeMinMajor && ver.Minor >= kubeMinVerForV1csiDriver {
 		csiDriverobj = v1CsiDriver{}
 	}
-	err := k8sutil.DeleteDaemonset(r.context.Clientset, r.opConfig.OperatorNamespace, daemonset)
+	err := k8sutil.DeleteDaemonset(r.opManagerContext, r.context.Clientset, r.opConfig.OperatorNamespace, daemonset)
 	if err != nil {
 		logger.Errorf("failed to delete the %q. %v", daemonset, err)
 		succeeded = false
@@ -645,7 +650,7 @@ func (r *ReconcileCSI) validateCSIVersion(ownerInfo *k8sutil.OwnerInfo) (*CephCS
 	job.Spec.Template.Spec.Affinity = &corev1.Affinity{
 		NodeAffinity: getNodeAffinity(r.opConfig.Parameters, provisionerNodeAffinityEnv, &corev1.NodeAffinity{}),
 	}
-	stdout, _, retcode, err := versionReporter.Run(timeout)
+	stdout, _, retcode, err := versionReporter.Run(r.opManagerContext, timeout)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to complete ceph CSI version job")
 	}

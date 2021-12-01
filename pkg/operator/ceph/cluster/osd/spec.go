@@ -297,7 +297,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo, provisionC
 			// Somehow when this happens and we try to update a deployment spec it fails with:
 			//  ValidationError(Pod.spec.volumes[7].projected): missing required field "sources"
 			if c.spec.Security.KeyManagementService.IsEnabled() && c.spec.Security.KeyManagementService.IsTLSEnabled() {
-				encryptedVol, _ := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails)
+				encryptedVol, _ := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails, "")
 				volumes = append(volumes, encryptedVol)
 			}
 		}
@@ -773,6 +773,22 @@ func (c *Cluster) getActivateOSDInitContainer(configDir, namespace, osdID string
 	return volume, container
 }
 
+// The blockdevmapper container copies the device node file, which is regarded as a device special file.
+// To be able to perform this action, the CAP_MKNOD capability is required.
+// Provide a securityContext which requests the MKNOD capability for the container to function properly.
+func getBlockDevMapperContext() *v1.SecurityContext {
+	privileged := controller.HostPathRequiresPrivileged()
+
+	return &v1.SecurityContext{
+		Capabilities: &v1.Capabilities{
+			Add: []v1.Capability{
+				"MKNOD",
+			},
+		},
+		Privileged: &privileged,
+	}
+}
+
 // Currently we can't mount a block mode pv directly to a privileged container
 // So we mount it to a non privileged init container and then copy it to a common directory mounted inside init container
 // and the privileged provision container.
@@ -792,7 +808,7 @@ func (c *Cluster) getPVCInitContainer(osdProps osdProperties) v1.Container {
 			},
 		},
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMount(osdProps.pvc.ClaimName)},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       osdProps.resources,
 	}
 }
@@ -824,7 +840,7 @@ func (c *Cluster) getPVCInitContainerActivate(mountPath string, osdProps osdProp
 			},
 		},
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(mountPath, osdProps.pvc.ClaimName)},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       osdProps.resources,
 	}
 }
@@ -883,7 +899,7 @@ func (c *Cluster) getPVCEncryptionOpenInitContainerActivate(mountPath string, os
 
 			// Now let's see if there is a TLS config we need to mount as well
 			if c.spec.Security.KeyManagementService.IsTLSEnabled() {
-				_, vaultVolMount := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails)
+				_, vaultVolMount := kms.VaultVolumeAndMount(c.spec.Security.KeyManagementService.ConnectionDetails, "")
 				getKEKFromKMSContainer.VolumeMounts = append(getKEKFromKMSContainer.VolumeMounts, vaultVolMount)
 			}
 
@@ -931,7 +947,7 @@ func (c *Cluster) generateEncryptionCopyBlockContainer(resources v1.ResourceRequ
 		// volumeMountPVCName is crucial, especially when the block we copy is the metadata block
 		// its value must be the name of the block PV so that all init containers use the same bridge (the emptyDir shared by all the init containers)
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(mountPath, volumeMountPVCName), getDeviceMapperMount()},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       resources,
 	}
 }
@@ -978,7 +994,7 @@ func (c *Cluster) getPVCMetadataInitContainer(mountPath string, osdProps osdProp
 				Name:      fmt.Sprintf("%s-bridge", osdProps.metadataPVC.ClaimName),
 			},
 		},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       osdProps.resources,
 	}
 }
@@ -1012,7 +1028,7 @@ func (c *Cluster) getPVCMetadataInitContainerActivate(mountPath string, osdProps
 		// We need to call getPvcOSDBridgeMountActivate() so that we can copy the metadata block into the "main" empty dir
 		// This empty dir is passed along every init container
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(mountPath, osdProps.pvc.ClaimName)},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       osdProps.resources,
 	}
 }
@@ -1038,7 +1054,7 @@ func (c *Cluster) getPVCWalInitContainer(mountPath string, osdProps osdPropertie
 				Name:      fmt.Sprintf("%s-bridge", osdProps.walPVC.ClaimName),
 			},
 		},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       osdProps.resources,
 	}
 }
@@ -1072,7 +1088,7 @@ func (c *Cluster) getPVCWalInitContainerActivate(mountPath string, osdProps osdP
 		// We need to call getPvcOSDBridgeMountActivate() so that we can copy the wal block into the "main" empty dir
 		// This empty dir is passed along every init container
 		VolumeMounts:    []v1.VolumeMount{getPvcOSDBridgeMountActivate(mountPath, osdProps.pvc.ClaimName)},
-		SecurityContext: controller.PodSecurityContext(),
+		SecurityContext: getBlockDevMapperContext(),
 		Resources:       osdProps.resources,
 	}
 }

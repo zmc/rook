@@ -6,8 +6,8 @@ set -eEuox pipefail
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 pushd "$SCRIPT_DIR"
 
-${HELM} template ../../cluster/charts/rook-ceph \
+${HELM} template ../../deploy/charts/rook-ceph \
                   --namespace rook-ceph \
-                  --set crds.enabled=false | ./keep-rbac-yaml.py > rbac.yaml
+                  --set crds.enabled=false | ./keep-rbac-yaml.sh > rbac.yaml
 
 popd

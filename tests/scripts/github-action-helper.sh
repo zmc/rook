@@ -162,9 +162,7 @@ function build_rook_all() {
 }
 
 function validate_yaml() {
-  cd cluster/examples/kubernetes/ceph
-
-  # create the Rook CRDs and other resources
+  cd deploy/examples
   kubectl create -f crds.yaml -f common.yaml
 
   # create the volume replication CRDs
@@ -172,6 +170,11 @@ function validate_yaml() {
   replication_url="https://raw.githubusercontent.com/csi-addons/volume-replication-operator/${replication_version}/config/crd/bases"
   kubectl create -f "${replication_url}/replication.storage.openshift.io_volumereplications.yaml"
   kubectl create -f "${replication_url}/replication.storage.openshift.io_volumereplicationclasses.yaml"
+
+  #create the KEDA CRDS
+  keda_version=2.4.0
+  keda_url="https://github.com/kedacore/keda/releases/download/v${keda_version}/keda-${keda_version}.yaml"
+  kubectl apply -f "${keda_url}"
 
   # skipping folders and some yamls that are only for openshift.
   manifests="$(find . -maxdepth 1 -type f -name '*.yaml' -and -not -name '*openshift*' -and -not -name 'scc*')"
@@ -182,7 +185,7 @@ function validate_yaml() {
 
 function create_cluster_prerequisites() {
   # this might be called from another function that has already done a cd
-  ( cd cluster/examples/kubernetes/ceph && kubectl create -f crds.yaml -f common.yaml )
+  ( cd deploy/examples && kubectl create -f crds.yaml -f common.yaml )
 }
 
 function deploy_manifest_with_local_build() {
@@ -192,8 +195,18 @@ function deploy_manifest_with_local_build() {
   kubectl create -f $1
 }
 
+function replace_ceph_image() {
+  local file="$1"  # parameter 1: the file in which to replace the ceph image
+  local ceph_image="${2:-}"  # parameter 2: the new ceph image to use
+  if [[ -z ${ceph_image} ]]; then
+    echo "No Ceph image given. Not adjusting manifests."
+    return 0
+  fi
+  sed -i "s|image: .*ceph/ceph:.*|image: ${ceph_image}|g" "${file}"
+}
+
 function deploy_cluster() {
-  cd cluster/examples/kubernetes/ceph
+  cd deploy/examples
   deploy_manifest_with_local_build operator.yaml
   sed -i "s|#deviceFilter:|deviceFilter: ${BLOCK/\/dev\/}|g" cluster-test.yaml
   kubectl create -f cluster-test.yaml
@@ -257,14 +270,14 @@ function create_LV_on_disk() {
   sudo vgcreate "$VG" "$BLOCK" || sudo vgcreate "$VG" "$BLOCK" || sudo vgcreate "$VG" "$BLOCK"
   sudo lvcreate -l 100%FREE -n "${LV}" "${VG}"
   tests/scripts/localPathPV.sh /dev/"${VG}"/${LV}
-  kubectl create -f cluster/examples/kubernetes/ceph/crds.yaml
-  kubectl create -f cluster/examples/kubernetes/ceph/common.yaml
+  kubectl create -f deploy/examples/crds.yaml
+  kubectl create -f deploy/examples/common.yaml
 }
 
 function deploy_first_rook_cluster() {
   BLOCK=$(sudo lsblk|awk '/14G/ {print $1}'| head -1)
   create_cluster_prerequisites
-  cd cluster/examples/kubernetes/ceph/
+  cd deploy/examples/
 
   deploy_manifest_with_local_build operator.yaml
   yq w -i -d1 cluster-test.yaml spec.dashboard.enabled false
@@ -276,14 +289,14 @@ function deploy_first_rook_cluster() {
 
 function deploy_second_rook_cluster() {
   BLOCK=$(sudo lsblk|awk '/14G/ {print $1}'| head -1)
-  cd cluster/examples/kubernetes/ceph/
+  cd deploy/examples/
   NAMESPACE=rook-ceph-secondary envsubst < common-second-cluster.yaml | kubectl create -f -
   sed -i 's/namespace: rook-ceph/namespace: rook-ceph-secondary/g' cluster-test.yaml
   yq w -i -d1 cluster-test.yaml spec.storage.deviceFilter "${BLOCK}"2
   yq w -i -d1 cluster-test.yaml spec.dataDirHostPath "/var/lib/rook-external"
   kubectl create -f cluster-test.yaml
   yq w -i toolbox.yaml metadata.namespace rook-ceph-secondary
-  deploy_manifest_with_local_build toolbox.yaml toolbox.yaml
+  deploy_manifest_with_local_build toolbox.yaml
 }
 
 function wait_for_rgw() {
@@ -334,7 +347,7 @@ function restart_operator () {
 }
 
 function write_object_to_cluster1_read_from_cluster2() {
-  cd cluster/examples/kubernetes/ceph/
+  cd deploy/examples/
   echo "[default]" > s3cfg
   echo "host_bucket = no.way.in.hell" >> ./s3cfg
   echo "use_https = False" >> ./s3cfg

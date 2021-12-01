@@ -39,7 +39,7 @@ From the root of your locally cloned Rook repo, go the monitoring directory:
 
 ```console
 $ git clone --single-branch --branch {{ branchName }} https://github.com/rook/rook.git
-cd rook/cluster/examples/kubernetes/ceph/monitoring
+cd rook/deploy/examples/monitoring
 ```
 
 Create the service monitor as well as the Prometheus server pod and service:
@@ -100,7 +100,7 @@ To enable the Ceph Prometheus alerts follow these steps:
 1. Create the RBAC rules to enable monitoring.
 
 ```console
-kubectl create -f cluster/examples/kubernetes/ceph/monitoring/rbac.yaml
+kubectl create -f deploy/examples/monitoring/rbac.yaml
 ```
 
 2. Make following changes to your CephCluster object (e.g., `cluster.yaml`).
@@ -151,7 +151,7 @@ with each update or upgrade. This should be done at the same time you update Roo
 like `common.yaml`.
 
 ```console
-kubectl apply -f cluster/examples/kubernetes/ceph/monitoring/rbac.yaml
+kubectl apply -f deploy/examples/monitoring/rbac.yaml
 ```
 
 > This is updated automatically if you are upgrading via the helm chart
@@ -209,4 +209,31 @@ labels:
   monitoring:
     prometheus: k8s
 [...]
+```
+
+### Horizontal Pod Scaling using Kubernetes Event-driven Autoscaling (KEDA)
+
+Using metrics exported from the Prometheus service, the horizontal pod scaling can use the custom metrics other than CPU and memory consumption. It can be done with help of Prometheus Scaler provided by the [KEDA](https://keda.sh/docs/2.4/scalers/prometheus/). See the [KEDA deployment guide](https://keda.sh/docs/2.4/deploy/) for details.
+
+Following is an example to autoscale RGW:
+```YAML
+apiVersion: keda.k8s.io/v1alpha1
+kind: ScaledObject
+metadata:
+ name: rgw-scale
+ namespace: rook-ceph
+spec:
+ scaleTargetRef:
+   kind: Deployment
+   deploymentName: rook-ceph-rgw-my-store-a # deployment for the autoscaling
+ minReplicaCount: 1
+ maxReplicaCount: 5
+ triggers:
+ - type: prometheus
+   metadata:
+     serverAddress: http://rook-prometheus.rook-ceph.svc:9090
+     metricName: collecting_ceph_rgw_put
+     query: |
+       sum(rate(ceph_rgw_put[2m])) # promethues query used for autoscaling
+     threshold: "90"
 ```

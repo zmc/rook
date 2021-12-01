@@ -72,7 +72,7 @@ func newCluster(c *cephv1.CephCluster, context *clusterd.Context, csiMutex *sync
 		// at this phase of the cluster creation process, the identity components of the cluster are
 		// not yet established. we reserve this struct which is filled in as soon as the cluster's
 		// identity can be established.
-		ClusterInfo:        client.AdminClusterInfo(c.Namespace),
+		ClusterInfo:        client.AdminClusterInfo(c.Namespace, c.Name),
 		Namespace:          c.Namespace,
 		Spec:               &c.Spec,
 		context:            context,
@@ -90,6 +90,7 @@ func (c *cluster) reconcileCephDaemons(rookImage string, cephVersion cephver.Cep
 	if err != nil {
 		return errors.Wrap(err, "failed to populate config override config map")
 	}
+	c.ClusterInfo.SetName(c.namespacedName.Name)
 
 	// Start the mon pods
 	controller.UpdateCondition(c.ClusterInfo.Context, c.context, c.namespacedName, cephv1.ConditionProgressing, v1.ConditionTrue, cephv1.ClusterProgressingReason, "Configuring Ceph Mons")

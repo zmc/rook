@@ -49,7 +49,7 @@ To deploy from a local build from your development environment:
 1. Install the helm chart:
 
 ```console
-cd cluster/charts/rook-ceph
+cd deploy/charts/rook-ceph
 helm install --create-namespace --namespace rook-ceph rook-ceph .
 ```
 
@@ -110,6 +110,7 @@ The following tables lists the configurable parameters of the rook-operator char
 | `csi.provisionerReplicas`           | Set replicas for csi provisioner deployment.                                                                                | `2`                                                       |
 | `csi.enableGrpcMetrics`             | Enable Ceph CSI GRPC Metrics.                                                                                               | `false`                                                   |
 | `csi.enableCSIHostNetwork`          | Enable Host Networking for Ceph CSI nodeplugins.                                                                            | `false`                                                   |
+| `csi.enablePluginSelinuxHostMount`  | Enable Host mount for /etc/selinux directory for Ceph CSI nodeplugins.                                                      | `false`                                                   |
 | `csi.provisionerTolerations`        | Array of tolerations in YAML format which will be added to CSI provisioner deployment.                                      | <none>                                                    |
 | `csi.provisionerNodeAffinity`       | The node labels for affinity of the CSI provisioner deployment (***)                                                        | <none>                                                    |
 | `csi.pluginTolerations`             | Array of tolerations in YAML format which will be added to CephCSI plugin DaemonSet                                         | <none>                                                    |
@@ -163,4 +164,4 @@ Alternatively, a yaml file that specifies the values for the above parameters (`
 helm install --namespace rook-ceph rook-ceph rook-release/rook-ceph -f values.yaml
 ```
 
-For example settings, see [values.yaml](https://github.com/rook/rook/tree/{{ branchName }}/cluster/charts/rook-ceph/values.yaml)
+For example settings, see [values.yaml](https://github.com/rook/rook/tree/{{ branchName }}/deploy/charts/rook-ceph/values.yaml)

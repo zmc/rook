@@ -92,7 +92,7 @@ func (c *ClusterController) startCleanUpJobs(cluster *cephv1.CephCluster, cephHo
 		cephv1.GetCleanupAnnotations(cluster.Spec.Annotations).ApplyToObjectMeta(&job.ObjectMeta)
 		cephv1.GetCleanupLabels(cluster.Spec.Labels).ApplyToObjectMeta(&job.ObjectMeta)
 
-		if err := k8sutil.RunReplaceableJob(c.context.Clientset, job, true); err != nil {
+		if err := k8sutil.RunReplaceableJob(c.OpManagerCtx, c.context.Clientset, job, true); err != nil {
 			logger.Errorf("failed to run cluster clean up job on node %q. %v", hostName, err)
 		}
 	}
@@ -232,7 +232,7 @@ func (c *ClusterController) getCephHosts(namespace string) ([]string, error) {
 	logger.Infof("existing ceph daemons in the namespace %q. %s", namespace, b.String())
 
 	for nodeName := range nodeNameList {
-		podHostName, err := k8sutil.GetNodeHostName(c.context.Clientset, nodeName)
+		podHostName, err := k8sutil.GetNodeHostName(c.OpManagerCtx, c.context.Clientset, nodeName)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to get hostname from node %q", nodeName)
 		}

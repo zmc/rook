@@ -59,7 +59,7 @@ the following:
 First get the latest common resources manifests that contain the latest changes for Rook v1.7.
 ```sh
 git clone --single-branch --depth=1 --branch v1.7.1 https://github.com/rook/rook.git
-cd rook/cluster/examples/kubernetes/ceph
+cd rook/deploy/examples
 ```
 
 If you have deployed the Rook Operator or the Ceph cluster into a different namespace than
@@ -103,7 +103,7 @@ time without compatibility support and without prior notice.
 We will do all our work in the Ceph example manifests directory.
 
 ```sh
-$ cd $YOUR_ROOK_REPO/cluster/examples/kubernetes/ceph/
+$ cd $YOUR_ROOK_REPO/deploy/examples/
 ```
 
 Unless your Rook cluster was created with customized namespaces, namespaces for Rook clusters are
@@ -275,7 +275,7 @@ needed by the Operator. Also update the Custom Resource Definitions (CRDs).
 Get the latest common resources manifests that contain the latest changes.
 ```sh
 git clone --single-branch --depth=1 --branch v1.7.0 https://github.com/rook/rook.git
-cd rook/cluster/examples/kubernetes/ceph
+cd rook/deploy/examples
 ```
 
 If you have deployed the Rook Operator or the Ceph cluster into a different namespace than
@@ -299,7 +299,7 @@ If you have [Prometheus monitoring](ceph-monitoring.md) enabled, follow the
 step to upgrade the Prometheus RBAC resources as well.
 
 ```sh
-kubectl apply -f cluster/examples/kubernetes/ceph/monitoring/rbac.yaml
+kubectl apply -f deploy/examples/monitoring/rbac.yaml
 ```
 
 ### **2. Update Ceph CSI versions**
@@ -415,6 +415,49 @@ Once the deployment has been updated, it checks if this is ok to continue. After
 updated we wait for things to settle (monitors to be in a quorum, PGs to be clean for OSDs, up for
 MDSes, etc.), then only when the condition is met we move to the next daemon. We repeat this process
 until all the daemons have been updated.
+
+### Disable `bluestore_fsck_quick_fix_on_mount`
+> **WARNING: There is a notice from Ceph for users upgrading to Ceph Pacific v16.2.6 or lower from
+> an earlier major version of Ceph. If you are upgrading to Ceph Pacific (v16), please upgrade to
+> v16.2.7 or higher if possible.**
+
+If you must upgrade to a version lower than v16.2.7, ensure that all instances of
+`bluestore_fsck_quick_fix_on_mount` in Rook-Ceph configs are removed.
+
+First, Ensure no references to `bluestore_fsck_quick_fix_on_mount` are present in the
+`rook-config-override` [ConfigMap](ceph-advanced-configuration.md#custom-cephconf-settings). Remove
+them if they exist.
+
+Finally, ensure no references to `bluestore_fsck_quick_fix_on_mount` are present in Ceph's internal
+configuration. Run all commands below from the [toolbox](ceph-toolbox.md).
+
+In the example below, two instances of `bluestore_fsck_quick_fix_on_mount` are present and are
+commented, and some output text has been removed for brevity.
+```sh
+ceph config-key dump
+```
+```
+{
+    "config/global/bluestore_fsck_quick_fix_on_mount": "false",       # <-- FALSE
+    "config/global/osd_scrub_auto_repair": "true",
+    "config/mgr.a/mgr/dashboard/server_port": "7000",
+    "config/mgr/mgr/balancer/active": "true",
+    "config/osd/bluestore_fsck_quick_fix_on_mount": "true",           # <-- TRUE
+}
+```
+
+Remove the configs for both with the commands below. Note how the `config/...` paths correspond to
+the output above.
+```sh
+ceph config-key rm config/global/bluestore_fsck_quick_fix_on_mount
+ceph config-key rm config/osd/bluestore_fsck_quick_fix_on_mount
+```
+
+It's best to run `ceph config-key dump` again to verify references to
+`bluestore_fsck_quick_fix_on_mount` are gone after this.
+
+See for more information, see here: https://github.com/rook/rook/issues/9185
+
 
 ### **Ceph images**
 
