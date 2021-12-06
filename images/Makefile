@@ -31,7 +31,7 @@ ceph.%:
 
 do.build: ceph.$(PLATFORM) ;
 build.all: ## Build images for all platforms.
-	$(MAKE) -C ceph prerequisites
+	$(MAKE) -C ceph prerequisites csv
 	$(MAKE) $(foreach p,$(PLATFORMS), ceph.$(p)) ;
 
 # ====================================================================================
